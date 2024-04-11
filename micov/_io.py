@@ -1,0 +1,241 @@
+import polars as pl
+import os
+import tarfile
+import time
+import math
+import io
+import gzip
+from tqdm import tqdm
+
+from ._cov import compress
+from ._constants import (BED_COV_SCHEMA, COLUMN_GENOME_ID, COLUMN_LENGTH,
+                         SAM_SUBSET_SCHEMA, COLUMN_CIGAR, COLUMN_STOP,
+                         COLUMN_START, COLUMN_SAMPLE_ID)
+from ._convert import cigar_to_lens
+
+
+class SetOfAll:
+    # forgot the formal name for this
+    def __contains__(self, other):
+        return True
+
+
+def _parse_bed_cov(data, feature_drop, feature_keep, lazy):
+    first_line = data.readline()
+    data.seek(0)
+
+    if len(first_line) == 0:
+        return None
+
+    if _test_has_header(first_line):
+        skip_rows = 1
+    else:
+        skip_rows = 0
+
+    frame = pl.read_csv(data.read(), separator='\t',
+                        new_columns=BED_COV_SCHEMA.columns,
+                        dtypes=BED_COV_SCHEMA.dtypes_dict,
+                        has_header=False, skip_rows=skip_rows).lazy()
+
+    if feature_drop is not None:
+        frame = frame.filter(~pl.col(COLUMN_GENOME_ID).is_in(feature_drop))
+
+    if feature_keep is not None:
+        frame = frame.filter(pl.col(COLUMN_GENOME_ID).is_in(feature_keep))
+
+    if lazy:
+        return frame
+    else:
+        return frame.collect()
+
+
+def parse_qiita_coverages(tgzs, *args, **kwargs):
+    if not isinstance(tgzs, (list, tuple, set, frozenset)):
+        tgzs = [tgzs, ]
+
+    compress_size = kwargs.get('compress_size', 50_000_000)
+
+    if compress_size is not None:
+        assert isinstance(compress_size, int) and compress_size >= 0
+    else:
+        compress_size = math.inf
+        kwargs['compress_size'] = compress_size
+
+    frame = _parse_qiita_coverages(tgzs[0], *args, **kwargs)
+    for tgz in tgzs[1:]:
+        next_frame = _parse_qiita_coverages(tgz, *args, **kwargs)
+        frame = _single_df(_check_and_compress([frame, next_frame],
+                                               compress_size))
+
+    if compress_size == math.inf:
+        return frame
+    else:
+        return _single_df(_check_and_compress([frame, ], compress_size=0))
+
+
+def _parse_qiita_coverages(tgz, compress_size=50_000_000, sample_keep=None,
+                           sample_drop=None, feature_keep=None,
+                           feature_drop=None, append_sample_id=False):
+    # compress_size=None to disable compression
+    fp = tarfile.open(tgz)
+
+    try:
+        fp.extractfile('coverage_percentage.txt')
+    except KeyError:
+        raise KeyError(f"{tgz} does not look like a Qiita coverage tgz")
+
+    if sample_keep is None:
+        sample_keep = SetOfAll()
+
+    if sample_drop is None:
+        sample_drop = set()
+
+    coverages = []
+    for name in fp.getnames():
+        if 'coverages/' not in name:
+            continue
+
+        _, filename = name.split('/')
+        sample_id = filename.rsplit('.', 1)[0]
+
+        if sample_id in sample_drop:
+            continue
+
+        if sample_id not in sample_keep:
+            continue
+
+        data = fp.extractfile(name)
+        frame = _parse_bed_cov(data, feature_drop, feature_keep, lazy=True)
+
+        if frame is None:
+            continue
+
+        if append_sample_id:
+            frame = frame.with_columns(pl.lit(sample_id).alias(COLUMN_SAMPLE_ID))
+
+        coverages.append(frame.collect())
+        coverages = _check_and_compress(coverages, compress_size)
+
+    if compress_size == math.inf:
+        return _single_df(coverages)
+    else:
+        return _single_df(_check_and_compress(coverages, compress_size=0))
+
+
+def _single_df(coverages):
+    if len(coverages) > 1:
+        df = pl.concat(coverages)
+    elif len(coverages) == 0:
+        raise ValueError("No coverages")
+    else:
+        df = coverages[0]
+
+    return df
+
+
+def _check_and_compress(coverages, compress_size):
+    rowcount = sum([len(df) for df in coverages])
+    if rowcount > compress_size:
+        df = compress(_single_df(coverages))
+        coverages = [df, ]
+    return coverages
+
+
+def _test_has_header(line):
+    if isinstance(line, bytes):
+        line = line.decode('utf-8')
+
+    genome_id_columns = ('genome-id', 'genome_id', 'feature-id',
+                         'feature_id')
+
+    if line.startswith('#'):
+        has_header = True
+    elif line.split('\t')[0] in genome_id_columns:
+        has_header = True
+    elif not line.split('\t')[1].strip().isdigit():
+        has_header = True
+    else:
+        has_header = False
+
+    return has_header
+
+
+def parse_genome_lengths(lengths):
+    with open(lengths) as fp:
+        first_line = fp.readline()
+
+    has_header = _test_has_header(first_line)
+    df = pl.read_csv(lengths, separator='\t', has_header=has_header)
+    genome_id_col = df.columns[0]
+    length_col = df.columns[1]
+
+    genome_ids = df[genome_id_col]
+    if len(genome_ids) != len(set(genome_ids)):
+        raise ValueError(f"'{genome_id_col}' is not unique")
+
+    if not df[length_col].dtype.is_integer():
+        raise ValueError(f"'{length_col}' is not integer'")
+
+    if df[length_col].min() <= 0:
+        raise ValueError(f"Lengths of zero or less cannot be used")
+
+    rename = {genome_id_col: COLUMN_GENOME_ID,
+              length_col: COLUMN_LENGTH}
+    return df[[genome_id_col, length_col]].rename(rename)
+
+
+def parse_sam_to_df(sam):
+    df = pl.read_csv(sam, separator='\t', has_header=False,
+                     columns=SAM_SUBSET_SCHEMA.column_indices,
+                     comment_prefix='@',
+                     new_columns=SAM_SUBSET_SCHEMA.columns).lazy()
+
+    return (df
+             .with_columns(stop=pl.col(COLUMN_CIGAR).map_elements(cigar_to_lens))
+             .with_columns(stop=pl.col(COLUMN_STOP) + pl.col(COLUMN_START))
+             .collect())
+
+
+def _add_file(tf, name, data):
+    ti = tarfile.TarInfo(name)
+    ti.size = len(data)
+    ti.mtime = int(time.time())
+    tf.addfile(ti, io.BytesIO(data))
+
+
+def write_qiita_cov(name, paths):
+    tf = tarfile.open(name, "w:gz")
+
+    covdataname = 'coverage_percentage.txt'
+    covdata = b'foobar'
+
+    # write real data, and the other files it needs...
+    _add_file(tf, covdataname, covdata)
+
+    for p in tqdm(paths):
+        with open(p, 'rb') as fp:
+            data = fp.read()
+
+        if len(data) == 0:
+            continue
+
+        base = os.path.basename(p)
+        if base.endswith('.cov.gz'):
+            data = gzip.decompress(data)
+            name = base.rsplit('.', 2)[0] + '.cov'
+        elif base.endswith('.cov'):
+            name = base
+        else:
+            name = base + '.cov'
+
+        name = f'coverages/{name}'
+
+        _add_file(tf, name, data)
+
+    tf.close()
+
+
+def parse_sample_metadata(path):
+    return pl.read_csv(path, separator='\t', infer_schema_length=0)
+
+
