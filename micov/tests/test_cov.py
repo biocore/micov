@@ -9,7 +9,7 @@ import polars.testing as plt
 
 class CovTests(unittest.TestCase):
     def test_compress(self):
-        exp = pl.DataFrame([['G123', 10, 100],
+        exp = pl.DataFrame([['G123', 10, 110],
                             ['G456', 200, 300],
                             ['G456', 400, 500]],
                            schema=BED_COV_SCHEMA.dtypes_flat)
@@ -20,6 +20,7 @@ class CovTests(unittest.TestCase):
                              ['G456', 201, 300],
                              ['G123', 90, 100],
                              ['G123', 51, 89],
+                             ['G123', 101, 110],
                              ['G456', 400, 500]],
                             schema=BED_COV_SCHEMA.dtypes_flat)
         obs = compress(data).sort(COLUMN_GENOME_ID)

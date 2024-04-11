@@ -59,9 +59,14 @@ def _compress(genome, rows):
 
 def compress(df):
     compressed = []
-    for genome, grp in df.group_by([COLUMN_GENOME_ID, ]):
-        rows = grp[[COLUMN_START, COLUMN_STOP]].sort(COLUMN_START).to_numpy()
-        grp_compressed = _compress(genome[0], rows)
+    for (genome, ), grp in df.group_by([COLUMN_GENOME_ID, ]):
+        rows = (grp
+                 .lazy()
+                 .select([COLUMN_START, COLUMN_STOP])
+                 .sort(COLUMN_START)
+                 .collect()
+                 .to_numpy())
+        grp_compressed = _compress(genome, rows)
         grp_compressed_df = pl.DataFrame(grp_compressed,
                                          schema=BED_COV_SCHEMA.dtypes_flat)
         compressed.append(grp_compressed_df)

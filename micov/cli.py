@@ -108,6 +108,7 @@ def compress(sam, output):
             click.echo("File appears empty...", err=True)
             sys.exit(0)
 
+        # TODO: this
         # load our first batch. it is possible this is the only block we will
         # need to load
         # ...this should actually be better, something like
@@ -127,7 +128,7 @@ def compress(sam, output):
             next_df = _cov_compress(parse_sam_to_df(io.BytesIO(b''.join(buf))))
             current_df = _cov_compress(pl.concat([current_df, next_df]))
 
-    # TODO: support sam/bam and bed
+    # TODO: support bed
     # we need to allow easy exposed support to compress .cov
     # and would allow us to process individual large bams,
     # and compress after the fact

@@ -1,4 +1,6 @@
 import matplotlib.pyplot as plt
+import numba
+import numpy as np
 from matplotlib import collections as mc
 import polars as pl
 import scipy.stats as ss
@@ -21,7 +23,8 @@ def slice_positions(positions, id_):
     return (positions
                 .lazy()
                 .filter(pl.col(COLUMN_SAMPLE_ID) == id_)
-                .select(pl.col(COLUMN_GENOME_ID), pl.col(COLUMN_START), pl.col(COLUMN_STOP)))
+                .select(pl.col(COLUMN_GENOME_ID), pl.col(COLUMN_START),
+                        pl.col(COLUMN_STOP)))
 
 
 def per_sample_plots(all_coverage, all_covered_positions, metadata,
@@ -33,6 +36,8 @@ def per_sample_plots(all_coverage, all_covered_positions, metadata,
                    sample_metadata_column, output)
         position_plot(metadata, all_coverage, all_covered_positions, genome,
                       sample_metadata_column, output, scale=None)
+        position_plot(metadata, all_coverage, all_covered_positions, genome,
+                      sample_metadata_column, output, scale=10000)
 
 
 def cumulative(metadata, coverage, positions, target, variable, output):
@@ -49,7 +54,7 @@ def cumulative(metadata, coverage, positions, target, variable, output):
     if len(coverage) == 0:
         raise ValueError()
 
-    lengths = coverage[[COLUMN_GENOME_ID,COLUMN_LENGTH]].unique()
+    lengths = coverage[[COLUMN_GENOME_ID, COLUMN_LENGTH]].unique()
 
     if len(lengths) > 1:
         raise ValueError()
@@ -140,6 +145,11 @@ def non_cumulative(metadata, coverage, target, variable, output):
     plt.close()
 
 
+@numba.jit(nopython=True)
+def _get_covered(x_start_stop):
+    return [[(x, start), (x, stop)] for (x, start, stop) in x_start_stop]
+
+
 def position_plot(metadata, coverage, positions, target, variable, output, scale=None):
     plt.figure(figsize=(12, 8))
     ax = plt.gca()
@@ -147,30 +157,40 @@ def position_plot(metadata, coverage, positions, target, variable, output, scale
     colors = []
     target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target).lazy()
 
-    for ((name, ), grp), color in zip(metadata.group_by([variable, ], maintain_order=True), range(0, 10)):
+    for ((name, ), grp), color in zip(metadata.group_by([variable, ],
+                                                        maintain_order=True),
+                                      range(0, 10)):
         color = f'C{color}'
         grp_coverage = ordered_coverage(coverage, grp, target)
 
         labels.append(name)
         colors.append(color)
-        length = grp_coverage['length'].item(0)
+        length = grp_coverage[COLUMN_LENGTH].item(0)
 
         hist_x = []
         hist_y = []
-        for sid, gid, x in grp_coverage[['sample_id', 'genome_id', 'x']].rows():
+        for sid, gid, x in grp_coverage[[COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, 'x']].rows():
             cur_positions = (positions.lazy()
-                                 .filter(pl.col('sample_id') == sid)
-                                 .join(grp_coverage.lazy(), on='sample_id')
-                                 .select(pl.col('x'), pl.col('start') / length, pl.col('stop') / length))
+                                 .filter(pl.col(COLUMN_SAMPLE_ID) == sid)
+                                 .join(grp_coverage.lazy(), on=COLUMN_SAMPLE_ID)
+                                 .select(pl.col('x'),
+                                         pl.col(COLUMN_START) / length,
+                                         pl.col(COLUMN_STOP) / length))
 
             if scale is None:
-                covered_positions = [[(x, start), (x, stop)] for (x, start, stop) in cur_positions.collect().rows()]
-                lc = mc.LineCollection(covered_positions, color=color, linewidths=0.5, alpha=0.7)
+                covered_positions = _get_covered(cur_positions.collect().to_numpy())
+                lc = mc.LineCollection(covered_positions, color=color,
+                                       linewidths=0.5, alpha=0.7)
                 ax.add_collection(lc)
             else:
-                covered_positions = pl.concat([cur_positions.select(pl.col('start').alias('common')),
-                                               cur_positions.select(pl.col('stop').alias('common'))]).collect()
-                obs_count, obs_bins = np.histogram(covered_positions, bins=scale, range=(0, 1))
+                covered_positions = pl.concat([
+                    cur_positions.select(pl.col('start').alias('common')),
+                    cur_positions.select(pl.col('stop').alias('common'))
+                ]).collect()
+
+                obs_count, obs_bins = np.histogram(covered_positions,
+                                                   bins=scale,
+                                                   range=(0, 1))
                 obs_bins = obs_bins[:-1][obs_count > 0]
                 hist_x.extend([x for _ in obs_bins])
                 hist_y.extend([b for b in obs_bins])
@@ -184,9 +204,11 @@ def position_plot(metadata, coverage, positions, target, variable, output, scale
     if scale is None:
         ax.set_title(f'Position plot: {target} ({length}bp)', fontsize=20)
         ax.set_ylabel('Unit normalized genome position', fontsize=20)
+        scaletag = ""
     else:
         ax.set_title(f'Scaled position plot: {target} ({length}bp)', fontsize=20)
         ax.set_ylabel(f'Coverage (1/{scale})th scale', fontsize=20)
+        scaletag = f"-1_{scale}th-scale"
 
     ax.set_xlabel('Proportion of samples', fontsize=20)
 
@@ -198,5 +220,5 @@ def position_plot(metadata, coverage, positions, target, variable, output, scale
     ax.tick_params(axis='both', which='major', labelsize=16)
     ax.tick_params(axis='both', which='minor', labelsize=16)
     plt.tight_layout()
-    plt.savefig(f'{output}.{target}.{variable}.position-plot.png')
+    plt.savefig(f'{output}.{target}.{variable}.position-plot{scaletag}.png')
     plt.close()
