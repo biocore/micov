@@ -170,7 +170,7 @@ def position_plot(metadata, coverage, positions, target, variable, output, scale
         hist_x = []
         hist_y = []
         for sid, gid, x in grp_coverage[[COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, 'x']].rows():
-            cur_positions = (positions.lazy()
+            cur_positions = (target_positions
                                  .filter(pl.col(COLUMN_SAMPLE_ID) == sid)
                                  .join(grp_coverage.lazy(), on=COLUMN_SAMPLE_ID)
                                  .select(pl.col('x'),

@@ -236,6 +236,5 @@ def write_qiita_cov(name, paths):
 
 
 def parse_sample_metadata(path):
-    return pl.read_csv(path, separator='\t', infer_schema_length=0)
-
-
+    df = pl.read_csv(path, separator='\t', infer_schema_length=0)
+    return df.rename({df.columns[0]: COLUMN_SAMPLE_ID})
