@@ -26,6 +26,7 @@ def cigar_to_lens(cigar):
     This function significantly benefits from LRU cache because high-frequency
     CIGAR strings (e.g., "150M") are common and redundant calculations can be
     saved.
+
     """
     align, offset = 0, 0
     n = ''  # current step size

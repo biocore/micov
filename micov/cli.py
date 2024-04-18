@@ -1,3 +1,5 @@
+"""microbiome coverage CLI."""
+
 from contextlib import contextmanager
 import click
 import lzma
@@ -21,6 +23,7 @@ def _first_col_as_set(fp):
 
 @click.group()
 def cli():
+    """micov: microbiome coverage."""
     pass
 
 
@@ -44,7 +47,7 @@ def cli():
               help="Genome lengths")
 def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
                    features_to_keep, features_to_ignore, output, lengths):
-    """Compute aggregated coverage from one or more Qiita coverage files"""
+    """Compute aggregated coverage from one or more Qiita coverage files."""
     if samples_to_keep:
         samples_to_keep = _first_col_as_set(samples_to_keep)
 
@@ -74,7 +77,7 @@ def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
 
 @contextmanager
 def _reader(sam):
-    """Indirection to support reading from stdin or a file"""
+    """Indirection to support reading from stdin or a file."""
     if sam == '-' or sam is None:
         data = sys.stdin.buffer
         yield data
@@ -88,7 +91,7 @@ def _reader(sam):
 @click.option('--sam', type=click.Path(exists=True), required=False)
 @click.option('--output', type=click.Path(exists=False))
 def compress(sam, output):
-    """Compress BAM/SAM mapping data
+    """Compress BAM/SAM mapping data.
 
     This command can work with pipes, e.g.:
 
@@ -139,11 +142,11 @@ def compress(sam, output):
 @click.option('--paths', type=click.Path(exists=True), required=True)
 @click.option('--output', type=click.Path(exists=False))
 def consolidate(paths, output):
-    """Consolidate coverage files into a Qiita-like coverage.tgz"""
-    paths = [l.strip() for l in open(paths)]
-    for p in paths:
-        if not os.path.exists(p):
-            raise IOError(f"{p} not found")
+    """Consolidate coverage files into a Qiita-like coverage.tgz."""
+    paths = [path.strip() for path in open(paths)]
+    for path in paths:
+        if not os.path.exists(path):
+            raise IOError(f"{path} not found")
     write_qiita_cov(output, paths)
 
 
@@ -167,7 +170,7 @@ def consolidate(paths, output):
               help="Genome lengths")
 def per_sample_group(qiita_coverages, sample_metadata, sample_metadata_column,
                      features_to_keep, features_to_ignore, output, lengths):
-    """Generate sample group plots and coverage data"""
+    """Generate sample group plots and coverage data."""
     if features_to_keep:
         features_to_keep = _first_col_as_set(features_to_keep)
 
@@ -204,57 +207,12 @@ def per_sample_group(qiita_coverages, sample_metadata, sample_metadata_column,
     all_covered_positions = pl.concat(all_covered_positions)
     all_coverage = pl.concat(all_coverage).collect()
 
-    all_coverage.write_csv(output + '.coverage', separator='\t', include_header=True)
-    all_covered_positions.write_csv(output + '.covered_positions', separator='\t', include_header=True)
+    all_coverage.write_csv(output + '.coverage', separator='\t',
+                           include_header=True)
+    all_covered_positions.write_csv(output + '.covered_positions', separator='\t',
+                                    include_header=True)
     per_sample_plots(all_coverage, all_covered_positions, metadata,
                      sample_metadata_column, output)
-
-#@cli.command()
-#@click.option('--input', type=click.Path(exists=True), required=True,
-#              help="SAM mapping output (can be .sam, or sam.xz)")
-#@click.option('--output', type=click.Path(exists=False), required=True,
-#              help="Output coverage DB")
-#@click.option('--lengths', type=click.Path(exists=True), required=True,
-#              help="Genome to genome length")
-#def create_binary(input, output, lengths):
-#    if input.endswith('.xz'):
-#        open_f = lzma.open
-#    else:
-#        open_f = open
-#
-#    lengths = parse_genome_lengths(open(lengths))
-#    sam_to_binary_db(open_f(input), output, lengths)
-#
-#
-#@cli.command()
-#@click.option('--coverage-db', '-c', multiple=True, required=True,
-#              type=click.Path(exists=True), help="Coverages to merge")
-#@click.option('--output', '-o', required=True, type=click.Path(exists=False),
-#              help="Output coverage database")
-#def merge(coverage_db, output):
-#    merge_dbs(coverage_db, output)
-#
-#
-#@cli.command()
-#@click.option('--coverage-db', '-c', required=True,
-#              type=click.Path(exists=True), help='Coverage db to export from')
-#@click.option('--output', '-o', required=True,
-#              type=click.Path(exists=False, allow_dash=True),
-#              help='Output filename, use - to stream to stdout')
-#@click.option('--format', '-f', required=True,
-#              type=click.Choice(['fasta', 'bed']),
-#              help="Output format")
-#@click.option('--genome-id', '-g', required=True, type=str,
-#              help="The genome ID to export")
-#def export(coverage_db, output, format, genome_id):
-#    exported = export_db(coverage_db, genome_id, format)
-#
-#    if output == '-':
-#        import sys
-#        sys.stdout.write(exported)
-#    else:
-#        with open(output, 'w'): as fp:
-#            fp.write(exported)
 
 
 if __name__ == '__main__':

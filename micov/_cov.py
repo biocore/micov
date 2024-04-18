@@ -21,7 +21,7 @@ def coverage_percent(coverages, lengths):
                .agg(pl.col(COLUMN_COVERED).sum())
                .join(lengths.lazy(), on=COLUMN_GENOME_ID)
                .with_columns(((pl.col(COLUMN_COVERED) /
-                               pl.col(COLUMN_LENGTH)) * 100).alias(COLUMN_PERCENT_COVERED)))
+                               pl.col(COLUMN_LENGTH)) * 100).alias(COLUMN_PERCENT_COVERED)))  # noqa
 
 
 @numba.jit(nopython=True)

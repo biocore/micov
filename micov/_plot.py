@@ -75,8 +75,8 @@ def cumulative(metadata, coverage, positions, target, variable, output):
         for id_ in grp_coverage[COLUMN_SAMPLE_ID]:
             next_ = slice_positions(target_positions, id_).collect()
             current = compress(pl.concat([current, next_]))
-            per_cov = coverage_percent(current, lengths).collect()[COLUMN_PERCENT_COVERED].item(0)
-            cur_y.append(per_cov)
+            per_cov = coverage_percent(current, lengths).collect()
+            cur_y.append(per_cov[COLUMN_PERCENT_COVERED].item(0))
 
         covs.append(cur_y)
         plt.plot(cur_x, cur_y)
@@ -169,7 +169,9 @@ def position_plot(metadata, coverage, positions, target, variable, output, scale
 
         hist_x = []
         hist_y = []
-        for sid, gid, x in grp_coverage[[COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, 'x']].rows():
+
+        col_selection = [COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, 'x']
+        for sid, gid, x in grp_coverage[col_selection].rows():
             cur_positions = (target_positions
                                  .filter(pl.col(COLUMN_SAMPLE_ID) == sid)
                                  .join(grp_coverage.lazy(), on=COLUMN_SAMPLE_ID)
