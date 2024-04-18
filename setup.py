@@ -15,7 +15,6 @@ setup(name='micov',
           'matplotlib',
           'scipy',
           'click',
-          'tqdm',
           'numba'],
       entry_points='''
           [console_scripts]

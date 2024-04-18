@@ -1,13 +1,15 @@
+from contextlib import contextmanager
+import lzma
 import polars as pl
 import os
+import sys
 import tarfile
 import time
 import math
 import io
 import gzip
-from tqdm import tqdm
 
-from ._cov import compress
+from ._cov import compress, coverage_percent
 from ._constants import (BED_COV_SCHEMA, COLUMN_GENOME_ID, COLUMN_LENGTH,
                          SAM_SUBSET_SCHEMA, COLUMN_CIGAR, COLUMN_STOP,
                          COLUMN_START, COLUMN_SAMPLE_ID)
@@ -184,6 +186,7 @@ def parse_genome_lengths(lengths):
     return df[[genome_id_col, length_col]].rename(rename)
 
 
+# TODO: this is not the greatest method name
 def parse_sam_to_df(sam):
     df = pl.read_csv(sam, separator='\t', has_header=False,
                      columns=SAM_SUBSET_SCHEMA.column_indices,
@@ -203,16 +206,11 @@ def _add_file(tf, name, data):
     tf.addfile(ti, io.BytesIO(data))
 
 
-def write_qiita_cov(name, paths):
+def write_qiita_cov(name, paths, lengths):
     tf = tarfile.open(name, "w:gz")
 
-    covdataname = 'coverage_percentage.txt'
-    covdata = b'foobar'
-
-    # write real data, and the other files it needs...
-    _add_file(tf, covdataname, covdata)
-
-    for p in tqdm(paths):
+    coverages = []
+    for p in paths:
         with open(p, 'rb') as fp:
             data = fp.read()
 
@@ -231,6 +229,24 @@ def write_qiita_cov(name, paths):
         name = f'coverages/{name}'
 
         _add_file(tf, name, data)
+        current_coverage = _parse_bed_cov(io.BytesIO(data), None, None, False)
+        coverages.append(current_coverage)
+        coverages = _check_and_compress(coverages, compress_size=50_000_000)
+
+    coverage = _single_df(_check_and_compress(coverages, compress_size=0))
+
+    covdataname = 'artifact.cov'
+    covdata = io.BytesIO()
+    coverage.write_csv(covdata, separator='\t', include_header=True)
+    covdata.seek(0)
+    _add_file(tf, covdataname, covdata.read())
+
+    genome_coverage = coverage_percent(coverage, lengths).collect()
+    pername = 'coverage_percentage.txt'
+    perdata = io.BytesIO()
+    genome_coverage.write_csv(perdata, separator='\t', include_header=True)
+    perdata.seek(0)
+    _add_file(tf, pername, perdata.read())
 
     tf.close()
 
@@ -238,3 +254,37 @@ def write_qiita_cov(name, paths):
 def parse_sample_metadata(path):
     df = pl.read_csv(path, separator='\t', infer_schema_length=0)
     return df.rename({df.columns[0]: COLUMN_SAMPLE_ID})
+
+
+@contextmanager
+def _reader(sam):
+    """Indirection to support reading from stdin or a file."""
+    if sam == '-' or sam is None:
+        data = sys.stdin.buffer
+        yield data
+    elif isinstance(sam, io.BytesIO):
+        yield sam
+    else:
+        with lzma.open(sam) as fp:
+            data = fp.read()
+            yield data
+
+
+def _buf_to_bytes(buf):
+    return io.BytesIO(b''.join(buf))
+
+
+def compress_from_stream(sam, bufsize=1_000_000_000):
+    current_df = pl.DataFrame([], schema=BED_COV_SCHEMA.dtypes_flat)
+    with _reader(sam) as data:
+        buf = data.readlines(bufsize)
+
+        if len(buf) == 0:
+            return None
+
+        while len(buf) > 0:
+            next_df = compress(parse_sam_to_df(_buf_to_bytes(buf)))
+            current_df = compress(pl.concat([current_df, next_df]))
+            buf = data.readlines(bufsize)
+
+    return current_df

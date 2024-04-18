@@ -2,6 +2,5 @@ polars
 matplotlib
 scipy
 click
-tqdm
 numba
 versioneer

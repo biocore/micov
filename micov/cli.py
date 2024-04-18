@@ -1,16 +1,14 @@
 """microbiome coverage CLI."""
 
-from contextlib import contextmanager
 import click
-import lzma
 import polars as pl
 import os
 import io
 import sys
 import tqdm
 from ._io import (parse_genome_lengths, parse_qiita_coverages, parse_sam_to_df,
-                  write_qiita_cov, parse_sample_metadata)
-from ._cov import coverage_percent, compress as _cov_compress
+                  write_qiita_cov, parse_sample_metadata, compress_from_stream)
+from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots
@@ -75,18 +73,6 @@ def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
                               include_header=True)
 
 
-@contextmanager
-def _reader(sam):
-    """Indirection to support reading from stdin or a file."""
-    if sam == '-' or sam is None:
-        data = sys.stdin.buffer
-        yield data
-    else:
-        with lzma.open(sam) as fp:
-            data = fp.read()
-            yield data
-
-
 @cli.command()
 @click.option('--sam', type=click.Path(exists=True), required=False)
 @click.option('--output', type=click.Path(exists=False))
@@ -100,54 +86,34 @@ def compress(sam, output):
     if output == '-' or output is None:
         output = sys.stdout
 
-    # up to 1gb on read before we trigger a compress
-    bufsize = 1_000_000_000
-
     # compress data in blocks to avoid loading full mapping data into memory
     # and compress as we go along.
-    with _reader(sam) as data:
-        buf = data.readlines(bufsize)
-        if len(buf) == 0:
-            click.echo("File appears empty...", err=True)
-            sys.exit(0)
 
-        # TODO: this
-        # load our first batch. it is possible this is the only block we will
-        # need to load
-        # ...this should actually be better, something like
-        # current_df = pl.DataFrame([], schema=...)
-        # while len(buf) > 0:
-        #     next_df = _cov_compress(parse_sam_to_df(io.BytesIO(b''.join(buf))))
-        #     current_df = _cov_compress(pl.concat([current_df, next_df]))
-        #     buf = data.readlines(bufsize)
-
-        current_df = _cov_compress(parse_sam_to_df(io.BytesIO(b''.join(buf))))
-        while len(buf) > 0:
-            # read more data
-            buf = data.readlines(bufsize)
-            if len(buf) == 0:
-                break
-
-            next_df = _cov_compress(parse_sam_to_df(io.BytesIO(b''.join(buf))))
-            current_df = _cov_compress(pl.concat([current_df, next_df]))
+    df = compress_from_stream(sam)
+    if df is None or len(df) == 0:
+        click.echo("File appears empty...", err=True)
+        sys.exit(0)
 
     # TODO: support bed
     # we need to allow easy exposed support to compress .cov
     # and would allow us to process individual large bams,
     # and compress after the fact
-    current_df.write_csv(output, separator='\t', include_header=True)
+    df.write_csv(output, separator='\t', include_header=True)
 
 
 @cli.command()
 @click.option('--paths', type=click.Path(exists=True), required=True)
 @click.option('--output', type=click.Path(exists=False))
-def consolidate(paths, output):
+@click.option('--lengths', type=click.Path(exists=True), required=True,
+              help="Genome lengths")
+def consolidate(paths, output, lengths):
     """Consolidate coverage files into a Qiita-like coverage.tgz."""
     paths = [path.strip() for path in open(paths)]
     for path in paths:
         if not os.path.exists(path):
             raise IOError(f"{path} not found")
-    write_qiita_cov(output, paths)
+    lengths = parse_genome_lengths(lengths)
+    write_qiita_cov(output, paths, lengths)
 
 
 @cli.command()
