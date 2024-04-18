@@ -12,7 +12,7 @@ Coverage data can be aggregated into Qiita-like `coverage.tgz` files. Per-sample
 coverages can be then be harvested from multiple `coverage.tgz` files.
 
 Why `coverage.tgz` files? Qiita provides a rich set of already computed 
-coverage data in a BED compatible format. Rather than invent 
+coverage data in a BED3 compatible format. Rather than invent 
 *yet-another-format*, we opted to establish functionality on what is readily
 available from that resource.
 
@@ -23,7 +23,7 @@ into that. It is likely the dependency pins can be relaxed but we haven't
 verified that just yet.
 
 ```bash
-$ conda env create -n micov --file micov.conda.yml
+$ conda env create -n micov -c conda-forge polars matplotlib scipy click tqdm numba
 ```
 
 ## Examples
