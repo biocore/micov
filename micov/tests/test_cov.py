@@ -9,7 +9,10 @@ import polars.testing as plt
 
 class CovTests(unittest.TestCase):
     def test_compress(self):
-        exp = pl.DataFrame([['G123', 10, 110],
+        exp = pl.DataFrame([['G123', 10, 50],
+                            ['G123', 51, 89],
+                            ['G123', 90, 100],
+                            ['G123', 101, 110],
                             ['G456', 200, 300],
                             ['G456', 400, 500]],
                            schema=BED_COV_SCHEMA.dtypes_flat)

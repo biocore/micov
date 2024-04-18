@@ -38,7 +38,7 @@ def _compress(genome, rows):
             # case 1: no active range, start active range.
             start_val = start
             end_val = stop
-        elif end_val >= start - 1:
+        elif end_val >= start:
             # case 2: active range continues through this range
             # extend active range
             end_val = max(end_val, stop)
