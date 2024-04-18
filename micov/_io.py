@@ -274,7 +274,16 @@ def _buf_to_bytes(buf):
     return io.BytesIO(b''.join(buf))
 
 
-def compress_from_stream(sam, bufsize=1_000_000_000):
+def _subset_sam_to_bed(df):
+    return df[list(BED_COV_SCHEMA.columns)]
+
+
+def compress_from_stream(sam, bufsize=1_000_000_000, disable_compression=False):
+    if disable_compression:
+        compress_f = _subset_sam_to_bed
+    else:
+        compress_f = compress
+
     current_df = pl.DataFrame([], schema=BED_COV_SCHEMA.dtypes_flat)
     with _reader(sam) as data:
         buf = data.readlines(bufsize)
@@ -283,8 +292,8 @@ def compress_from_stream(sam, bufsize=1_000_000_000):
             return None
 
         while len(buf) > 0:
-            next_df = compress(parse_sam_to_df(_buf_to_bytes(buf)))
-            current_df = compress(pl.concat([current_df, next_df]))
+            next_df = compress_f(parse_sam_to_df(_buf_to_bytes(buf)))
+            current_df = compress_f(pl.concat([current_df, next_df]))
             buf = data.readlines(bufsize)
 
     return current_df

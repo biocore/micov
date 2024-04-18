@@ -305,6 +305,26 @@ class IOTests(unittest.TestCase):
         obs = compress_from_stream(io.BytesIO())
         self.assertEqual(obs, None)
 
+    def test_compress_from_stream_disable_compression(self):
+        data = io.BytesIO(
+            b"A\t0\tX\t1\t1\t50M\t*\t0\t0\t*\t*\n"
+            b"B\t0\tY\t10\t1\t50M\t*\t0\t0\t*\t*\n"
+            b"C\t0\tX\t100\t1\t50M\t*\t0\t0\t*\t*\n"
+            b"D\t0\tX\t90\t1\t50M\t*\t0\t0\t*\t*\n"
+            b"E\t0\tY\t100\t1\t50M\t*\t0\t0\t*\t*\n"
+            )
+        exp = pl.DataFrame([['X', 1, 51],
+                            ['X', 90, 140],
+                            ['X', 100, 150],
+                            ['Y', 10, 60],
+                            ['Y', 100, 150]],
+                           schema=BED_COV_SCHEMA.dtypes_flat)
+        obs = compress_from_stream(data, bufsize=2, disable_compression=True)
+        plt.assert_frame_equal(obs.sort([COLUMN_GENOME_ID, COLUMN_START]), exp)
+
+        obs = compress_from_stream(io.BytesIO())
+        self.assertEqual(obs, None)
+
     def test_parse_sam_to_df(self):
         data = io.BytesIO(
             b"A\t0\tX\t1\t1\t50M\t*\t0\t0\t*\t*\n"
