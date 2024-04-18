@@ -1,7 +1,8 @@
 # adapted from scikit-bio
 
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools", "wheel", "versioneer[toml]"]
+build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 target-version = "py38"
