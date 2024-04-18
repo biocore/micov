@@ -1,9 +1,10 @@
+import versioneer
 from setuptools import setup, find_packages
 
-version = '0.0.1'
 
 setup(name='micov',
-      version=version,
+      version=versioneer.get_version(),
+      cmdclass=versioneer.get_cmdclass(),
       license='BSD-3-Clause',
       author='Daniel McDonald',
       author_email='damcdonald@ucsd.edu',
