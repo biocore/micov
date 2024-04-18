@@ -1,0 +1,19 @@
+# adapted from scikit-bio
+
+[build-system]
+requires = ["setuptools", "wheel"]
+
+[tool.ruff]
+target-version = "py38"
+exclude = [
+    "micov/tests/*", 
+]
+
+[tool.ruff.lint]
+select = ["E", "W", "D"]  # pycodestyle (E, W), pydocstyle (D)
+ignore = [
+    "D203",  # puts a space before class docstrings
+    "D213",  # puts summary on second line
+    "D400",  # redundant with D415 in place
+    "D301",  # forces raw string literals
+]

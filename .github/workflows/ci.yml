@@ -1,0 +1,88 @@
+# heavily adapted from scikit-bio's CI
+# https://github.com/biocore/scikit-bio/blob/31123c6471dc62f45a55bfdff59c61a4850be367/.github/workflows/ci.yml#L1
+name: micov CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  latest_python: "3.12"
+  supported_pythons: '["3.8", "3.9", "3.10", "3.11", "3.12"]'
+  miniforge_version: "22.9.0-2"
+  miniforge_variant: "Mambaforge"
+
+jobs:
+  conf:
+    # This job is needed to route the global environment variables into
+    # a context that's available for matrix (and name, but that's unimportant)
+    name: Prepare Test Plan
+    runs-on: "ubuntu-latest"
+    outputs:
+      latest_python: ${{ steps.set-vars.outputs.latest_python }}
+      supported_pythons: ${{ steps.set-vars.outputs.supported_pythons }}
+    steps:
+      - name: Report Plan
+        id: set-vars
+        run: |
+          echo "latest_python=$latest_python" >> $GITHUB_OUTPUT
+          echo "supported_pythons=$supported_pythons" >> $GITHUB_OUTPUT
+  lint:
+    name: Lint code (${{ needs.conf.outputs.latest_python }}, ubuntu-latest)
+    needs: conf
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v2
+        with:
+          auto-update-conda: true
+          python-version: ${{ env.latest_python }}
+          miniforge-version: ${{ env.miniforge_version }}
+          miniforge-variant: ${{ env.miniforge_variant }}
+          environment-file: ci/conda_host_env.yml
+      - name: Install dependencies
+        shell: bash -l {0}
+        run: |
+          pip install -r ci/requirements.lint.txt
+          conda list
+      - name: Run linter
+        shell: bash -l {0}
+        run: make lint
+
+  test-all:
+    name: Test (${{ matrix.python_version }}, ${{ matrix.os }}, ${{ fromJSON('["pypi", "conda"]')[matrix.use_conda] }})
+    needs: ["conf", "lint"]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+        python_version: ${{ fromJSON(needs.conf.outputs.supported_pythons) }}
+        use_conda: [true, false]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: conda-incubator/setup-miniconda@v2
+        with:
+          auto-update-conda: true
+          python-version: ${{ env.latest_python }}
+          miniforge-version: ${{ env.miniforge_version }}
+          miniforge-variant: ${{ env.miniforge_variant }}
+          environment-file: ci/conda_host_env.yml
+      - name: Install dependencies (conda)
+        if: ${{ matrix.use_conda }}
+        shell: bash -l {0}
+        run: |
+          conda install -q --yes -c conda-forge --file ci/conda_requirements.txt
+          pip install . --no-deps
+          conda list
+      - name: Install dependencies (pip)
+        if: ${{ !matrix.use_conda }}
+        shell: bash -l {0}
+        run: |
+          pip install .
+          conda list
+      - name: Run unit tests
+        shell: bash -l {0}
+        run: make test

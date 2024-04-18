@@ -9,6 +9,13 @@ setup(name='micov',
       author='Daniel McDonald',
       author_email='damcdonald@ucsd.edu',
       packages=find_packages(),
+      install_requires=[
+          'polars',
+          'matplotlib',
+          'scipy',
+          'click',
+          'tqdm',
+          'numba'],
       entry_points='''
           [console_scripts]
           micov=micov.cli:cli
