@@ -110,7 +110,7 @@ class QiitaCovTests(unittest.TestCase):
 
         for name, exp in covs:
             obs = tgz.extractfile(f'coverages/{name}')
-            self.assertEqual(obs.read().decode('utf-8'), exp)
+            self.assertEqual(obs.read().decode('utf-8').replace('\r\n', '\n'), exp)
 
     def test_parse_qiita_coverages(self):
         exp = pl.DataFrame([['G123', 1, 15],
