@@ -1,0 +1,12 @@
+include README.md
+include LICENSE
+include ChangeLog.md
+
+graft micov
+
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude .git
+global-exclude *.c
+global-exclude *.so
+global-exclude .*.swp
