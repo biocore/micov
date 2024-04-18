@@ -75,6 +75,7 @@ files as well:
 
 ```bash
 $ micov consolidate \
+    --lengths genome-lengths.tsv \
     --paths a-file-with-a-list-of-paths \
     --output consolidated.tgz
 ```
