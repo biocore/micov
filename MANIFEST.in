@@ -1,8 +1,11 @@
 include README.md
 include LICENSE
 include ChangeLog.md
+include Makefile
+include pyproject.toml
 
 graft micov
+graft ci
 
 global-exclude *.pyc
 global-exclude *.pyo
