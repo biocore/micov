@@ -9,6 +9,12 @@ exclude = [
     "micov/tests/*", 
 ]
 
+[tool.check-manifest]
+ignore = [
+    # created by conda-incubator/setup-miniconda@v3 action
+    "ci/setup-miniconda-patched-conda_host_env.yml",
+]
+
 [tool.ruff.lint]
 select = ["E", "W", "D"]  # pycodestyle (E, W), pydocstyle (D)
 ignore = [
