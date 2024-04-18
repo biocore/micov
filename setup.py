@@ -1,3 +1,4 @@
+"""micov: microbiome coverage."""
 import versioneer
 from setuptools import setup, find_packages
 
