@@ -19,11 +19,11 @@ available from that resource.
 ## Installation
 
 We currently recommend creating a separate conda environment, and installing
-into that. It is likely the dependency pins can be relaxed but we haven't 
-verified that just yet.
+into that
 
 ```bash
-$ conda env create -n micov -c conda-forge polars matplotlib scipy click tqdm numba
+$ conda create -n micov -c conda-forge polars matplotlib scipy click tqdm numba
+$ pip install micov
 ```
 
 ## Examples
@@ -67,7 +67,7 @@ Exising .SAM/.BAM can be compressed into a BED-like format by file or pipe. A
 pipe example is shown below:
 
 ```bash
-$ xzcat some_data.sam.xz | micov compress | gzip > compressed.tsv.gz
+$ xzcat some_data.sam.xz | micov compress | compressed.tsv
 ```
 
 Compressed BED-like representations can be aggregated into Qiita-like coverage
