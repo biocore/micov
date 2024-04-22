@@ -163,6 +163,9 @@ def position_plot(metadata, coverage, positions, target, variable, output, scale
         color = f'C{color}'
         grp_coverage = ordered_coverage(coverage, grp, target)
 
+        if len(grp_coverage) == 0:
+            continue
+
         labels.append(name)
         colors.append(color)
         length = grp_coverage[COLUMN_LENGTH].item(0)

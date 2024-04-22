@@ -18,4 +18,7 @@ def per_sample_coverage(qiita_coverages, current_samples, features_to_keep,
         cov_per = cov_per.with_columns(pl.lit(sample).alias(COLUMN_SAMPLE_ID))
         sample_contig_coverage.append(cov_per)
 
-    return coverage, pl.concat(sample_contig_coverage)
+    if len(sample_contig_coverage) == 0:
+        return None, None
+    else:
+        return coverage, pl.concat(sample_contig_coverage)

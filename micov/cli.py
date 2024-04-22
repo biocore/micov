@@ -169,6 +169,11 @@ def per_sample_group(qiita_coverages, sample_metadata, sample_metadata_column,
                                                           features_to_keep,
                                                           features_to_ignore,
                                                           lengths)
+
+        if covered_positions is None or coverage is None:
+            click.echo(f"No coverage observed for: '{value}'", err=True)
+            continue
+
         all_covered_positions.append(covered_positions)
         all_coverage.append(coverage)
 
