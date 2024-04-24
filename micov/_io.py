@@ -265,13 +265,19 @@ def _reader(sam):
     elif isinstance(sam, io.BytesIO):
         yield sam
     else:
-        with lzma.open(sam) as fp:
-            data = fp.read()
-            yield data
+        if sam.endswith('.sam.xz'):
+            yield lzma.open(sam, mode='rt', encoding='utf-8')
+        elif sam.endswith('.sam.gz'):
+            yield gzip.open(sam, mode='rt', encoding='utf-8')
+        else:
+            yield open(sam, 'r')
 
 
 def _buf_to_bytes(buf):
-    return io.BytesIO(b''.join(buf))
+    if isinstance(buf[0], str):
+        return io.BytesIO(b''.join(s.encode() for s in buf))
+    else:
+        return io.BytesIO(b''.join(buf))
 
 
 def _subset_sam_to_bed(df):
