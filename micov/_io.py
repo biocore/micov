@@ -266,16 +266,19 @@ def _reader(sam):
         yield sam
     else:
         if sam.endswith('.sam.xz'):
-            yield lzma.open(sam, mode='rt', encoding='utf-8')
+            with lzma.open(sam, mode='rt', encoding='utf-8') as fp:
+                yield fp
         elif sam.endswith('.sam.gz'):
-            yield gzip.open(sam, mode='rt', encoding='utf-8')
+            with gzip.open(sam, mode='rt', encoding='utf-8') as fp:
+                yield fp
         else:
-            yield open(sam, 'r')
+            with open(sam, 'r') as fp:
+                yield fp
 
 
 def _buf_to_bytes(buf):
     if isinstance(buf[0], str):
-        return io.BytesIO(b''.join(s.encode() for s in buf))
+        return io.StringIO(''.join(buf))
     else:
         return io.BytesIO(b''.join(buf))
 
