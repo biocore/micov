@@ -74,12 +74,12 @@ def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
 
 
 @cli.command()
-@click.option('--sam', type=click.Path(exists=True), required=False)
+@click.option('--data', type=click.Path(exists=True), required=False)
 @click.option('--output', type=click.Path(exists=False))
 @click.option('--disable-compression', is_flag=True, default=False,
               help='Do not compress the regions')
-def compress(sam, output, disable_compression):
-    """Compress BAM/SAM mapping data.
+def compress(data, output, disable_compression):
+    """Compress BAM/SAM/BED mapping data.
 
     This command can work with pipes, e.g.:
 
@@ -91,7 +91,7 @@ def compress(sam, output, disable_compression):
     # compress data in blocks to avoid loading full mapping data into memory
     # and compress as we go along.
 
-    df = compress_from_stream(sam, disable_compression=disable_compression)
+    df = compress_from_stream(data, disable_compression=disable_compression)
     if df is None or len(df) == 0:
         click.echo("File appears empty...", err=True)
         sys.exit(0)
