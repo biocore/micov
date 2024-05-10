@@ -115,6 +115,7 @@ def compress(data, output, disable_compression, lengths):
 @click.option('--lengths', type=click.Path(exists=True), required=True,
               help="Genome lengths")
 def position_plot(positions, output, lengths):
+    """Construct a single sample coverage plot."""
     if positions is None:
         data = sys.stdin
     else:
