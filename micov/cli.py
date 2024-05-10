@@ -78,7 +78,9 @@ def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
 @click.option('--output', type=click.Path(exists=False))
 @click.option('--disable-compression', is_flag=True, default=False,
               help='Do not compress the regions')
-def compress(data, output, disable_compression):
+@click.option('--lengths', type=click.Path(exists=True), required=False,
+              help="Genome lengths, if provided compute coverage")
+def compress(data, output, disable_compression, lengths):
     """Compress BAM/SAM/BED mapping data.
 
     This command can work with pipes, e.g.:
@@ -88,19 +90,21 @@ def compress(data, output, disable_compression):
     if output == '-' or output is None:
         output = sys.stdout
 
+    if lengths is not None:
+        lengths = parse_genome_lengths(lengths)
+
     # compress data in blocks to avoid loading full mapping data into memory
     # and compress as we go along.
-
     df = compress_from_stream(data, disable_compression=disable_compression)
     if df is None or len(df) == 0:
         click.echo("File appears empty...", err=True)
         sys.exit(0)
 
-    # TODO: support bed
-    # we need to allow easy exposed support to compress .cov
-    # and would allow us to process individual large bams,
-    # and compress after the fact
-    df.write_csv(output, separator='\t', include_header=True)
+    if lengths is None:
+        df.write_csv(output, separator='\t', include_header=True)
+    else:
+        genome_coverage = coverage_percent(df, lengths).collect()
+        genome_coverage.write_csv(output, separator='\t', include_header=True)
 
 
 @cli.command()
