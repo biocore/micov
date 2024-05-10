@@ -150,6 +150,39 @@ def _get_covered(x_start_stop):
     return [[(x, start), (x, stop)] for (x, start, stop) in x_start_stop]
 
 
+def single_sample_position_plot(positions, lengths, output, scale=None):
+    positions = (positions
+                    .lazy()
+                    .join(lengths.lazy(), on=COLUMN_GENOME_ID)
+                    .with_columns(x=0.5)).collect()
+    for (name, grp) in positions.group_by(COLUMN_GENOME_ID):
+        plt.figure(figsize=(12, 8))
+        ax = plt.gca()
+        grp = (grp.lazy()
+                .sort(by=COLUMN_START)
+                .select(pl.col('x'),
+                        pl.col(COLUMN_START) / pl.col(COLUMN_LENGTH),
+                        pl.col(COLUMN_STOP) / pl.col(COLUMN_LENGTH)))
+
+        covered_positions = _get_covered(grp.collect().to_numpy())
+        lc = mc.LineCollection(covered_positions,
+                               linewidths=2, alpha=0.7)
+        ax.add_collection(lc)
+
+        ax.set_xlim(-0.01, 1.0)
+        ax.set_ylim(0, 1.0)
+
+        ax.set_title(f'Position plot: {name}', fontsize=20)
+        ax.set_ylabel('Unit normalized position', fontsize=20)
+        scaletag = ""
+
+        ax.tick_params(axis='both', which='major', labelsize=16)
+        ax.tick_params(axis='both', which='minor', labelsize=16)
+        plt.tight_layout()
+        plt.savefig(f'{output}.{name}.position-plot.png')
+        plt.close()
+
+
 def position_plot(metadata, coverage, positions, target, variable, output, scale=None):
     plt.figure(figsize=(12, 8))
     ax = plt.gca()
