@@ -306,3 +306,14 @@ def compress_from_stream(sam, bufsize=1_000_000_000, disable_compression=False):
             buf = data.readlines(bufsize)
 
     return current_df
+
+
+def parse_coverage(data, features_to_keep):
+    cov_df = pl.read_csv(data.read(), separator='\t',
+                        new_columns=GENOME_COVERAGE_SCHEMA.columns,
+                        dtypes=GENOME_COVERAGE_SCHEMA.dtypes_dict).lazy()
+
+    if features_to_keep is not None:
+        cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(feature_keep))
+
+    return cov_df

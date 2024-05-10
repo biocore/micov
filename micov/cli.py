@@ -7,11 +7,12 @@ import io
 import sys
 import tqdm
 from ._io import (parse_genome_lengths, parse_qiita_coverages, parse_sam_to_df,
-                  write_qiita_cov, parse_sample_metadata, compress_from_stream)
+                  write_qiita_cov, parse_sample_metadata, compress_from_stream,
+                  parse_bed_cov_to_df)
 from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
-from ._plot import per_sample_plots
+from ._plot import per_sample_plots, single_sample_position_plot
 
 
 def _first_col_as_set(fp):
@@ -105,6 +106,23 @@ def compress(data, output, disable_compression, lengths):
     else:
         genome_coverage = coverage_percent(df, lengths).collect()
         genome_coverage.write_csv(output, separator='\t', include_header=True)
+
+
+@cli.command()
+@click.option('--positions', type=click.Path(exists=True), required=False,
+              help='BED3')
+@click.option('--output', type=click.Path(exists=False), required=False)
+@click.option('--lengths', type=click.Path(exists=True), required=True,
+              help="Genome lengths")
+def position_plot(positions, output, lengths):
+    if positions is None:
+        data = sys.stdin
+    else:
+        data = open(positions, 'rb')
+
+    lengths = parse_genome_lengths(lengths)
+    df = parse_bed_cov_to_df(data)
+    single_sample_position_plot(df, lengths, output)
 
 
 @cli.command()
