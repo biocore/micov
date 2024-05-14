@@ -230,11 +230,11 @@ def load_db(dbbase, sample_metadata, features_to_keep):
     else:
         sgfilt = sfilt
 
-    duckdb.sql(f"""CREATE TABLE coverage
+    duckdb.sql(f"""CREATE VIEW coverage
                    AS SELECT *
                    FROM '{dbbase}.coverage.parquet'
                    {sgfilt}""")
-    duckdb.sql(f"""CREATE TABLE covered_positions
+    duckdb.sql(f"""CREATE VIEW covered_positions
                    AS SELECT *
                    FROM '{dbbase}.covered_positions.parquet'
                    {sgfilt}""")
