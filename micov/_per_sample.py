@@ -6,11 +6,17 @@ import polars as pl
 
 def per_sample_coverage(qiita_coverages, current_samples, features_to_keep,
                         features_to_ignore, lengths):
-    coverage = parse_qiita_coverages(qiita_coverages,
-                                     sample_keep=current_samples,
-                                     feature_keep=features_to_keep,
-                                     feature_drop=features_to_ignore,
-                                     compress_size=None, append_sample_id=True)
+    try:
+        coverage = parse_qiita_coverages(qiita_coverages,
+                                         sample_keep=current_samples,
+                                         feature_keep=features_to_keep,
+                                         feature_drop=features_to_ignore,
+                                         compress_size=None,
+                                         append_sample_id=True)
+    except ValueError:
+        # we expect this to only occur when requested samples or features
+        # are not present
+        return None, None
 
     sample_contig_coverage = []
     for (sample, ), sample_grp in coverage.group_by([COLUMN_SAMPLE_ID, ]):

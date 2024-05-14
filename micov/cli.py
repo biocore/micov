@@ -2,6 +2,7 @@
 
 import click
 import polars as pl
+import duckdb
 import os
 import io
 import sys
@@ -13,6 +14,7 @@ from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
+from ._constants import COLUMN_SAMPLE_ID
 
 
 def _first_col_as_set(fp):
@@ -144,6 +146,51 @@ def consolidate(paths, output, lengths):
 @cli.command()
 @click.option('--qiita-coverages', type=click.Path(exists=True), multiple=True,
               required=True, help='Pre-computed Qiita coverage data')
+@click.option('--output', type=click.Path(exists=False))
+@click.option('--lengths', type=click.Path(exists=True), required=True,
+              help="Genome lengths")
+@click.option('--samples-to-keep', type=click.Path(exists=True),
+              required=False,
+              help='A metadata file with the sample metadata')
+@click.option('--features-to-keep', type=click.Path(exists=True),
+              required=False,
+              help='A metadata file with the features to keep')
+@click.option('--features-to-ignore', type=click.Path(exists=True),
+              required=False,
+              help='A metadata file with the features to ignore')
+def qiita_to_parquet(qiita_coverages, lengths, output, samples_to_keep,
+                     features_to_keep, features_to_ignore):
+    """Aggregate Qiita coverage to parquet"""
+    if features_to_keep:
+        features_to_keep = _first_col_as_set(features_to_keep)
+
+    if features_to_ignore:
+        features_to_ignore = _first_col_as_set(features_to_ignore)
+
+    if samples_to_keep:
+        samples_to_keep = _first_col_as_set(samples_to_keep)
+
+    lengths = parse_genome_lengths(lengths)
+    covered_positions, coverage = per_sample_coverage(qiita_coverages,
+                                                      samples_to_keep,
+                                                      features_to_keep,
+                                                      features_to_ignore,
+                                                      lengths)
+
+    coverage.collect().write_parquet(output + '.coverage.parquet',
+                                     compression='zstd',
+                                     compression_level=3)  # default afaik
+    covered_positions.write_parquet(output + '.covered_positions.parquet',
+                                    compression='zstd',
+                                    compression_level=3)  # default afaik
+
+
+@cli.command()
+@click.option('--parquet-coverage', type=click.Path(exists=False),
+              required=True, help=('Pre-computed coverage data as parquet. '
+                                   'This should be the basename used, i.e. '
+                                   'for "foo.coverage.parquet", please use '
+                                   '"foo"'))
 @click.option('--sample-metadata', type=click.Path(exists=True),
               required=True,
               help='A metadata file with the sample metadata')
@@ -153,62 +200,50 @@ def consolidate(paths, output, lengths):
 @click.option('--features-to-keep', type=click.Path(exists=True),
               required=False,
               help='A metadata file with the features to keep')
-@click.option('--features-to-ignore', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the features to ignore')
 @click.option('--output', type=click.Path(exists=False), required=True)
-@click.option('--lengths', type=click.Path(exists=True), required=True,
-              help="Genome lengths")
-def per_sample_group(qiita_coverages, sample_metadata, sample_metadata_column,
-                     features_to_keep, features_to_ignore, output, lengths):
+@click.option('--plot', is_flag=True, default=False,
+              help='Generate plots from features')
+def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
+                     features_to_keep, output, plot):
     """Generate sample group plots and coverage data."""
-    if features_to_keep:
-        features_to_keep = _first_col_as_set(features_to_keep)
+    # TODO: shift db operations to backend...
+    load_db(parquet_coverage, sample_metadata, features_to_keep)
 
-    if features_to_ignore:
-        features_to_ignore = _first_col_as_set(features_to_ignore)
+    all_covered_positions = duckdb.sql("SELECT * from covered_positions").pl()
+    all_coverage = duckdb.sql("SELECT * FROM coverage").pl()
+    metadata_pl = duckdb.sql("SELECT * FROM metadata").pl()
 
-    lengths = parse_genome_lengths(lengths)
-    metadata = parse_sample_metadata(sample_metadata)
-    sample_column = metadata.columns[0]
-
-    if sample_metadata_column not in metadata.columns:
-        raise KeyError(f"'{sample_metadata_column}' not found")
-
-    if metadata[sample_metadata_column].dtype != pl.String:
-        raise ValueError(f"Column must be categorical")
-
-    if len(metadata[sample_metadata_column].unique()) > 10:
-        raise ValueError(f"Not sure if this will work will with that many values")
-
-    metadata = metadata[[sample_column, sample_metadata_column]]
-
-    all_covered_positions = []
-    all_coverage = []
-    for (value, ), grp in metadata.group_by([sample_metadata_column, ]):
-        current_samples = set(grp[sample_column].unique())
-        covered_positions, coverage = per_sample_coverage(qiita_coverages,
-                                                          current_samples,
-                                                          features_to_keep,
-                                                          features_to_ignore,
-                                                          lengths)
-
-        if covered_positions is None or coverage is None:
-            click.echo(f"No coverage observed for: '{value}'", err=True)
-            continue
-
-        all_covered_positions.append(covered_positions)
-        all_coverage.append(coverage)
-
-    all_covered_positions = pl.concat(all_covered_positions)
-    all_coverage = pl.concat(all_coverage).collect()
-
-    all_coverage.write_csv(output + '.coverage', separator='\t',
-                           include_header=True)
-    all_covered_positions.write_csv(output + '.covered_positions', separator='\t',
-                                    include_header=True)
-    per_sample_plots(all_coverage, all_covered_positions, metadata,
+    per_sample_plots(all_coverage, all_covered_positions, metadata_pl,
                      sample_metadata_column, output)
+
+
+def load_db(dbbase, sample_metadata, features_to_keep):
+    metadata_pl = parse_sample_metadata(sample_metadata)
+    sample_column = metadata_pl.columns[0]
+    metadata_pl = metadata_pl.rename({sample_column: COLUMN_SAMPLE_ID})
+
+    samples = tuple(metadata_pl[sample_column].unique())
+
+    sfilt = f'WHERE sample_id IN {samples}'
+    if features_to_keep:
+        sgfilt = f"{sfilt} AND genome_id IN {tuple(_first_col_as_set(features_to_keep))}"
+    else:
+        sgfilt = sfilt
+
+    duckdb.sql(f"""CREATE TABLE coverage
+                   AS SELECT *
+                   FROM '{dbbase}.coverage.parquet'
+                   {sgfilt}""")
+    duckdb.sql(f"""CREATE TABLE covered_positions
+                   AS SELECT *
+                   FROM '{dbbase}.covered_positions.parquet'
+                   {sgfilt}""")
+    duckdb.sql(f"""CREATE TABLE metadata
+                   AS SELECT *
+                   FROM metadata_pl
+                   {sfilt}
+                   AND {COLUMN_SAMPLE_ID} IN (SELECT DISTINCT {COLUMN_SAMPLE_ID}
+                                              FROM coverage)""")
 
 
 if __name__ == '__main__':
