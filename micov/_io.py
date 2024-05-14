@@ -22,6 +22,10 @@ class SetOfAll:
         return True
 
 
+def parse_bed_cov_to_df(data):
+    return _parse_bed_cov(data, None, None, False)
+
+
 def _parse_bed_cov(data, feature_drop, feature_keep, lazy):
     first_line = data.readline()
     data.seek(0)
@@ -300,9 +304,25 @@ def compress_from_stream(sam, bufsize=1_000_000_000, disable_compression=False):
         if len(buf) == 0:
             return None
 
+        if len(buf[0].split(b'\t')) == 3:
+            parse_f = parse_bed_cov_to_df
+        else:
+            parse_f = parse_sam_to_df
+
         while len(buf) > 0:
-            next_df = compress_f(parse_sam_to_df(_buf_to_bytes(buf)))
+            next_df = compress_f(parse_f(_buf_to_bytes(buf)))
             current_df = compress_f(pl.concat([current_df, next_df]))
             buf = data.readlines(bufsize)
 
     return current_df
+
+
+def parse_coverage(data, features_to_keep):
+    cov_df = pl.read_csv(data.read(), separator='\t',
+                        new_columns=GENOME_COVERAGE_SCHEMA.columns,
+                        dtypes=GENOME_COVERAGE_SCHEMA.dtypes_dict).lazy()
+
+    if features_to_keep is not None:
+        cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(feature_keep))
+
+    return cov_df

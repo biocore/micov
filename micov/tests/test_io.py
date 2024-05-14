@@ -1,5 +1,6 @@
 import unittest
 import io
+import sys
 from micov._io import (parse_genome_lengths, parse_qiita_coverages,
                        _single_df, _check_and_compress, parse_sam_to_df,
                        compress_from_stream, write_qiita_cov)
@@ -50,7 +51,11 @@ def _create_qiita_cov(name):
 
 class QiitaCovTests(unittest.TestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        kwargs = {}
+        if sys.version_info.minor >= 10:
+            kwargs.update({'ignore_cleanup_errors': True})
+
+        self.temp_dir = tempfile.TemporaryDirectory(**kwargs)
         self.name = self.temp_dir.name + '/coverages.tgz'
         _create_qiita_cov(self.name)
 

@@ -7,11 +7,12 @@ import io
 import sys
 import tqdm
 from ._io import (parse_genome_lengths, parse_qiita_coverages, parse_sam_to_df,
-                  write_qiita_cov, parse_sample_metadata, compress_from_stream)
+                  write_qiita_cov, parse_sample_metadata, compress_from_stream,
+                  parse_bed_cov_to_df)
 from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
-from ._plot import per_sample_plots
+from ._plot import per_sample_plots, single_sample_position_plot
 
 
 def _first_col_as_set(fp):
@@ -74,12 +75,14 @@ def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
 
 
 @cli.command()
-@click.option('--sam', type=click.Path(exists=True), required=False)
+@click.option('--data', type=click.Path(exists=True), required=False)
 @click.option('--output', type=click.Path(exists=False))
 @click.option('--disable-compression', is_flag=True, default=False,
               help='Do not compress the regions')
-def compress(sam, output, disable_compression):
-    """Compress BAM/SAM mapping data.
+@click.option('--lengths', type=click.Path(exists=True), required=False,
+              help="Genome lengths, if provided compute coverage")
+def compress(data, output, disable_compression, lengths):
+    """Compress BAM/SAM/BED mapping data.
 
     This command can work with pipes, e.g.:
 
@@ -88,19 +91,39 @@ def compress(sam, output, disable_compression):
     if output == '-' or output is None:
         output = sys.stdout
 
+    if lengths is not None:
+        lengths = parse_genome_lengths(lengths)
+
     # compress data in blocks to avoid loading full mapping data into memory
     # and compress as we go along.
-
-    df = compress_from_stream(sam, disable_compression=disable_compression)
+    df = compress_from_stream(data, disable_compression=disable_compression)
     if df is None or len(df) == 0:
         click.echo("File appears empty...", err=True)
         sys.exit(0)
 
-    # TODO: support bed
-    # we need to allow easy exposed support to compress .cov
-    # and would allow us to process individual large bams,
-    # and compress after the fact
-    df.write_csv(output, separator='\t', include_header=True)
+    if lengths is None:
+        df.write_csv(output, separator='\t', include_header=True)
+    else:
+        genome_coverage = coverage_percent(df, lengths).collect()
+        genome_coverage.write_csv(output, separator='\t', include_header=True)
+
+
+@cli.command()
+@click.option('--positions', type=click.Path(exists=True), required=False,
+              help='BED3')
+@click.option('--output', type=click.Path(exists=False), required=False)
+@click.option('--lengths', type=click.Path(exists=True), required=True,
+              help="Genome lengths")
+def position_plot(positions, output, lengths):
+    """Construct a single sample coverage plot."""
+    if positions is None:
+        data = sys.stdin
+    else:
+        data = open(positions, 'rb')
+
+    lengths = parse_genome_lengths(lengths)
+    df = parse_bed_cov_to_df(data)
+    single_sample_position_plot(df, lengths, output)
 
 
 @cli.command()
