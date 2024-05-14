@@ -291,7 +291,7 @@ def _subset_sam_to_bed(df):
     return df[list(BED_COV_SCHEMA.columns)]
 
 
-def compress_from_stream(sam, bufsize=1_000_000_000, disable_compression=False):
+def compress_from_stream(sam, bufsize=100_000_000, disable_compression=False):
     if disable_compression:
         compress_f = _subset_sam_to_bed
     else:
