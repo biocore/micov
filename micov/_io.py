@@ -10,9 +10,10 @@ import io
 import gzip
 
 from ._cov import compress, coverage_percent
-from ._constants import (BED_COV_SCHEMA, COLUMN_GENOME_ID, COLUMN_LENGTH,
-                         SAM_SUBSET_SCHEMA, COLUMN_CIGAR, COLUMN_STOP,
-                         COLUMN_START, COLUMN_SAMPLE_ID)
+from ._constants import (BED_COV_SCHEMA, GENOME_COVERAGE_SCHEMA, 
+                         COLUMN_GENOME_ID, COLUMN_LENGTH, SAM_SUBSET_SCHEMA, 
+                         COLUMN_CIGAR, COLUMN_STOP, COLUMN_START, 
+                         COLUMN_SAMPLE_ID)
 from ._convert import cigar_to_lens
 
 
@@ -323,6 +324,6 @@ def parse_coverage(data, features_to_keep):
                         dtypes=GENOME_COVERAGE_SCHEMA.dtypes_dict).lazy()
 
     if features_to_keep is not None:
-        cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(feature_keep))
+        cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
 
     return cov_df
