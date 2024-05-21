@@ -11,9 +11,9 @@ import gzip
 
 from ._cov import compress, coverage_percent
 from ._constants import (BED_COV_SCHEMA, GENOME_COVERAGE_SCHEMA, 
-                         COLUMN_GENOME_ID, COLUMN_LENGTH, SAM_SUBSET_SCHEMA, 
-                         COLUMN_CIGAR, COLUMN_STOP, COLUMN_START, 
-                         COLUMN_SAMPLE_ID)
+                         COLUMN_GENOME_ID, COLUMN_LENGTH, COLUMN_TAXONOMY, 
+                         SAM_SUBSET_SCHEMA, COLUMN_CIGAR, COLUMN_STOP, 
+                         COLUMN_START, COLUMN_SAMPLE_ID)
 from ._convert import cigar_to_lens
 
 
@@ -167,6 +167,24 @@ def _test_has_header(line):
     return has_header
 
 
+def _test_has_header_taxonomy(line):
+    if isinstance(line, bytes):
+        line = line.decode('utf-8')
+
+    genome_id_columns = ('genome-id', 'genome_id', 'feature-id',
+                         'feature_id')
+    taxonomy_columns = ('taxonomy', 'name', 'full_name')
+
+    if line.startswith('#'):
+        has_header = True
+    elif line.split('\t')[0] in genome_id_columns and line.split('\t')[1] in taxonomy_columns:
+        has_header = True
+    else:
+        has_header = False
+
+    return has_header
+
+
 def parse_genome_lengths(lengths):
     with open(lengths) as fp:
         first_line = fp.readline()
@@ -189,6 +207,38 @@ def parse_genome_lengths(lengths):
     rename = {genome_id_col: COLUMN_GENOME_ID,
               length_col: COLUMN_LENGTH}
     return df[[genome_id_col, length_col]].rename(rename)
+
+
+def parse_taxonomy(taxonomy):
+    with open(taxonomy) as fp:
+        first_line = fp.readline()
+
+    has_header = _test_has_header_taxonomy(first_line)
+    df = pl.read_csv(taxonomy, separator='\t', has_header=has_header)
+    genome_id_col = df.columns[0]
+    taxonomy_col = df.columns[1]
+
+    genome_ids = df[genome_id_col]
+    if len(genome_ids) != len(set(genome_ids)):
+        raise ValueError(f"'{genome_id_col}' is not unique")
+    
+    rename = {genome_id_col: COLUMN_GENOME_ID,
+              taxonomy_col: COLUMN_TAXONOMY}
+    
+    return df[[genome_id_col, taxonomy_col]].rename(rename)
+
+
+def set_taxonomy_as_id(coverages, taxonomy):
+    missing = (set(coverages[COLUMN_GENOME_ID]) -
+               set(taxonomy[COLUMN_GENOME_ID]))
+    if len(missing) > 0:
+        raise ValueError(f"{len(missing)} genome(s) appear unrepresented in "
+                         f"the taxonomy information, examples: "
+                         f"{sorted(missing)[:5]}")
+
+    coverages_with_taxonomy = coverages.join(taxonomy, on=COLUMN_GENOME_ID, how='left')
+    coverages_with_taxonomy = coverages_with_taxonomy.select(COLUMN_TAXONOMY, pl.exclude(COLUMN_GENOME_ID, COLUMN_TAXONOMY))
+    return coverages_with_taxonomy
 
 
 # TODO: this is not the greatest method name
@@ -305,10 +355,16 @@ def compress_from_stream(sam, bufsize=1_000_000_000, disable_compression=False):
         if len(buf) == 0:
             return None
 
-        if len(buf[0].split(b'\t')) == 3:
-            parse_f = parse_bed_cov_to_df
+        if isinstance(buf[0], str):
+            if len(buf[0].split('\t')) == 3:
+                parse_f = parse_bed_cov_to_df
+            else:
+                parse_f = parse_sam_to_df
         else:
-            parse_f = parse_sam_to_df
+            if len(buf[0].split(b'\t')) == 3:
+                parse_f = parse_bed_cov_to_df
+            else:
+                parse_f = parse_sam_to_df
 
         while len(buf) > 0:
             next_df = compress_f(parse_f(_buf_to_bytes(buf)))
