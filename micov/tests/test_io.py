@@ -338,6 +338,7 @@ class IOTests(unittest.TestCase):
 
         exp = pl.DataFrame({
             "taxonomy": ["species3", "species4", "species5"],
+            "genome_id": ["G000006925", "G000007525", "G000008865"],
             "covered": [2501356, 4378, 2582128],
             "length": [4828820, 2260266, 5594477],
             "percent_covered": [51.800564112971706, 0.19369401654495533, 46.154948889771106]

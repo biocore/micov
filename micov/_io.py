@@ -236,9 +236,10 @@ def set_taxonomy_as_id(coverages, taxonomy):
                          f"the taxonomy information, examples: "
                          f"{sorted(missing)[:5]}")
 
-    coverages_with_taxonomy = coverages.join(taxonomy, on=COLUMN_GENOME_ID, how='left')
-    coverages_with_taxonomy = coverages_with_taxonomy.select(COLUMN_TAXONOMY, pl.exclude(COLUMN_GENOME_ID, COLUMN_TAXONOMY))
-    return coverages_with_taxonomy
+    return (coverages
+            .join(taxonomy, on=COLUMN_GENOME_ID, how='left')
+            .select(COLUMN_TAXONOMY,
+                    pl.exclude(COLUMN_TAXONOMY)))
 
 
 # TODO: this is not the greatest method name
@@ -355,16 +356,18 @@ def compress_from_stream(sam, bufsize=1_000_000_000, disable_compression=False):
         if len(buf) == 0:
             return None
 
-        if isinstance(buf[0], str):
-            if len(buf[0].split('\t')) == 3:
-                parse_f = parse_bed_cov_to_df
-            else:
-                parse_f = parse_sam_to_df
+        line = buf[0]
+        if isinstance(line, str):
+            delim = '\t'
+        elif isinstance(line, bytes):
+            delim = b'\t'
         else:
-            if len(buf[0].split(b'\t')) == 3:
-                parse_f = parse_bed_cov_to_df
-            else:
-                parse_f = parse_sam_to_df
+            raise ValueError(f"Unexpected buffer type: {type(line)}")
+
+        if len(line.split(delim)) == 3:
+            parse_f = parse_bed_cov_to_df
+        else:
+            parse_f = parse_sam_to_df
 
         while len(buf) > 0:
             next_df = compress_f(parse_f(_buf_to_bytes(buf)))
