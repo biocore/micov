@@ -160,7 +160,7 @@ def consolidate(paths, output, lengths):
               help='A metadata file with the features to ignore')
 def qiita_to_parquet(qiita_coverages, lengths, output, samples_to_keep,
                      features_to_keep, features_to_ignore):
-    """Aggregate Qiita coverage to parquet"""
+    """Aggregate Qiita coverage to parquet."""
     if features_to_keep:
         features_to_keep = _first_col_as_set(features_to_keep)
 
@@ -206,8 +206,7 @@ def qiita_to_parquet(qiita_coverages, lengths, output, samples_to_keep,
 def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
                      features_to_keep, output, plot):
     """Generate sample group plots and coverage data."""
-    # TODO: shift db operations to backend...
-    load_db(parquet_coverage, sample_metadata, features_to_keep)
+    _load_db(parquet_coverage, sample_metadata, features_to_keep)
 
     all_covered_positions = duckdb.sql("SELECT * from covered_positions").pl()
     all_coverage = duckdb.sql("SELECT * FROM coverage").pl()
@@ -217,7 +216,7 @@ def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
                      sample_metadata_column, output)
 
 
-def load_db(dbbase, sample_metadata, features_to_keep):
+def _load_db(dbbase, sample_metadata, features_to_keep):
     metadata_pl = parse_sample_metadata(sample_metadata)
     sample_column = metadata_pl.columns[0]
     metadata_pl = metadata_pl.rename({sample_column: COLUMN_SAMPLE_ID})
@@ -226,7 +225,8 @@ def load_db(dbbase, sample_metadata, features_to_keep):
 
     sfilt = f'WHERE sample_id IN {samples}'
     if features_to_keep:
-        sgfilt = f"{sfilt} AND genome_id IN {tuple(_first_col_as_set(features_to_keep))}"
+        features_to_keep = tuple(_first_col_as_set(features_to_keep))
+        sgfilt = f"{sfilt} AND genome_id IN {features_to_keep}"
     else:
         sgfilt = sfilt
 

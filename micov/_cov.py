@@ -25,13 +25,19 @@ def coverage_percent(coverages, lengths):
 
 
 @numba.jit(nopython=True)
-def _compress(genome, rows):
+def _compress(rows):
     # derived from zebra
     # https://github.com/biocore/zebra_filter/blob/master/cover.py#L14
 
     new_ranges = []
     start_val = None
     end_val = None
+
+    # Potential expansion:
+    # allocate new ranges as 2D np zeros
+    # resize
+    # bulk
+    # push setting of genome into df
 
     for start, stop in rows:
         if end_val is None:
@@ -45,13 +51,13 @@ def _compress(genome, rows):
         else:  # if end_val < r[0] - 1:
             # case 3: active range ends before this range begins
             # write new range out, then start new active range
-            new_range = (genome, start_val, end_val)
+            new_range = (start_val, end_val)
             new_ranges.append(new_range)
             start_val = start
             end_val = stop
 
     if end_val is not None:
-        new_range = (genome, start_val, end_val)
+        new_range = (start_val, end_val)
         new_ranges.append(new_range)
 
     return new_ranges
@@ -66,9 +72,15 @@ def compress(df):
                  .sort(COLUMN_START)
                  .collect()
                  .to_numpy())
-        grp_compressed = _compress(genome, rows)
-        grp_compressed_df = pl.DataFrame(grp_compressed,
-                                         schema=BED_COV_SCHEMA.dtypes_flat)
-        compressed.append(grp_compressed_df)
+        grp_compressed = _compress(rows)
+        grp_compressed_df = pl.LazyFrame(grp_compressed,
+                                         schema=[BED_COV_SCHEMA.dtypes_flat[1],
+                                                 BED_COV_SCHEMA.dtypes_flat[2]],
+                                         orient='row')
+        grp_compressed_df = (grp_compressed_df
+                                .with_columns(pl.lit(genome).alias(COLUMN_GENOME_ID))
+                                .select(BED_COV_SCHEMA.columns))
+
+        compressed.append(grp_compressed_df.collect())
 
     return pl.concat(compressed)
