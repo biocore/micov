@@ -1,3 +1,5 @@
+import numpy as np
+
 import numba
 import polars as pl
 from ._constants import (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP,
@@ -63,6 +65,43 @@ def _compress(rows):
     return new_ranges
 
 
+@numba.jit(nopython=True)
+def _compress_np(rows, new_ranges):
+    # derived from zebra
+    # https://github.com/biocore/zebra_filter/blob/master/cover.py#L14
+
+    start_val = None
+    end_val = None
+
+    idx = 0
+    row = new_ranges[idx]
+
+    start_val, end_val = rows[0]
+    for start, stop in rows[1:]:
+        if end_val >= start:
+            # case 2: active range continues through this range
+            # extend active range
+            end_val = max(end_val, stop)
+        else:  # if end_val < r[0] - 1:
+            # case 3: active range ends before this range begins
+            # write new range out, then start new active range
+            row[0] = start_val
+            row[1] = end_val
+
+            idx += 1
+            row = new_ranges[idx]
+
+            start_val = start
+            end_val = stop
+
+    if end_val is not None:
+        row[0] = start_val
+        row[1] = end_val
+        idx += 1
+
+    return new_ranges[:idx]
+
+
 def compress(df):
     compressed = []
     for (genome, ), grp in df.group_by([COLUMN_GENOME_ID, ]):
@@ -72,7 +111,10 @@ def compress(df):
                  .sort(COLUMN_START)
                  .collect()
                  .to_numpy())
-        grp_compressed = _compress(rows)
+
+        new_ranges = np.empty((len(rows), 2), dtype=int)
+
+        grp_compressed = _compress_np(rows, new_ranges)
         grp_compressed_df = pl.LazyFrame(grp_compressed,
                                          schema=[BED_COV_SCHEMA.dtypes_flat[1],
                                                  BED_COV_SCHEMA.dtypes_flat[2]],
