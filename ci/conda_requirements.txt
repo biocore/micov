@@ -4,3 +4,5 @@ scipy
 click
 numba
 versioneer
+duckdb
+pyarrow<16.0.0
