@@ -65,7 +65,7 @@ def compress(df):
                  .select([COLUMN_START, COLUMN_STOP])
                  .sort(COLUMN_START)
                  .collect()
-                 .to_numpy())
+                 .to_numpy(order='c'))
 
         grp_compressed = _compress(rows)
         grp_compressed_df = pl.LazyFrame(grp_compressed,
