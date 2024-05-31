@@ -198,7 +198,8 @@ def parse_sam_to_df(sam):
                      new_columns=SAM_SUBSET_SCHEMA.columns).lazy()
 
     return (df
-             .with_columns(stop=pl.col(COLUMN_CIGAR).map_elements(cigar_to_lens))
+             .with_columns(stop=pl.col(COLUMN_CIGAR).map_elements(cigar_to_lens,
+                                                                  return_dtype=int))  # noqa
              .with_columns(stop=pl.col(COLUMN_STOP) + pl.col(COLUMN_START))
              .collect())
 
@@ -270,13 +271,13 @@ def _reader(sam):
         yield sam
     else:
         if sam.endswith('.sam.xz'):
-            with lzma.open(sam, mode='rt', encoding='utf-8') as fp:
+            with lzma.open(sam, mode='rb') as fp:
                 yield fp
         elif sam.endswith('.sam.gz'):
-            with gzip.open(sam, mode='rt', encoding='utf-8') as fp:
+            with gzip.open(sam, mode='rb') as fp:
                 yield fp
         else:
-            with open(sam, 'r') as fp:
+            with open(sam, 'rb') as fp:
                 yield fp
 
 
