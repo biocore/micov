@@ -10,9 +10,9 @@ import io
 import gzip
 
 from ._cov import compress, coverage_percent
-from ._constants import (BED_COV_SCHEMA, GENOME_COVERAGE_SCHEMA, 
-                         COLUMN_GENOME_ID, COLUMN_LENGTH, COLUMN_TAXONOMY, 
-                         SAM_SUBSET_SCHEMA, COLUMN_CIGAR, COLUMN_STOP, 
+from ._constants import (BED_COV_SCHEMA, GENOME_COVERAGE_SCHEMA,
+                         COLUMN_GENOME_ID, COLUMN_LENGTH, COLUMN_TAXONOMY,
+                         SAM_SUBSET_SCHEMA, COLUMN_CIGAR, COLUMN_STOP,
                          COLUMN_START, COLUMN_SAMPLE_ID)
 from ._convert import cigar_to_lens
 
@@ -177,7 +177,8 @@ def _test_has_header_taxonomy(line):
 
     if line.startswith('#'):
         has_header = True
-    elif line.split('\t')[0] in genome_id_columns and line.split('\t')[1] in taxonomy_columns:
+    elif line.split('\t')[0] in genome_id_columns and \
+        line.split('\t')[1] in taxonomy_columns:
         has_header = True
     else:
         has_header = False
@@ -221,10 +222,10 @@ def parse_taxonomy(taxonomy):
     genome_ids = df[genome_id_col]
     if len(genome_ids) != len(set(genome_ids)):
         raise ValueError(f"'{genome_id_col}' is not unique")
-    
+
     rename = {genome_id_col: COLUMN_GENOME_ID,
               taxonomy_col: COLUMN_TAXONOMY}
-    
+
     return df[[genome_id_col, taxonomy_col]].rename(rename)
 
 

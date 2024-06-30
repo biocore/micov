@@ -7,8 +7,8 @@ import io
 import sys
 import tqdm
 from ._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
-                  parse_qiita_coverages, parse_sam_to_df, write_qiita_cov, 
-                  parse_sample_metadata, compress_from_stream, 
+                  parse_qiita_coverages, parse_sam_to_df, write_qiita_cov,
+                  parse_sample_metadata, compress_from_stream,
                   parse_bed_cov_to_df)
 from ._cov import coverage_percent
 from ._convert import cigar_to_lens
@@ -83,7 +83,8 @@ def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
 @click.option('--lengths', type=click.Path(exists=True), required=False,
               help='Genome lengths, if provided compute coverage')
 @click.option('--taxonomy', type=click.Path(exists=True), required=False,
-              help='Genome taxonomy, if provided show species in coverage percentage. Only works when --length is provided')
+              help=('Genome taxonomy, if provided show species in coverage '
+                    'percentage. Only works when --length is provided'))
 def compress(data, output, disable_compression, lengths, taxonomy):
     """Compress BAM/SAM/BED mapping data.
 
@@ -97,7 +98,7 @@ def compress(data, output, disable_compression, lengths, taxonomy):
     if lengths is not None:
         lengths = parse_genome_lengths(lengths)
 
-        if taxonomy is not None: 
+        if taxonomy is not None:
             taxonomy = parse_taxonomy(taxonomy)
 
     # compress data in blocks to avoid loading full mapping data into memory
@@ -115,8 +116,12 @@ def compress(data, output, disable_compression, lengths, taxonomy):
         if taxonomy is None:
             genome_coverage.write_csv(output, separator='\t', include_header=True)
         else:
-            genome_coverage_with_taxonomy = set_taxonomy_as_id(genome_coverage, taxonomy)
-            genome_coverage_with_taxonomy.write_csv(output, separator='\t', include_header=True)
+            genome_coverage_with_taxonomy = set_taxonomy_as_id(
+                genome_coverage, taxonomy
+                )
+            genome_coverage_with_taxonomy.write_csv(
+                output, separator='\t', include_header=True
+                )
 
 
 @cli.command()
