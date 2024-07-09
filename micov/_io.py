@@ -40,7 +40,7 @@ def _parse_bed_cov(data, feature_drop, feature_keep, lazy):
 
     frame = pl.read_csv(data.read(), separator='\t',
                         new_columns=BED_COV_SCHEMA.columns,
-                        dtypes=BED_COV_SCHEMA.dtypes_dict,
+                        schema_overrides=BED_COV_SCHEMA.dtypes_dict,
                         has_header=False, skip_rows=skip_rows).lazy()
 
     if feature_drop is not None:
@@ -321,7 +321,7 @@ def compress_from_stream(sam, bufsize=100_000_000, disable_compression=False):
 def parse_coverage(data, features_to_keep):
     cov_df = pl.read_csv(data.read(), separator='\t',
                         new_columns=GENOME_COVERAGE_SCHEMA.columns,
-                        dtypes=GENOME_COVERAGE_SCHEMA.dtypes_dict).lazy()
+                        schema_overrides=GENOME_COVERAGE_SCHEMA.dtypes_dict).lazy()
 
     if features_to_keep is not None:
         cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(feature_keep))
