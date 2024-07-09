@@ -130,7 +130,7 @@ def _parse_qiita_coverages(tgz, compress_size=50_000_000, sample_keep=None,
 
 def _single_df(coverages):
     if len(coverages) > 1:
-        df = pl.concat(coverages)
+        df = pl.concat(coverages, rechunk=True)
     elif len(coverages) == 0:
         raise ValueError("No coverages")
     else:
@@ -315,7 +315,7 @@ def compress_from_stream(sam, bufsize=100_000_000, disable_compression=False):
             current_df = compress_f(pl.concat([current_df, next_df]))
             buf = data.readlines(bufsize)
 
-    return current_df
+    return current_df.rechunk()
 
 
 def parse_coverage(data, features_to_keep):
