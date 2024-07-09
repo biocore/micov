@@ -59,7 +59,7 @@ def _compress(rows):
 
 def compress(df):
     compressed = []
-    for (genome, ), grp in df.group_by([COLUMN_GENOME_ID, ]):
+    for (genome, ), grp in df.rechunk().group_by([COLUMN_GENOME_ID, ]):
         rows = (grp
                  .lazy()
                  .select([COLUMN_START, COLUMN_STOP])
