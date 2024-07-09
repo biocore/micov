@@ -86,6 +86,7 @@ class QiitaCovTests(unittest.TestCase):
         lengths = pl.DataFrame([['GXXX', 600],
                                 ['GYYY', 1100],
                                 ['GZZZ', 2000]],
+                               orient='row',
                                schema=GENOME_LENGTH_SCHEMA.dtypes_flat)
 
         write_qiita_cov(self.name, paths, lengths)
@@ -101,11 +102,13 @@ class QiitaCovTests(unittest.TestCase):
                                          ['GYYY', 100, 400],
                                          ['GYYY', 500, 1000],
                                          ['GZZZ', 200, 400]],
+                                        orient='row',
                                         schema=BED_COV_SCHEMA.dtypes_flat)
 
         exp_cov_percent = pl.DataFrame([['GXXX', 400, 600, (400 / 600) * 100],
                                         ['GYYY', 800, 1100, (800 / 1100) * 100],
                                         ['GZZZ', 200, 2000, (200 / 2000) * 100]],
+                                       orient='row',
                                        schema=GENOME_COVERAGE_SCHEMA.dtypes_flat)
 
         obs_artifact_cov = obs_artifact_cov.sort([COLUMN_GENOME_ID, COLUMN_START])
@@ -124,6 +127,7 @@ class QiitaCovTests(unittest.TestCase):
                             ['G123', 1000, 10000],
                             ['G456', 5, 20],
                             ['G789', 1, 100]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         # always compress
         obs = parse_qiita_coverages(self.name)
@@ -137,6 +141,7 @@ class QiitaCovTests(unittest.TestCase):
                             ['G123', 1000, 10000],
                             ['G456', 5, 20],
                             ['G789', 1, 100]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         # always compress
         obs = parse_qiita_coverages(self.name, compress_size=0)
@@ -152,6 +157,7 @@ class QiitaCovTests(unittest.TestCase):
                             ['G456', 5, 20],
                             ['G789', 1, 100],
                             ['G789', 2, 40]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         obs = parse_qiita_coverages(self.name, compress_size=None)
         obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
@@ -163,6 +169,7 @@ class QiitaCovTests(unittest.TestCase):
                             ['G123', 300, 400],
                             ['G456', 5, 20],
                             ['G789', 1, 100]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         obs = parse_qiita_coverages(self.name,
                                     sample_keep={'sample_a', 'sample_b'})
@@ -175,6 +182,7 @@ class QiitaCovTests(unittest.TestCase):
                             ['G123', 300, 400],
                             ['G456', 5, 20],
                             ['G789', 1, 100]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         obs = parse_qiita_coverages(self.name,
                                     sample_drop={'sample_c', })
@@ -186,6 +194,7 @@ class QiitaCovTests(unittest.TestCase):
                             ['G123', 100, 200],
                             ['G456', 5, 20],
                             ['G789', 2, 40]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         obs = parse_qiita_coverages(self.name,
                                     sample_drop={'sample_c', },
@@ -198,6 +207,7 @@ class QiitaCovTests(unittest.TestCase):
                             ['G123', 100, 200],
                             ['G123', 300, 400],
                             ['G123', 1000, 10000]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         obs = parse_qiita_coverages(self.name,
                                     feature_keep={'G123', })
@@ -207,6 +217,7 @@ class QiitaCovTests(unittest.TestCase):
     def test_parse_qiita_coverages_drop_feature(self):
         exp = pl.DataFrame([['G456', 5, 20],
                             ['G789', 2, 40]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         obs = parse_qiita_coverages(self.name,
                                     sample_drop={'sample_c', },
@@ -236,6 +247,7 @@ class IOTests(unittest.TestCase):
         exp = pl.DataFrame([['a', 10],
                             ['b', 20],
                             ['c', 30]],
+                           orient='row',
                            schema=[COLUMN_GENOME_ID, COLUMN_LENGTH])
         obs = parse_genome_lengths(self.name)
         plt.assert_frame_equal(obs, exp)
@@ -251,6 +263,7 @@ class IOTests(unittest.TestCase):
         exp = pl.DataFrame([['a', 10],
                             ['b', 20],
                             ['c', 30]],
+                           orient='row',
                            schema=[COLUMN_GENOME_ID, COLUMN_LENGTH])
         obs = parse_genome_lengths(self.name)
         plt.assert_frame_equal(obs, exp)
@@ -303,6 +316,7 @@ class IOTests(unittest.TestCase):
                             ['X', 90, 150],
                             ['Y', 10, 60],
                             ['Y', 100, 150]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         obs = compress_from_stream(data, bufsize=2)
         plt.assert_frame_equal(obs.sort([COLUMN_GENOME_ID, ]), exp)
@@ -323,6 +337,7 @@ class IOTests(unittest.TestCase):
                             ['X', 100, 150],
                             ['Y', 10, 60],
                             ['Y', 100, 150]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         obs = compress_from_stream(data, bufsize=2, disable_compression=True)
         plt.assert_frame_equal(obs.sort([COLUMN_GENOME_ID, COLUMN_START]), exp)
@@ -339,6 +354,7 @@ class IOTests(unittest.TestCase):
         exp = pl.DataFrame([['A', 0, 'X', 1, '50M', 51],
                             ['B', 0, 'Y', 10, '50M', 60],
                             ['C', 0, 'X', 100, '50M', 150]],
+                           orient='row',
                            schema=SAM_SUBSET_SCHEMA_PARSED.dtypes_flat)
         obs = parse_sam_to_df(data)
         plt.assert_frame_equal(obs, exp)

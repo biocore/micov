@@ -40,7 +40,7 @@ def _parse_bed_cov(data, feature_drop, feature_keep, lazy):
 
     frame = pl.read_csv(data.read(), separator='\t',
                         new_columns=BED_COV_SCHEMA.columns,
-                        dtypes=BED_COV_SCHEMA.dtypes_dict,
+                        schema_overrides=BED_COV_SCHEMA.dtypes_dict,
                         has_header=False, skip_rows=skip_rows).lazy()
 
     if feature_drop is not None:
@@ -130,7 +130,7 @@ def _parse_qiita_coverages(tgz, compress_size=50_000_000, sample_keep=None,
 
 def _single_df(coverages):
     if len(coverages) > 1:
-        df = pl.concat(coverages)
+        df = pl.concat(coverages, rechunk=True)
     elif len(coverages) == 0:
         raise ValueError("No coverages")
     else:
@@ -315,13 +315,13 @@ def compress_from_stream(sam, bufsize=100_000_000, disable_compression=False):
             current_df = compress_f(pl.concat([current_df, next_df]))
             buf = data.readlines(bufsize)
 
-    return current_df
+    return current_df.rechunk()
 
 
 def parse_coverage(data, features_to_keep):
     cov_df = pl.read_csv(data.read(), separator='\t',
                         new_columns=GENOME_COVERAGE_SCHEMA.columns,
-                        dtypes=GENOME_COVERAGE_SCHEMA.dtypes_dict).lazy()
+                        schema_overrides=GENOME_COVERAGE_SCHEMA.dtypes_dict).lazy()
 
     if features_to_keep is not None:
         cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(feature_keep))

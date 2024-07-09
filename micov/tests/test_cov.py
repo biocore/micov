@@ -15,6 +15,7 @@ class CovTests(unittest.TestCase):
                             ['G123', 101, 110],
                             ['G456', 200, 300],
                             ['G456', 400, 500]],
+                           orient='row',
                            schema=BED_COV_SCHEMA.dtypes_flat)
         data = pl.DataFrame([['G123', 11, 50],
                              ['G123', 20, 30],
@@ -25,6 +26,7 @@ class CovTests(unittest.TestCase):
                              ['G123', 51, 89],
                              ['G123', 101, 110],
                              ['G456', 400, 500]],
+                            orient='row',
                             schema=BED_COV_SCHEMA.dtypes_flat)
         obs = compress(data).sort(COLUMN_GENOME_ID)
         plt.assert_frame_equal(obs, exp)
@@ -34,16 +36,19 @@ class CovTests(unittest.TestCase):
                              ['G456', 200, 299],
                              ['G123', 90, 100],
                              ['G456', 400, 500]],
+                            orient='row',
                             schema=BED_COV_SCHEMA.dtypes_flat)
         lengths = pl.DataFrame([['G123', 100],
                                 ['G456', 1000],
                                 ['G789', 500]],
+                               orient='row',
                                schema=GENOME_LENGTH_SCHEMA.dtypes_flat)
 
         g123_covered = (50 - 11) + (100 - 90)
         g456_covered = (299 - 200) + (500 - 400)
         exp = pl.DataFrame([['G123', g123_covered, 100, (g123_covered / 100) * 100],
                             ['G456', g456_covered, 1000, (g456_covered / 1000) * 100]],
+                           orient='row',
                            schema=GENOME_COVERAGE_SCHEMA.dtypes_flat)
 
         obs = coverage_percent(data, lengths).sort(COLUMN_GENOME_ID).collect()

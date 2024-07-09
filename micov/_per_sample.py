@@ -32,4 +32,4 @@ def compress_per_sample(coverage, lengths):
     if len(sample_contig_coverage) == 0:
         return None
     else:
-        return pl.concat(sample_contig_coverage)
+        return pl.concat(sample_contig_coverage, rechunk=True)
