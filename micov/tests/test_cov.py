@@ -1,7 +1,7 @@
 import unittest
 from micov._cov import compress, coverage_percent
 from micov._constants import (BED_COV_SCHEMA, COLUMN_GENOME_ID,
-                              GENOME_LENGTH_SCHEMA,
+                              GENOME_LENGTH_SCHEMA, COLUMN_START,
                               GENOME_COVERAGE_SCHEMA)
 import polars as pl
 import polars.testing as plt
@@ -28,7 +28,7 @@ class CovTests(unittest.TestCase):
                              ['G456', 400, 500]],
                             orient='row',
                             schema=BED_COV_SCHEMA.dtypes_flat)
-        obs = compress(data).sort(COLUMN_GENOME_ID)
+        obs = compress(data).sort(COLUMN_GENOME_ID).sort(COLUMN_START)
         plt.assert_frame_equal(obs, exp)
 
     def test_coverage_percent(self):
