@@ -152,8 +152,7 @@ def _test_has_header(line):
     if isinstance(line, bytes):
         line = line.decode('utf-8')
 
-    genome_id_columns = ('genome-id', 'genome_id', 'feature-id',
-                         'feature_id')
+    genome_id_columns = (COLUMN_GENOME_ID)
 
     if line.startswith('#'):
         has_header = True
@@ -171,9 +170,8 @@ def _test_has_header_taxonomy(line):
     if isinstance(line, bytes):
         line = line.decode('utf-8')
 
-    genome_id_columns = ('genome-id', 'genome_id', 'feature-id',
-                         'feature_id')
-    taxonomy_columns = ('taxonomy', 'name', 'full_name')
+    genome_id_columns = (COLUMN_GENOME_ID)
+    taxonomy_columns = (COLUMN_TAXONOMY)
 
     if line.startswith('#'):
         has_header = True
@@ -238,7 +236,7 @@ def set_taxonomy_as_id(coverages, taxonomy):
                          f"{sorted(missing)[:5]}")
 
     return (coverages
-            .join(taxonomy, on=COLUMN_GENOME_ID, how='left')
+            .join(taxonomy, on=COLUMN_GENOME_ID, how='inner')
             .select(COLUMN_TAXONOMY,
                     pl.exclude(COLUMN_TAXONOMY)))
 
