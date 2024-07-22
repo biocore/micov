@@ -10,7 +10,8 @@ import io
 import gzip
 
 from ._cov import compress, coverage_percent
-from ._constants import (BED_COV_SCHEMA, COLUMN_GENOME_ID, COLUMN_LENGTH,
+from ._constants import (BED_COV_SCHEMA, GENOME_COVERAGE_SCHEMA,
+                         COLUMN_GENOME_ID, COLUMN_LENGTH, COLUMN_TAXONOMY,
                          SAM_SUBSET_SCHEMA, COLUMN_CIGAR, COLUMN_STOP,
                          COLUMN_START, COLUMN_SAMPLE_ID)
 from ._convert import cigar_to_lens
@@ -151,14 +152,31 @@ def _test_has_header(line):
     if isinstance(line, bytes):
         line = line.decode('utf-8')
 
-    genome_id_columns = ('genome-id', 'genome_id', 'feature-id',
-                         'feature_id')
+    genome_id_columns = (COLUMN_GENOME_ID)
 
     if line.startswith('#'):
         has_header = True
     elif line.split('\t')[0] in genome_id_columns:
         has_header = True
     elif not line.split('\t')[1].strip().isdigit():
+        has_header = True
+    else:
+        has_header = False
+
+    return has_header
+
+
+def _test_has_header_taxonomy(line):
+    if isinstance(line, bytes):
+        line = line.decode('utf-8')
+
+    genome_id_columns = (COLUMN_GENOME_ID)
+    taxonomy_columns = (COLUMN_TAXONOMY)
+
+    if line.startswith('#'):
+        has_header = True
+    elif line.split('\t')[0] in genome_id_columns and \
+        line.split('\t')[1] in taxonomy_columns:
         has_header = True
     else:
         has_header = False
@@ -188,6 +206,39 @@ def parse_genome_lengths(lengths):
     rename = {genome_id_col: COLUMN_GENOME_ID,
               length_col: COLUMN_LENGTH}
     return df[[genome_id_col, length_col]].rename(rename)
+
+
+def parse_taxonomy(taxonomy):
+    with open(taxonomy) as fp:
+        first_line = fp.readline()
+
+    has_header = _test_has_header_taxonomy(first_line)
+    df = pl.read_csv(taxonomy, separator='\t', has_header=has_header)
+    genome_id_col = df.columns[0]
+    taxonomy_col = df.columns[1]
+
+    genome_ids = df[genome_id_col]
+    if len(genome_ids) != len(set(genome_ids)):
+        raise ValueError(f"'{genome_id_col}' is not unique")
+
+    rename = {genome_id_col: COLUMN_GENOME_ID,
+              taxonomy_col: COLUMN_TAXONOMY}
+
+    return df[[genome_id_col, taxonomy_col]].rename(rename)
+
+
+def set_taxonomy_as_id(coverages, taxonomy):
+    missing = (set(coverages[COLUMN_GENOME_ID]) -
+               set(taxonomy[COLUMN_GENOME_ID]))
+    if len(missing) > 0:
+        raise ValueError(f"{len(missing)} genome(s) appear unrepresented in "
+                         f"the taxonomy information, examples: "
+                         f"{sorted(missing)[:5]}")
+
+    return (coverages
+            .join(taxonomy, on=COLUMN_GENOME_ID, how='inner')
+            .select(COLUMN_TAXONOMY,
+                    pl.exclude(COLUMN_TAXONOMY)))
 
 
 # TODO: this is not the greatest method name
@@ -305,7 +356,15 @@ def compress_from_stream(sam, bufsize=100_000_000, disable_compression=False):
         if len(buf) == 0:
             return None
 
-        if len(buf[0].split(b'\t')) == 3:
+        line = buf[0]
+        if isinstance(line, str):
+            delim = '\t'
+        elif isinstance(line, bytes):
+            delim = b'\t'
+        else:
+            raise ValueError(f"Unexpected buffer type: {type(line)}")
+
+        if len(line.split(delim)) == 3:
             parse_f = parse_bed_cov_to_df
         else:
             parse_f = parse_sam_to_df
@@ -324,6 +383,6 @@ def parse_coverage(data, features_to_keep):
                         schema_overrides=GENOME_COVERAGE_SCHEMA.dtypes_dict).lazy()
 
     if features_to_keep is not None:
-        cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(feature_keep))
+        cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
 
     return cov_df

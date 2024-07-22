@@ -1,12 +1,13 @@
 import unittest
 import io
 import sys
-from micov._io import (parse_genome_lengths, parse_qiita_coverages,
-                       _single_df, _check_and_compress, parse_sam_to_df,
-                       compress_from_stream, write_qiita_cov)
+from micov._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
+                       parse_qiita_coverages, _single_df, _check_and_compress, 
+                       parse_sam_to_df, compress_from_stream, write_qiita_cov)
 from micov._constants import (BED_COV_SCHEMA, COLUMN_GENOME_ID, COLUMN_START,
-                              COLUMN_LENGTH, SAM_SUBSET_SCHEMA_PARSED,
-                              GENOME_COVERAGE_SCHEMA, GENOME_LENGTH_SCHEMA)
+                              COLUMN_LENGTH, COLUMN_TAXONOMY, 
+                              SAM_SUBSET_SCHEMA_PARSED, GENOME_COVERAGE_SCHEMA, 
+                              GENOME_LENGTH_SCHEMA)
 import tempfile
 import tarfile
 import time
@@ -303,6 +304,77 @@ class IOTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Lengths of zero or less"):
             parse_genome_lengths(self.name)
+
+    def test_parse_taxonomy_good(self):
+        data = ("genome_id\ttaxonomy\tbaz\n"
+                "a\tspecies1\txyz\n"
+                "b\tspecies2\txyz\n"
+                "c\tspecies3\txyz\n")
+        
+        with open(self.name, 'w') as fp:
+            fp.write(data)
+
+        exp = pl.DataFrame([['a', "species1"],
+                            ['b', "species2"],
+                            ['c', "species3"]],
+                           schema=[COLUMN_GENOME_ID, COLUMN_TAXONOMY])
+        obs = parse_taxonomy(self.name)
+        plt.assert_frame_equal(obs, exp)
+
+    def test_parse_taxonomy_noheader(self):
+        data = ("a\tspecies1\txyz\n"
+                "b\tspecies2\txyz\n"
+                "c\tspecies3\txyz\n")
+        
+        with open(self.name, 'w') as fp:
+            fp.write(data)
+
+        exp = pl.DataFrame([['a', "species1"],
+                            ['b', "species2"],
+                            ['c', "species3"]],
+                           schema=[COLUMN_GENOME_ID, COLUMN_TAXONOMY])
+        obs = parse_taxonomy(self.name)
+        plt.assert_frame_equal(obs, exp)
+
+    def test_set_taxonomy_as_id(self):
+        cov = pl.DataFrame({
+            "genome_id": ["G000006925", "G000007525", "G000008865"],
+            "covered": [2501356, 4378, 2582128],
+            "length": [4828820, 2260266, 5594477],
+            "percent_covered": [51.800564112971706, 0.19369401654495533, 46.154948889771106]
+            })
+
+        tax = pl.DataFrame({
+            "genome_id": ["G000009925", "G000010425", "G000006925", "G000007525", "G000008865"],
+            "taxonomy": ["species1", "species2", "species3", "species4", "species5"]
+            })
+
+        exp = pl.DataFrame({
+            "taxonomy": ["species3", "species4", "species5"],
+            "genome_id": ["G000006925", "G000007525", "G000008865"],
+            "covered": [2501356, 4378, 2582128],
+            "length": [4828820, 2260266, 5594477],
+            "percent_covered": [51.800564112971706, 0.19369401654495533, 46.154948889771106]
+            })
+
+        obs = set_taxonomy_as_id(cov, tax)
+        plt.assert_frame_equal(obs, exp)
+
+    def test_taxonomy_as_id_missing_taxonomy(self):
+        cov = pl.DataFrame({
+            "genome_id": ["G000006925", "G000007525", "G000008865"],
+            "covered": [2501356, 4378, 2582128],
+            "length": [4828820, 2260266, 5594477],
+            "percent_covered": [51.800564112971706, 0.19369401654495533, 46.154948889771106]
+            })
+
+        tax = pl.DataFrame({
+            "genome_id": ["G000009925", "G000010425", "G000006925", "G000007525"],
+            "taxonomy": ["species1", "species2", "species3", "species4"]
+            })
+
+        with self.assertRaisesRegex(ValueError, "[G000008865]"):
+            obs = set_taxonomy_as_id(cov, tax)
 
     def test_compress_from_stream(self):
         data = io.BytesIO(
