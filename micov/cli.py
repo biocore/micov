@@ -120,8 +120,8 @@ def compress(data, output, disable_compression, lengths, taxonomy):
             dfs.append(df)
         coverage = _single_df(_check_and_compress(dfs, compress_size=0))
         genome_coverage = coverage_percent(coverage, lengths).collect()
-    else: 
-        # compress data in blocks to avoid loading full mapping data into 
+    else:
+        # compress data in blocks to avoid loading full mapping data into
         # memory and compress as we go along.
         df = compress_from_stream(data,
                                   disable_compression=disable_compression)
