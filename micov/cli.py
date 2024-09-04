@@ -105,10 +105,7 @@ def compress(data, output, disable_compression, lengths, taxonomy):
             taxonomy = parse_taxonomy(taxonomy)
 
     if os.path.isdir(data):
-        file_list = glob(data + "/*.sam")
-        file_list_gz = glob(data + "/*.sam.gz")
-        file_list_xz = glob(data + "/*.sam.xz")
-        file_list = file_list + file_list_gz + file_list_xz
+        file_list = glob("data" + "/*.sam") + glob(data + '/*.sam.[xz,gz]')
 
         dfs = []
         for samfile in file_list:
