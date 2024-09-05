@@ -16,7 +16,11 @@ from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
+from ._utils import configure_logging
 from ._constants import COLUMN_SAMPLE_ID
+
+
+logger = configure_logging()
 
 
 def _first_col_as_set(fp):
@@ -105,41 +109,33 @@ def compress(data, output, disable_compression, lengths, taxonomy):
             taxonomy = parse_taxonomy(taxonomy)
 
     if os.path.isdir(data):
-        file_list = glob("data" + "/*.sam") + glob(data + '/*.sam.[xz,gz]')
-
-        dfs = []
-        for samfile in file_list:
-            df = compress_from_stream(samfile,
-                                      disable_compression=disable_compression)
-            if df is None or len(df) == 0:
-                click.echo("File appears empty...", err=True)
-                sys.exit(0)
-            dfs.append(df)
-        coverage = _single_df(_check_and_compress(dfs, compress_size=0))
-        genome_coverage = coverage_percent(coverage, lengths).collect()
+        file_list = glob(data + "/*.sam") + glob(data + '/*.sam.xz') + glob(data + '/*.sam.gz')
     else:
-        # compress data in blocks to avoid loading full mapping data into
-        # memory and compress as we go along.
-        df = compress_from_stream(data,
-                                  disable_compression=disable_compression)
+        file_list = [data]
+
+    dfs = []
+    for samfile in file_list:
+        df = compress_from_stream(samfile,
+                                    disable_compression=disable_compression)
         if df is None or len(df) == 0:
-            click.echo("File appears empty...", err=True)
-            sys.exit(0)
-
-        if lengths is None:
-            df.write_csv(output, separator='\t', include_header=True)
+            logger.warning("File appears empty...")
         else:
-            genome_coverage = coverage_percent(df, lengths).collect()
+            dfs.append(df)
+    coverage = _single_df(_check_and_compress(dfs, compress_size=0))
 
-    if taxonomy is None:
-        genome_coverage.write_csv(output, separator='\t', include_header=True)
+    if lengths is None:
+        coverage.write_csv(output, separator='\t', include_header=True)
     else:
-        genome_coverage_with_taxonomy = set_taxonomy_as_id(
-            genome_coverage, taxonomy
-            )
-        genome_coverage_with_taxonomy.write_csv(
-            output, separator='\t', include_header=True
-            )
+        genome_coverage = coverage_percent(coverage, lengths).collect()
+
+        if taxonomy is None:
+            genome_coverage.write_csv(output, separator='\t',
+                                      include_header=True)
+        else:
+            genome_coverage_with_taxonomy = set_taxonomy_as_id(genome_coverage,
+                                                               taxonomy)
+            genome_coverage_with_taxonomy.write_csv(output, separator='\t',
+                                                    include_header=True)
 
 
 @cli.command()
