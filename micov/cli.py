@@ -16,11 +16,8 @@ from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
-from ._utils import configure_logging
+from ._utils import logger
 from ._constants import COLUMN_SAMPLE_ID
-
-
-logger = configure_logging()
 
 
 def _first_col_as_set(fp):

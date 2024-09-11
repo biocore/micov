@@ -1,7 +1,7 @@
 import logging
 
 
-def configure_logging():
+def configure_logger():
     logger = logging.getLogger("micov")
     logger.setLevel(logging.INFO)
     if not logger.hasHandlers():
@@ -12,3 +12,6 @@ def configure_logging():
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     return logger
+
+
+logger = configure_logger()
