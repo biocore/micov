@@ -7,14 +7,16 @@ import os
 import io
 import sys
 import tqdm
+from glob import glob
 from ._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
                   parse_qiita_coverages, parse_sam_to_df, write_qiita_cov,
                   parse_sample_metadata, compress_from_stream,
-                  parse_bed_cov_to_df)
+                  parse_bed_cov_to_df, _single_df, _check_and_compress)
 from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
+from ._utils import logger
 from ._constants import COLUMN_SAMPLE_ID
 
 
@@ -103,27 +105,36 @@ def compress(data, output, disable_compression, lengths, taxonomy):
         if taxonomy is not None:
             taxonomy = parse_taxonomy(taxonomy)
 
-    # compress data in blocks to avoid loading full mapping data into memory
-    # and compress as we go along.
-    df = compress_from_stream(data, disable_compression=disable_compression)
-    if df is None or len(df) == 0:
-        click.echo("File appears empty...", err=True)
-        sys.exit(0)
+    if os.path.isdir(data):
+        file_list = (glob(data + "/*.sam")
+                    + glob(data + '/*.sam.xz')
+                    + glob(data + '/*.sam.gz'))
+    else:
+        file_list = [data]
+
+    dfs = []
+    for samfile in file_list:
+        df = compress_from_stream(samfile,
+                                    disable_compression=disable_compression)
+        if df is None or len(df) == 0:
+            logger.warning("File appears empty...")
+        else:
+            dfs.append(df)
+    coverage = _single_df(_check_and_compress(dfs, compress_size=0))
 
     if lengths is None:
-        df.write_csv(output, separator='\t', include_header=True)
+        coverage.write_csv(output, separator='\t', include_header=True)
     else:
-        genome_coverage = coverage_percent(df, lengths).collect()
+        genome_coverage = coverage_percent(coverage, lengths).collect()
 
         if taxonomy is None:
-            genome_coverage.write_csv(output, separator='\t', include_header=True)
+            genome_coverage.write_csv(output, separator='\t',
+                                      include_header=True)
         else:
-            genome_coverage_with_taxonomy = set_taxonomy_as_id(
-                genome_coverage, taxonomy
-                )
-            genome_coverage_with_taxonomy.write_csv(
-                output, separator='\t', include_header=True
-                )
+            genome_coverage_with_taxonomy = set_taxonomy_as_id(genome_coverage,
+                                                               taxonomy)
+            genome_coverage_with_taxonomy.write_csv(output, separator='\t',
+                                                    include_header=True)
 
 
 @cli.command()
