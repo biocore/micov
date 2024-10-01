@@ -2,28 +2,44 @@ import numpy as np
 
 import numba
 import polars as pl
-from ._constants import (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP,
-                         COLUMN_COVERED, BED_COV_SCHEMA,
-                         COLUMN_LENGTH, COLUMN_PERCENT_COVERED)
+from ._constants import (
+    COLUMN_GENOME_ID,
+    COLUMN_START,
+    COLUMN_STOP,
+    COLUMN_COVERED,
+    BED_COV_SCHEMA,
+    COLUMN_LENGTH,
+    COLUMN_PERCENT_COVERED,
+)
 
 
 def coverage_percent(coverages, lengths):
-    missing = (set(coverages[COLUMN_GENOME_ID]) -
-               set(lengths[COLUMN_GENOME_ID]))
+    missing = set(coverages[COLUMN_GENOME_ID]) - set(lengths[COLUMN_GENOME_ID])
     if len(missing) > 0:
-        raise ValueError(f"{len(missing)} genome(s) appear unrepresented in "
-                         f"the length information, examples: "
-                         f"{sorted(missing)[:5]}")
+        raise ValueError(
+            f"{len(missing)} genome(s) appear unrepresented in "
+            f"the length information, examples: "
+            f"{sorted(missing)[:5]}"
+        )
 
-    return (coverages
-               .lazy()
-               .with_columns((pl.col(COLUMN_STOP) -
-                              pl.col(COLUMN_START)).alias(COLUMN_COVERED))
-               .group_by([COLUMN_GENOME_ID, ])
-               .agg(pl.col(COLUMN_COVERED).sum())
-               .join(lengths.lazy(), on=COLUMN_GENOME_ID)
-               .with_columns(((pl.col(COLUMN_COVERED) /
-                               pl.col(COLUMN_LENGTH)) * 100).alias(COLUMN_PERCENT_COVERED)))  # noqa
+    return (
+        coverages.lazy()
+        .with_columns(
+            (pl.col(COLUMN_STOP) - pl.col(COLUMN_START)).alias(COLUMN_COVERED)
+        )
+        .group_by(
+            [
+                COLUMN_GENOME_ID,
+            ]
+        )
+        .agg(pl.col(COLUMN_COVERED).sum())
+        .join(lengths.lazy(), on=COLUMN_GENOME_ID)
+        .with_columns(
+            ((pl.col(COLUMN_COVERED) / pl.col(COLUMN_LENGTH)) * 100).alias(
+                COLUMN_PERCENT_COVERED
+            )
+        )
+    )  # noqa
 
 
 @numba.jit(nopython=True)
@@ -59,22 +75,31 @@ def _compress(rows):
 
 def compress(df):
     compressed = []
-    for (genome, ), grp in df.group_by([COLUMN_GENOME_ID, ]):
-        rows = (grp
-                 .lazy()
-                 .select([COLUMN_START, COLUMN_STOP])
-                 .sort(COLUMN_START)
-                 .collect()
-                 .to_numpy(order='c'))
+    for (genome,), grp in df.group_by(
+        [
+            COLUMN_GENOME_ID,
+        ]
+    ):
+        rows = (
+            grp.lazy()
+            .select([COLUMN_START, COLUMN_STOP])
+            .sort(COLUMN_START)
+            .collect()
+            .to_numpy(order="c")
+        )
 
         grp_compressed = _compress(rows)
-        grp_compressed_df = pl.LazyFrame(grp_compressed,
-                                         schema=[BED_COV_SCHEMA.dtypes_flat[1],
-                                                 BED_COV_SCHEMA.dtypes_flat[2]],
-                                         orient='row')
-        grp_compressed_df = (grp_compressed_df
-                                .with_columns(pl.lit(genome).alias(COLUMN_GENOME_ID))
-                                .select(BED_COV_SCHEMA.columns))
+        grp_compressed_df = pl.LazyFrame(
+            grp_compressed,
+            schema=[
+                BED_COV_SCHEMA.dtypes_flat[1],
+                BED_COV_SCHEMA.dtypes_flat[2],
+            ],
+            orient="row",
+        )
+        grp_compressed_df = grp_compressed_df.with_columns(
+            pl.lit(genome).alias(COLUMN_GENOME_ID)
+        ).select(BED_COV_SCHEMA.columns)
 
         compressed.append(grp_compressed_df.collect())
 

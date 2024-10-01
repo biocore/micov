@@ -29,14 +29,14 @@ def cigar_to_lens(cigar):
 
     """
     align, offset = 0, 0
-    n = ''  # current step size
+    n = ""  # current step size
     for c in cigar:
-        if c in 'MDIHNPSX=':
-            if c in 'M=X':
+        if c in "MDIHNPSX=":
+            if c in "M=X":
                 align += int(n)
-            elif c in 'DN':
+            elif c in "DN":
                 offset += int(n)
-            n = ''
+            n = ""
         else:
             n += c
 
