@@ -6,7 +6,6 @@ import duckdb
 import os
 import io
 import sys
-import tqdm
 from glob import glob
 from ._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
                   parse_qiita_coverages, parse_sam_to_df, write_qiita_cov,
@@ -105,7 +104,7 @@ def compress(data, output, disable_compression, lengths, taxonomy):
         if taxonomy is not None:
             taxonomy = parse_taxonomy(taxonomy)
 
-    if os.path.isdir(data):
+    if data is not None and os.path.isdir(data):
         file_list = (glob(data + "/*.sam")
                     + glob(data + '/*.sam.xz')
                     + glob(data + '/*.sam.gz'))
