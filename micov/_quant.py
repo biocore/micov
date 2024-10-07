@@ -3,53 +3,71 @@ import polars as pl
 
 
 # sherlyn: from input to bin_df for a single genomem cli.py
-# where is the pos coming from (need to build a schema
-# [genome_id, start, stop, sample_id])
+def create_bin_list(genome_length, bin_num):
+    # note that bin_list is adjusted to 1-indexed to be compatible with pl.cut
+    bin_list_pos_stop = (
+        pl.Series("a", [0, genome_length], strict=False)
+        .hist(bin_count=bin_num)
+        .lazy()
+        .select(pl.col("breakpoint").alias("bin_stop"))
+        .with_row_index("bin_idx", offset=1)
+    )
+    bin_list_pos_start = (
+        pl.Series("a", [0, genome_length], strict=False)
+        .hist(bin_count=bin_num)
+        .lazy()
+        .select(pl.col("breakpoint").alias("bin_start"))
+        .with_row_index("bin_idx", offset=2)
+    )
+    bin_list = (
+        bin_list_pos_start.join(bin_list_pos_stop, on="bin_idx", how="right")
+        .fill_null(0)
+        .select([pl.col("bin_idx"), pl.col("bin_start"), pl.col("bin_stop")])
+        .collect()
+    )
+    return bin_list
+
+
 def pos_to_bins(pos, genome_length, bin_num):
-    obs_count, bin_edges = np.histogram(
-        pos.select(pl.col("start")), bins=bin_num, range=(0, genome_length)
-    )
-    bin_list = pl.DataFrame(
-        {
-            "bin_idx": np.arange(len(bin_edges) - 1),
-            "bin_start": bin_edges[:-1].astype(int),  # Start of each bin
-            "bin_stop": bin_edges[1:].astype(int),  # End of each bin
-        }
-    )
+    pos = pos.lazy()
+    bin_list = create_bin_list(genome_length, bin_num).lazy()
 
-    start_bin_idx = pl.Series(
-        "start_bin_idx",
-        np.digitize(pos.select(pl.col("start")).to_series(), bins=bin_edges),
-    )
-    stop_bin_idx = pl.Series(
-        "stop_bin_idx",
-        np.digitize(pos.select(pl.col("stop")).to_series(), bins=bin_edges),
-    )
-
-    pos = pos.with_columns(
-        [start_bin_idx - 1, stop_bin_idx - 1]  # Adjust for 0-indexing
-    )
-
-    # Adjust stop_bin_idx if stop equals bin_start
-    pos = (
-        pos.join(
-            bin_list, how="left", left_on="stop_bin_idx", right_on="bin_idx"
+    # get start_bin_idx and stop_bin_idx
+    bin_edges = [0.0] + bin_list.select(
+        pl.col("bin_stop")
+    ).collect().to_series().to_list()
+    cut_start = (
+        pos.select(pl.col("start"))
+        .collect()
+        .to_series()
+        .cut(
+            bin_edges,
+            labels=np.arange(len(bin_edges) + 1).astype(str),
+            left_closed=True,
         )
-        .with_columns(
-            pl.when(pl.col("stop") == pl.col("bin_start"))
-            .then(pl.col("stop_bin_idx") - 1)
-            .otherwise(pl.col("stop_bin_idx"))
-            .alias("stop_bin_idx")
-        )
-        .drop(["bin_start", "bin_stop"])
+        .cast(pl.Int64)
+        .alias("start_bin_idx")
     )
+    cut_stop = (
+        pos.select(pl.col("stop"))
+        .collect()
+        .to_series()
+        .cut(
+            bin_edges,
+            labels=np.arange(len(bin_edges) + 1).astype(str),
+            left_closed=False,
+        )
+        .cast(pl.Int64)
+        .alias("stop_bin_idx")
+    )
+    pos = pos.with_columns([cut_start, cut_stop])
 
     # Update stop_bin_idx +1 for pl.arange and generate range of bins
     pos = pos.with_columns(
         (pl.col("stop_bin_idx") + 1).alias("stop_bin_idx_add1")
     )
 
-    # Generate the range of bins covered
+    # Generate range of bins covered
     pos = pos.with_columns(
         pl.int_ranges("start_bin_idx", "stop_bin_idx_add1").alias("bin_idx")
     ).drop("stop_bin_idx_add1")
@@ -57,6 +75,7 @@ def pos_to_bins(pos, genome_length, bin_num):
     # Generate bin_df
     bin_df = (
         pos.explode("bin_idx")
+        .with_columns(pl.col("bin_idx").cast(pl.UInt32).alias("bin_idx"))
         .group_by("bin_idx")
         .agg(
             pl.col("start").len().alias("read_hits"),
@@ -67,7 +86,7 @@ def pos_to_bins(pos, genome_length, bin_num):
         .join(bin_list, how="left", on="bin_idx")
     )
 
-    return bin_df, pos
+    return bin_df.collect(), pos.collect()
 
 
 # caitlin: micov_calc, micov_main, _plots
@@ -80,17 +99,27 @@ if __name__ == "__main__":
     input1 = ""
     input2 = ""
 
-    data = {
-        "genome_id": ["G000006605", "G000006605", "G000006605", "G000006605"],
-        "start": [5, 2, 11, 54],
-        "stop": [7, 7, 15, 59],
-        "sample_id": ["A", "B", "A", "C"],
-    }
-    df = pl.DataFrame(data)
+    df = pl.DataFrame(
+        [
+            ["G000006605", 5, 20, "A"],
+            ["G000006605", 10, 17, "A"],
+            ["G000006605", 11, 15, "A"],
+            ["G000006605", 54, 59, "A"],
+            ["G000006605", 71, 76, "B"],
+            ["G000006605", 95, 99, "B"],
+        ],
+        orient="row",
+        schema=[
+            ("genome_id", str),
+            ("start", int),
+            ("stop", int),
+            ("sample_id", str),
+        ],
+    )
     genome_length = 100
-    bin_size = 10
+    bin_num = 10
 
     # run function
-    res1, res2 = pos_to_bins(df, genome_length, bin_size)
-    print(res1)
-    print(res2)
+    bin_df, pos_updated = pos_to_bins(df, genome_length, bin_num)
+    print(bin_df)
+    print(pos_updated)
