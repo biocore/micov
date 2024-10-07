@@ -3,6 +3,7 @@ include LICENSE
 include ChangeLog.md
 include Makefile
 include pyproject.toml
+include cli_test.sh
 
 graft micov
 graft ci
