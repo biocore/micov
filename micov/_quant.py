@@ -120,6 +120,7 @@ if __name__ == "__main__":
     bin_num = 10
 
     # run function
+    pos_to_bins(df, genome_length, bin_num)
     bin_df, pos_updated = pos_to_bins(df, genome_length, bin_num)
-    print(bin_df)
-    print(pos_updated)
+    # print(bin_df)
+    # print(pos_updated)
