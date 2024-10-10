@@ -23,6 +23,7 @@ def create_bin_list(genome_length, bin_num):
         bin_list_pos_start.join(bin_list_pos_stop, on="bin_idx", how="right")
         .fill_null(0)
         .select([pl.col("bin_idx"), pl.col("bin_start"), pl.col("bin_stop")])
+        .with_columns(pl.col("bin_idx").cast(pl.Int64))
         .collect()
     )
     return bin_list
@@ -75,12 +76,11 @@ def pos_to_bins(pos, genome_length, bin_num):
     # Generate bin_df
     bin_df = (
         pos.explode("bin_idx")
-        .with_columns(pl.col("bin_idx").cast(pl.UInt32).alias("bin_idx"))
         .group_by("bin_idx")
         .agg(
             pl.col("start").len().alias("read_hits"),
             pl.col("sample_id").n_unique().alias("sample_hits"),
-            pl.col("sample_id").unique().alias("samples"),
+            pl.col("sample_id").unique().sort().alias("samples"),
         )
         .sort(by="bin_idx")
         .join(bin_list, how="left", on="bin_idx")
@@ -120,7 +120,4 @@ if __name__ == "__main__":
     bin_num = 10
 
     # run function
-    pos_to_bins(df, genome_length, bin_num)
     bin_df, pos_updated = pos_to_bins(df, genome_length, bin_num)
-    # print(bin_df)
-    # print(pos_updated)
