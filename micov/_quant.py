@@ -2,7 +2,20 @@ import numpy as np
 import polars as pl
 
 
-# sherlyn: from input to bin_df for a single genomem cli.py
+def make_csv_ready(df):
+    return df.with_columns(
+        (
+            pl.lit("[") +
+            pl.col(x)
+            .list.eval(pl.element().cast(str))
+            .list.join(",") +
+            pl.lit("]")
+        ).alias(x)
+        for x, y in df.schema.items()
+        if y == pl.List(pl.String) or y == pl.List(pl.Int64)
+    )
+
+
 def create_bin_list(genome_length, bin_num):
     # note that bin_list is adjusted to 1-indexed to be compatible with pl.cut
     bin_list_pos_stop = (
@@ -87,37 +100,3 @@ def pos_to_bins(pos, genome_length, bin_num):
     )
 
     return bin_df.collect(), pos.collect()
-
-
-# caitlin: micov_calc, micov_main, _plots
-# - a polar dataframe of bin_df + other stuff
-# - pl.DataFrame(bin_df)
-
-# unit tests
-
-if __name__ == "__main__":
-    input1 = ""
-    input2 = ""
-
-    df = pl.DataFrame(
-        [
-            ["G000006605", 5, 20, "A"],
-            ["G000006605", 10, 17, "A"],
-            ["G000006605", 11, 15, "A"],
-            ["G000006605", 54, 59, "A"],
-            ["G000006605", 71, 76, "B"],
-            ["G000006605", 95, 99, "B"],
-        ],
-        orient="row",
-        schema=[
-            ("genome_id", str),
-            ("start", int),
-            ("stop", int),
-            ("sample_id", str),
-        ],
-    )
-    genome_length = 100
-    bin_num = 10
-
-    # run function
-    bin_df, pos_updated = pos_to_bins(df, genome_length, bin_num)

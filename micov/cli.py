@@ -17,7 +17,8 @@ from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
 from ._utils import logger
-from ._constants import COLUMN_SAMPLE_ID
+from ._constants import COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, BED_COV_SAMPLEID_SCHEMA
+from ._quant import pos_to_bins, make_csv_ready
 
 
 def _first_col_as_set(fp):
@@ -271,7 +272,39 @@ def _load_db(dbbase, sample_metadata, features_to_keep):
                    {sfilt}
                    AND {COLUMN_SAMPLE_ID} IN (SELECT DISTINCT {COLUMN_SAMPLE_ID}
                                               FROM coverage)""")
+                                              
 
+@cli.command()
+@click.option('-pos', '--covered-positions', type=click.Path(exists=True), 
+              required=True, 
+              help='Covered positions calculated from one or more samples')
+@click.option('-o', '--outdir', type=click.Path(exists=True), 
+              required=True, help="Output directory. If new, will be created.")
+@click.option('-g', '--genome-id', type=str,
+              required=True, help="Genome ID of the genome of interest")
+@click.option('-l', '--genome-length', type=int, 
+              required=True, help="Length of the genome of interest")
+@click.option('-n', '--bin-num', type=int, default=1000, 
+              required=False, help="Number of bins")
+def binning(covered_positions, outdir, genome_id, genome_length, bin_num):
+    pos = pl.read_csv(covered_positions, separator='\t',
+                      new_columns=BED_COV_SAMPLEID_SCHEMA.columns,
+                      schema_overrides=BED_COV_SAMPLEID_SCHEMA.dtypes_dict,
+                      has_header=False, skip_rows=1).lazy()
+    pos = pos.filter(pl.col(COLUMN_GENOME_ID).is_in([genome_id]))
+
+    bin_df, pos_updated = pos_to_bins(pos, genome_length, bin_num)
+
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+
+    bin_df = make_csv_ready(bin_df)
+    pos_updated = make_csv_ready(pos_updated)
+
+    bin_df.write_csv(f"{outdir}/bin_stats.tsv", separator="\t", include_header=True)
+    pos_updated.write_csv(f"{outdir}/pos_binned.tsv", separator="\t", 
+                          include_header=True)
+    
 
 if __name__ == '__main__':
     cli()
