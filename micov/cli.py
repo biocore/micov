@@ -287,6 +287,7 @@ def _load_db(dbbase, sample_metadata, features_to_keep):
 @click.option('-n', '--bin-num', type=int, default=1000,
               required=False, help="Number of bins")
 def binning(covered_positions, outdir, genome_id, genome_length, bin_num):
+    """Bin genome positions and quantify read and sample hits across bins."""
     pos = pl.read_csv(covered_positions, separator='\t',
                       new_columns=BED_COV_SAMPLEID_SCHEMA.columns,
                       schema_overrides=BED_COV_SAMPLEID_SCHEMA.dtypes_dict,
