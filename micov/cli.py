@@ -272,19 +272,19 @@ def _load_db(dbbase, sample_metadata, features_to_keep):
                    {sfilt}
                    AND {COLUMN_SAMPLE_ID} IN (SELECT DISTINCT {COLUMN_SAMPLE_ID}
                                               FROM coverage)""")
-                                              
+
 
 @cli.command()
-@click.option('-pos', '--covered-positions', type=click.Path(exists=True), 
-              required=True, 
+@click.option('-pos', '--covered-positions', type=click.Path(exists=True),
+              required=True,
               help='Covered positions calculated from one or more samples')
-@click.option('-o', '--outdir', type=click.Path(exists=True), 
+@click.option('-o', '--outdir', type=click.Path(exists=True),
               required=True, help="Output directory. If new, will be created.")
 @click.option('-g', '--genome-id', type=str,
               required=True, help="Genome ID of the genome of interest")
-@click.option('-l', '--genome-length', type=int, 
+@click.option('-l', '--genome-length', type=int,
               required=True, help="Length of the genome of interest")
-@click.option('-n', '--bin-num', type=int, default=1000, 
+@click.option('-n', '--bin-num', type=int, default=1000,
               required=False, help="Number of bins")
 def binning(covered_positions, outdir, genome_id, genome_length, bin_num):
     pos = pl.read_csv(covered_positions, separator='\t',
@@ -302,9 +302,9 @@ def binning(covered_positions, outdir, genome_id, genome_length, bin_num):
     pos_updated = make_csv_ready(pos_updated)
 
     bin_df.write_csv(f"{outdir}/bin_stats.tsv", separator="\t", include_header=True)
-    pos_updated.write_csv(f"{outdir}/pos_binned.tsv", separator="\t", 
+    pos_updated.write_csv(f"{outdir}/pos_binned.tsv", separator="\t",
                           include_header=True)
-    
+
 
 if __name__ == '__main__':
     cli()
