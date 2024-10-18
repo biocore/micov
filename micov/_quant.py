@@ -5,11 +5,9 @@ import polars as pl
 def make_csv_ready(df):
     return df.with_columns(
         (
-            pl.lit("[") +
-            pl.col(x)
-            .list.eval(pl.element().cast(str))
-            .list.join(",") +
-            pl.lit("]")
+            pl.lit("[")
+            + pl.col(x).list.eval(pl.element().cast(str)).list.join(",")
+            + pl.lit("]")
         ).alias(x)
         for x, y in df.schema.items()
         if y == pl.List(pl.String) or y == pl.List(pl.Int64)
@@ -37,14 +35,14 @@ def create_bin_list(genome_length, bin_num):
         .fill_null(0)
         .select([pl.col("bin_idx"), pl.col("bin_start"), pl.col("bin_stop")])
         .with_columns(pl.col("bin_idx").cast(pl.Int64))
-        .collect()
+        .lazy()
     )
     return bin_list
 
 
 def pos_to_bins(pos, genome_length, bin_num):
     pos = pos.lazy()
-    bin_list = create_bin_list(genome_length, bin_num).lazy()
+    bin_list = create_bin_list(genome_length, bin_num)
 
     # get start_bin_idx and stop_bin_idx
     bin_edges = [0.0] + bin_list.select(

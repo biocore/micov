@@ -32,7 +32,7 @@ class CovTests(unittest.TestCase):
                 ("bin_start", float),
                 ("bin_stop", float),
             ],
-        )
+        ).lazy()
         plt.assert_frame_equal(obs, exp)
 
     def test_create_bin_list_case_2(self):
@@ -57,7 +57,7 @@ class CovTests(unittest.TestCase):
                 ("bin_start", float),
                 ("bin_stop", float),
             ],
-        )
+        ).lazy()
         plt.assert_frame_equal(obs, exp)
 
     def test_pos_to_bins_case_1(self):
