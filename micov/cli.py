@@ -269,7 +269,6 @@ def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
 def per_sample_monte(parquet_coverage, sample_metadata, sample_metadata_column,
                      features_to_keep, output, plot, iters, target_names):
     """Generate sample group plots and coverage data with a null curve."""
-
     _load_db(parquet_coverage, sample_metadata, features_to_keep)
 
     all_covered_positions = duckdb.sql("SELECT * from covered_positions").pl()
