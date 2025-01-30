@@ -74,7 +74,9 @@ def cumulative_monte(metadata, coverage, positions, target, variable, output,
     target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target)
     coverage = coverage.filter(pl.col(COLUMN_GENOME_ID) == target)
     cov_samples = coverage.select(pl.col(COLUMN_SAMPLE_ID).unique())
-    metadata = metadata.filter(pl.col(COLUMN_SAMPLE_ID).is_in(cov_samples[COLUMN_SAMPLE_ID].to_list()))
+    metadata = metadata.filter(
+        pl.col(COLUMN_SAMPLE_ID).is_in(
+            cov_samples[COLUMN_SAMPLE_ID].to_list()))
 
     if len(target_positions) == 0:
         raise ValueError()
@@ -118,8 +120,9 @@ def cumulative_monte(metadata, coverage, positions, target, variable, output,
         monte = (metadata.select(pl.col(COLUMN_SAMPLE_ID)
                                    .shuffle())
                          .head(max_n))
-        grp_monte = metadata.filter(pl.col(COLUMN_SAMPLE_ID)
-                                      .is_in(monte[COLUMN_SAMPLE_ID].to_list()))
+        grp_monte = metadata.filter(
+            pl.col(COLUMN_SAMPLE_ID).is_in(
+                monte[COLUMN_SAMPLE_ID].to_list()))
         monte_x, cur_y = compute_cumulative(coverage, grp_monte, target,
                                             target_positions, lengths)
         monte_y.append(cur_y)
