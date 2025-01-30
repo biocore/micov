@@ -368,7 +368,7 @@ def position_plot(metadata, coverage, positions, target, variable, output, scale
 
     plt.legend(labels, fontsize=20)
     leg = ax.get_legend()
-    for i, lh in enumerate(leg.legendHandles):
+    for i, lh in enumerate(leg.legend_handles):
         lh.set_color(colors[i])
         lh._sizes = [5.0, ]
 
