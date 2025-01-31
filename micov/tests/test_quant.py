@@ -118,7 +118,9 @@ class CovTests(unittest.TestCase):
             ],
         )
 
-        plt.assert_frame_equal(obs_bin_df, exp_bin_df)
+        # if using polars, we expect 32-bit indices. If using polars-u64-idx
+        # then we expect 64-bit
+        plt.assert_frame_equal(obs_bin_df, exp_bin_df, check_dtypes=False)
         plt.assert_frame_equal(obs_pos_updated, exp_pos_updated)
 
     def test_pos_to_bins_case_2(self):
@@ -180,7 +182,9 @@ class CovTests(unittest.TestCase):
             ],
         )
 
-        plt.assert_frame_equal(obs_bin_df, exp_bin_df)
+        # if using polars, we expect 32-bit indices. If using polars-u64-idx
+        # then we expect 64-bit
+        plt.assert_frame_equal(obs_bin_df, exp_bin_df, check_dtypes=False)
         plt.assert_frame_equal(obs_pos_updated, exp_pos_updated)
 
     def test_pos_to_bins_case_3(self):
@@ -237,7 +241,9 @@ class CovTests(unittest.TestCase):
             ],
         )
 
-        plt.assert_frame_equal(obs_bin_df, exp_bin_df)
+        # if using polars, we expect 32-bit indices. If using polars-u64-idx
+        # then we expect 64-bit
+        plt.assert_frame_equal(obs_bin_df, exp_bin_df, check_dtypes=False)
         plt.assert_frame_equal(obs_pos_updated, exp_pos_updated)
 
     def test_pos_to_bins_case_4(self):
@@ -295,7 +301,9 @@ class CovTests(unittest.TestCase):
             ],
         )
 
-        plt.assert_frame_equal(obs_bin_df, exp_bin_df)
+        # if using polars, we expect 32-bit indices. If using polars-u64-idx
+        # then we expect 64-bit
+        plt.assert_frame_equal(obs_bin_df, exp_bin_df, check_dtypes=False)
         plt.assert_frame_equal(obs_pos_updated, exp_pos_updated)
 
 
