@@ -28,7 +28,7 @@ def _first_col_as_set(fp):
     return set(df[df.columns[0]])
 
 
-def set_target_names(target_names):
+def _set_target_names(target_names):
     if target_names is not None:
         target_names = dict(pl.scan_csv(target_names,
                                         separator='\t',
@@ -273,7 +273,7 @@ def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
     all_coverage = duckdb.sql("SELECT * FROM coverage").pl()
     metadata_pl = duckdb.sql("SELECT * FROM metadata").pl()
 
-    target_names = set_target_names(target_names)
+    target_names = _set_target_names(target_names)
 
     per_sample_plots(all_coverage, all_covered_positions, metadata_pl,
                      sample_metadata_column, output, monte, monte_iters,
@@ -309,25 +309,7 @@ def per_sample_monte(parquet_coverage, sample_metadata, sample_metadata_column,
     all_coverage = duckdb.sql("SELECT * FROM coverage").pl()
     metadata_pl = duckdb.sql("SELECT * FROM metadata").pl()
 
-    if target_names is not None:
-        target_names = dict(pl.scan_csv(target_names,
-                                        separator='\t',
-                                        new_columns=['feature-id', 'lineage'],
-                                        has_header=False)
-                              .with_columns(pl.col('lineage')
-                                              .str
-                                              .split(';')
-                                              .list
-                                              .get(-1)
-                                              .str
-                                              .replace_all(r" |\[|\]", "_")
-                                              .alias('species'))
-                              .select('feature-id', 'species')
-                              .collect()
-                              .iter_rows())
-    else:
-        sql = "SELECT DISTINCT genome_id FROM coverage"
-        target_names = {k[0]: k[0] for k in duckdb.sql(sql).fetchall()}
+    target_names = _set_target_names(target_names)
 
     per_sample_plots_monte(all_coverage, all_covered_positions, metadata_pl,
                            sample_metadata_column, output, target_names, iters)
