@@ -356,7 +356,7 @@ def cumulative_monte(metadata, coverage, positions, target, variable, output,
 def cumulative(metadata, coverage, positions, target, variable, output):
     plt.figure(figsize=(12, 8))
     labels = []
-    ovs = []
+    covs = []
 
     target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target)
     coverage = coverage.filter(pl.col(COLUMN_GENOME_ID) == target)
