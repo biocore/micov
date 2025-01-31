@@ -69,14 +69,6 @@ def per_sample_plots(all_coverage, all_covered_positions, metadata,
                       sample_metadata_column, output, target_name, scale=10000)
 
 
-def per_sample_plots_monte(all_coverage, all_covered_positions, metadata,
-                     sample_metadata_column, output, target_lookup, iters):
-    for genome in all_coverage[COLUMN_GENOME_ID].unique():
-        target_name = target_lookup[genome]
-        cumulative_monte(metadata, all_coverage, all_covered_positions, genome,
-                         sample_metadata_column, output, target_name, iters)
-
-
 def compute_cumulative(coverage, grp, target, target_positions, lengths):
     lengths = coverage[[COLUMN_GENOME_ID, COLUMN_LENGTH]].unique()
 
