@@ -233,8 +233,14 @@ def qiita_to_parquet(qiita_coverages, lengths, output, samples_to_keep,
 @click.option('--output', type=click.Path(exists=False), required=True)
 @click.option('--plot', is_flag=True, default=False,
               help='Generate plots from features')
+@click.option('--monte', type=click.Choice(['focused', 'unfocused']),
+              required=False, default=None,
+              help='Perform a Monte Carlo simulation for a coverage curve')
+@click.option('--monte-iters', type=int,
+              required=False, default=100,
+              help='The number of permutations to perform')
 def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
-                     features_to_keep, output, plot):
+                     features_to_keep, output, plot, monte, monte_iters):
     """Generate sample group plots and coverage data."""
     _load_db(parquet_coverage, sample_metadata, features_to_keep)
 
@@ -243,7 +249,7 @@ def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
     metadata_pl = duckdb.sql("SELECT * FROM metadata").pl()
 
     per_sample_plots(all_coverage, all_covered_positions, metadata_pl,
-                     sample_metadata_column, output)
+                     sample_metadata_column, output, monte, monte_iters)
 
 
 @cli.command()
