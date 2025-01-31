@@ -259,7 +259,7 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
 
 
 @numba.jit(nopython=True)
-def _get_covered(x_start_stop):
+def get_covered(x_start_stop):
     return [[(x, start), (x, stop)] for (x, start, stop) in x_start_stop]
 
 
@@ -277,7 +277,7 @@ def single_sample_position_plot(positions, lengths, output, scale=None):
                         pl.col(COLUMN_START) / pl.col(COLUMN_LENGTH),
                         pl.col(COLUMN_STOP) / pl.col(COLUMN_LENGTH)))
 
-        covered_positions = _get_covered(grp.collect().to_numpy())
+        covered_positions = get_covered(grp.collect().to_numpy())
         lc = mc.LineCollection(covered_positions,
                                linewidths=2, alpha=0.7)
         ax.add_collection(lc)
@@ -340,7 +340,7 @@ def position_plot(metadata, coverage, positions, target, variable, output,
                                          pl.col(COLUMN_STOP) / length))
 
             if scale is None:
-                covered_positions = _get_covered(cur_positions.collect().to_numpy())
+                covered_positions = get_covered(cur_positions.collect().to_numpy())
                 lc = mc.LineCollection(covered_positions, color=color,
                                        linewidths=0.5, alpha=0.7)
                 ax.add_collection(lc)
