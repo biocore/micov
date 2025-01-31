@@ -12,7 +12,7 @@ from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID,
 
 
 def ordered_coverage(coverage, grp, target, length):
-    """Gather coverage information and order based on total coverage
+    """Gather coverage information and order based on total coverage.
 
     Parameters
     ----------
@@ -34,6 +34,7 @@ def ordered_coverage(coverage, grp, target, length):
     -------
     pl.DataFrame
         The coverage data sorted by coverage, and augmented with rank values
+
     """
     coverage = coverage.lazy()
     grp = grp.lazy()
@@ -67,7 +68,7 @@ def ordered_coverage(coverage, grp, target, length):
 
 
 def slice_positions(positions, id_):
-    """Obtain the genome positions for a sample
+    """Obtain the genome positions for a sample.
 
     Parameters
     ----------
@@ -80,6 +81,7 @@ def slice_positions(positions, id_):
     -------
     pl.DataFrame
         The subset of positions
+
     """
     return (positions
                 .lazy()
@@ -91,7 +93,7 @@ def slice_positions(positions, id_):
 def per_sample_plots(all_coverage, all_covered_positions, metadata,
                      sample_metadata_column, output, monte, monte_iters,
                      target_lookup):
-    """Construct plots for all genomes
+    """Construct plots for all genomes.
 
     Construct coverage and position plots for all genomes described with
     coverage data.
@@ -116,6 +118,7 @@ def per_sample_plots(all_coverage, all_covered_positions, metadata,
         The number of Monte Carlo iterations to perform.
     target_lookup : dict
         A mapping of a genome ID to a name
+
     """
     for genome in all_coverage[COLUMN_GENOME_ID].unique():
         target_name = target_lookup[genome]
@@ -133,7 +136,7 @@ def per_sample_plots(all_coverage, all_covered_positions, metadata,
 
 
 def compute_cumulative(coverage, grp, target, target_positions, lengths):
-    """Accumulate coverage, from samples with the least to most coverage
+    """Accumulate coverage, from samples with the least to most coverage.
 
     Parameters
     ----------
@@ -153,6 +156,7 @@ def compute_cumulative(coverage, grp, target, target_positions, lengths):
     The general approach is to stack all regions covered from samples
     [x, ..., x_n], compress and calculate coverage. This is repeated with
     [x, ..., x_n, x_n + 1].
+
     """
     lengths = coverage[[COLUMN_GENOME_ID, COLUMN_LENGTH]].unique()
 
@@ -187,7 +191,7 @@ def compute_cumulative(coverage, grp, target, target_positions, lengths):
 
 def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
               target_positions, coverage_full, accumulate, lengths):
-    """Perform a Monte Carlo simulation over coverage
+    """Perform a Monte Carlo simulation over coverage.
 
     Parameters
     ----------
@@ -222,6 +226,7 @@ def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
     independent of sample metadata (2) computing coverage over those samples
     (3) repeat `monte_iter` times. This gathers a distribution of coverage
     and provides a null for context for interpreration of the true curves.
+
     """
     length = (lengths.filter(pl.col(COLUMN_GENOME_ID) == target)
                      .select(pl.col(COLUMN_LENGTH))
@@ -291,7 +296,7 @@ def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
 def coverage_curve(metadata_full, coverage_full, positions, target, variable, output,
                    target_name, iters=None, with_monte=None,
                    accumulate=False, min_group_size=10):
-    """Construct coverage curves
+    """Construct coverage curves.
 
     Parameters
     ----------
@@ -326,6 +331,7 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
     -----
     A coverage curve, whether cumulative or non-cumulative, is plotted
     per sample group described by the `variable`.
+
     """
     if with_monte is not None and iters is None:
         raise ValueError("Running with Monte Carlo but no iterations set")
