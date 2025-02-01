@@ -28,6 +28,29 @@ def _first_col_as_set(fp):
     return set(df[df.columns[0]])
 
 
+def _set_target_names(target_names):
+    if target_names is not None:
+        target_names = dict(pl.scan_csv(target_names,
+                                        separator='\t',
+                                        new_columns=['feature-id', 'lineage'],
+                                        has_header=False)
+                              .with_columns(pl.col('lineage')
+                                              .str
+                                              .split(';')
+                                              .list
+                                              .get(-1)
+                                              .str
+                                              .replace_all(r" |\[|\]", "_")
+                                              .alias('species'))
+                              .select('feature-id', 'species')
+                              .collect()
+                              .iter_rows())
+    else:
+        sql = "SELECT DISTINCT genome_id FROM coverage"
+        target_names = {k[0]: k[0] for k in duckdb.sql(sql).fetchall()}
+    return target_names
+
+
 @click.group()
 def cli():
     """micov: microbiome coverage."""
@@ -233,8 +256,16 @@ def qiita_to_parquet(qiita_coverages, lengths, output, samples_to_keep,
 @click.option('--output', type=click.Path(exists=False), required=True)
 @click.option('--plot', is_flag=True, default=False,
               help='Generate plots from features')
+@click.option('--monte', type=click.Choice(['focused', 'unfocused']),
+              required=False, default=None,
+              help='Perform a Monte Carlo simulation for a coverage curve')
+@click.option('--monte-iters', type=int,
+              required=False, default=100,
+              help='The number of permutations to perform')
+@click.option('--target-names', type=str, required=False)
 def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
-                     features_to_keep, output, plot):
+                     features_to_keep, output, plot, monte, monte_iters,
+                     target_names):
     """Generate sample group plots and coverage data."""
     _load_db(parquet_coverage, sample_metadata, features_to_keep)
 
@@ -242,8 +273,11 @@ def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
     all_coverage = duckdb.sql("SELECT * FROM coverage").pl()
     metadata_pl = duckdb.sql("SELECT * FROM metadata").pl()
 
+    target_names = _set_target_names(target_names)
+
     per_sample_plots(all_coverage, all_covered_positions, metadata_pl,
-                     sample_metadata_column, output)
+                     sample_metadata_column, output, monte, monte_iters,
+                     target_names)
 
 
 @cli.command()
@@ -275,25 +309,7 @@ def per_sample_monte(parquet_coverage, sample_metadata, sample_metadata_column,
     all_coverage = duckdb.sql("SELECT * FROM coverage").pl()
     metadata_pl = duckdb.sql("SELECT * FROM metadata").pl()
 
-    if target_names is not None:
-        target_names = dict(pl.scan_csv(target_names,
-                                        separator='\t',
-                                        new_columns=['feature-id', 'lineage'],
-                                        has_header=False)
-                              .with_columns(pl.col('lineage')
-                                              .str
-                                              .split(';')
-                                              .list
-                                              .get(-1)
-                                              .str
-                                              .replace_all(r" |\[|\]", "_")
-                                              .alias('species'))
-                              .select('feature-id', 'species')
-                              .collect()
-                              .iter_rows())
-    else:
-        sql = "SELECT DISTINCT genome_id FROM coverage"
-        target_names = {k[0]: k[0] for k in duckdb.sql(sql).fetchall()}
+    target_names = _set_target_names(target_names)
 
     per_sample_plots_monte(all_coverage, all_covered_positions, metadata_pl,
                            sample_metadata_column, output, target_names, iters)

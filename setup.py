@@ -12,7 +12,7 @@ setup(name='micov',
       packages=find_packages(),
       install_requires=[
           'polars',
-          'matplotlib',
+          'matplotlib >= 3.9',
           'scipy',
           'click',
           'numba'],

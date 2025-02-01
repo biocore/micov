@@ -58,6 +58,17 @@ def _compress(rows):
 
 
 def compress(df):
+    def make_frame(data, genome):
+        frame = pl.LazyFrame(data,
+                             schema=[BED_COV_SCHEMA.dtypes_flat[1],
+                                     BED_COV_SCHEMA.dtypes_flat[2]],
+                             orient='row')
+        return (frame.with_columns(pl.lit(genome)
+                                     .cast(str)
+                                     .alias(COLUMN_GENOME_ID))
+                     .select(BED_COV_SCHEMA.columns)
+                     .collect())
+
     compressed = []
     for (genome, ), grp in df.group_by([COLUMN_GENOME_ID, ]):
         rows = (grp
@@ -68,14 +79,10 @@ def compress(df):
                  .to_numpy(order='c'))
 
         grp_compressed = _compress(rows)
-        grp_compressed_df = pl.LazyFrame(grp_compressed,
-                                         schema=[BED_COV_SCHEMA.dtypes_flat[1],
-                                                 BED_COV_SCHEMA.dtypes_flat[2]],
-                                         orient='row')
-        grp_compressed_df = (grp_compressed_df
-                                .with_columns(pl.lit(genome).alias(COLUMN_GENOME_ID))
-                                .select(BED_COV_SCHEMA.columns))
+        grp_compressed_df = make_frame(grp_compressed, genome)
+        compressed.append(grp_compressed_df)
 
-        compressed.append(grp_compressed_df.collect())
-
-    return pl.concat(compressed)
+    if not compressed:
+        return make_frame([], None)
+    else:
+        return pl.concat(compressed)
