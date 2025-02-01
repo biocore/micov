@@ -14,7 +14,7 @@ from ._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
 from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
-from ._plot import (per_sample_plots, per_sample_plots_monte,
+from ._plot import (per_sample_plots,
                     single_sample_position_plot)
 from ._utils import logger
 from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID,
@@ -278,41 +278,6 @@ def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
     per_sample_plots(all_coverage, all_covered_positions, metadata_pl,
                      sample_metadata_column, output, monte, monte_iters,
                      target_names)
-
-
-@cli.command()
-@click.option('--parquet-coverage', type=click.Path(exists=False),
-              required=True, help=('Pre-computed coverage data as parquet. '
-                                   'This should be the basename used, i.e. '
-                                   'for "foo.coverage.parquet", please use '
-                                   '"foo"'))
-@click.option('--sample-metadata', type=click.Path(exists=True),
-              required=True,
-              help='A metadata file with the sample metadata')
-@click.option('--sample-metadata-column', type=str,
-              required=True,
-              help='The column to consider in the sample metadata')
-@click.option('--features-to-keep', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the features to keep')
-@click.option('--iters', type=int, default=10, required=False)
-@click.option('--target-names', type=str, required=False)
-@click.option('--output', type=click.Path(exists=False), required=True)
-@click.option('--plot', is_flag=True, default=False,
-              help='Generate plots from features')
-def per_sample_monte(parquet_coverage, sample_metadata, sample_metadata_column,
-                     features_to_keep, output, plot, iters, target_names):
-    """Generate sample group plots and coverage data with a null curve."""
-    _load_db(parquet_coverage, sample_metadata, features_to_keep)
-
-    all_covered_positions = duckdb.sql("SELECT * from covered_positions").pl()
-    all_coverage = duckdb.sql("SELECT * FROM coverage").pl()
-    metadata_pl = duckdb.sql("SELECT * FROM metadata").pl()
-
-    target_names = _set_target_names(target_names)
-
-    per_sample_plots_monte(all_coverage, all_covered_positions, metadata_pl,
-                           sample_metadata_column, output, target_names, iters)
 
 
 def _load_db(dbbase, sample_metadata, features_to_keep):
