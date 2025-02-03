@@ -428,10 +428,24 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
 
 @numba.jit(nopython=True)
 def get_covered(x_start_stop):
+    """Remap (x, y1, y1) into [(x, y1), (x, y2)]."""
     return [[(x, start), (x, stop)] for (x, start, stop) in x_start_stop]
 
 
 def single_sample_position_plot(positions, lengths, output, scale=None):
+    """A simple position plot.
+
+    Parameters
+    ----------
+    positions : pl.DataFrame
+        The genome positions to plot
+    lengths : pl.DataFrame
+        The genome lengths
+    output : str
+        A prefix to use on plotting. This can include a directory, for instance,
+        "foo/bar/theprefix"
+
+    """
     positions = (positions
                     .lazy()
                     .join(lengths.lazy(), on=COLUMN_GENOME_ID)
@@ -466,6 +480,35 @@ def single_sample_position_plot(positions, lengths, output, scale=None):
 
 def position_plot(metadata, coverage, positions, target, variable, output,
                   target_name, scale=None):
+    """Construct position plots stratified by metadata value.
+
+    Parameters
+    ----------
+    metadata : pl.DataFrame
+        The metadata for all samples with nonzero coverage to any target
+    coverage : pl.DataFrame
+        The per sample per genome coverage for all samples and genomes
+    positions : pl.DataFrame
+        The per sample per genome regions covered
+    target : str
+        The genome of interest
+    variable : str
+        The specific metadata variable to use for stratification
+    output : str
+        A prefix to use on plotting. This can include a directory, for instance,
+        "foo/bar/theprefix"
+    target_name : str
+        The name of the target
+    scale : int, optional
+        If specified, represent the genome as `scale` number of buckets. A
+        bucket is considered represented if any position within the bucket
+        is covered
+
+    """
+
+    if scale is not None and scale <= 1:
+        raise ValueError("`scale` must be greater than 1")
+
     plt.figure(figsize=(12, 8))
     ax = plt.gca()
     labels = []
