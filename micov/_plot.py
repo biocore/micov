@@ -12,6 +12,30 @@ from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID,
 
 
 def ordered_coverage(coverage, grp, target, length):
+    """Gather coverage information and order based on total coverage.
+
+    Parameters
+    ----------
+    coverage : pl.DataFrame
+        A frame that describes the per sample per genome coverage.
+    grp : pl.DataFrame
+        Sample metadata
+    target : str
+        The target genome to gather coverage against.
+    length :int
+        The length of the genome
+
+    Notes
+    -----
+    Samples in `grp` which we do not have coverage of for the `target` will
+    implicitly be remarked as having a 0.0 reported coverage
+
+    Returns
+    -------
+    pl.DataFrame
+        The coverage data sorted by coverage, and augmented with rank values
+
+    """
     coverage = coverage.lazy()
     grp = grp.lazy()
 
@@ -44,6 +68,21 @@ def ordered_coverage(coverage, grp, target, length):
 
 
 def slice_positions(positions, id_):
+    """Obtain the genome positions for a sample.
+
+    Parameters
+    ----------
+    positions : pl.DataFrame
+        The per sample per genome covered regions
+    id_ : str
+        The sample ID to constrain
+
+    Returns
+    -------
+    pl.DataFrame
+        The subset of positions
+
+    """
     return (positions
                 .lazy()
                 .filter(pl.col(COLUMN_SAMPLE_ID) == id_)
@@ -54,6 +93,33 @@ def slice_positions(positions, id_):
 def per_sample_plots(all_coverage, all_covered_positions, metadata,
                      sample_metadata_column, output, monte, monte_iters,
                      target_lookup):
+    """Construct plots for all genomes.
+
+    Construct coverage and position plots for all genomes described with
+    coverage data.
+
+    Parameters
+    ----------
+    all_coverage : pl.DataFrame
+        The total coverage per sample per genome
+    all_covered_positions : pl.DataFrame
+        The exact covered regions per sample per genome
+    metadata : pl.DataFrame
+        The sample metadata
+    sample_metadata_column : str
+        The specific column to stratify when plotting. Note it is assumed
+        this column is categorical.
+    output : str
+        A prefix to use on plotting. This can include a directory, for instance,
+        "foo/bar/theprefix"
+    monte : str or None
+        One of (None, 'focused', 'unfocused'). See "add_monte" for more detail.
+    monte_iters : int
+        The number of Monte Carlo iterations to perform.
+    target_lookup : dict
+        A mapping of a genome ID to a name
+
+    """
     for genome in all_coverage[COLUMN_GENOME_ID].unique():
         target_name = target_lookup[genome]
 
@@ -69,15 +135,29 @@ def per_sample_plots(all_coverage, all_covered_positions, metadata,
                       sample_metadata_column, output, target_name, scale=10000)
 
 
-def per_sample_plots_monte(all_coverage, all_covered_positions, metadata,
-                     sample_metadata_column, output, target_lookup, iters):
-    for genome in all_coverage[COLUMN_GENOME_ID].unique():
-        target_name = target_lookup[genome]
-        cumulative_monte(metadata, all_coverage, all_covered_positions, genome,
-                         sample_metadata_column, output, target_name, iters)
-
-
 def compute_cumulative(coverage, grp, target, target_positions, lengths):
+    """Accumulate coverage, from samples with the least to most coverage.
+
+    Parameters
+    ----------
+    coverage : pl.DataFrame
+        The total per sample per target coverage data
+    grp : pl.DataFrame
+        Sample metadata
+    target : str
+        The target genome to accumulae coverage over
+    target_positions : pl.DataFrame
+        The per sample per target regions covered
+    lengths : pl.DataFrame
+        Per target lengths
+
+    Notes
+    -----
+    The general approach is to stack all regions covered from samples
+    [x, ..., x_n], compress and calculate coverage. This is repeated with
+    [x, ..., x_n, x_n + 1].
+
+    """
     lengths = coverage[[COLUMN_GENOME_ID, COLUMN_LENGTH]].unique()
 
     if len(lengths) > 1:
@@ -98,6 +178,8 @@ def compute_cumulative(coverage, grp, target, target_positions, lengths):
         current = compress(pl.concat([current, next_]))
         per_cov = coverage_percent(current, lengths).collect()
 
+        # no observed coverage can occur in the unfocused monte carlo simulation
+        # in which case the coverage is zero
         if len(per_cov) == 0:
             val = 0.
         else:
@@ -109,6 +191,43 @@ def compute_cumulative(coverage, grp, target, target_positions, lengths):
 
 def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
               target_positions, coverage_full, accumulate, lengths):
+    """Perform a Monte Carlo simulation over coverage.
+
+    Parameters
+    ----------
+    monte_type : str
+        The specific approach to take, either "focused" or "unfocused".
+        In "focused" mode, only samples with nonzero coverage to the target
+        are considered. In "unfocused" mode, any sample with nonzero coverage
+        to any target is considered.
+    ax : plt.Axes
+        A set of axes to plot into
+    max_x : int
+        The maximum number of samples to sample
+    iters : int
+        The number of iterations to perform
+    metadata_full : pl.DataFrame
+        The metadata for all samples with nonzero coverage to any target
+    target : str
+        The genome of iterest
+    target_positions : pl.DataFrame
+        The per sample per genome regions covered for the target of interest
+    coverage_full : pl.DataFrame
+        The per sample per genome coverage for all samples and genomes
+    accumulate : bool
+        If true, construct a cumulative curve. If false, construct a non
+        cumulative curve.
+    lengths : pl.DataFrame
+        genome to length data
+
+    Notes
+    -----
+    The Monte Carlo procedure works by (1) picking a random set of samples
+    independent of sample metadata (2) computing coverage over those samples
+    (3) repeat `monte_iter` times. This gathers a distribution of coverage
+    and provides a null for context for interpreration of the true curves.
+
+    """
     length = (lengths.filter(pl.col(COLUMN_GENOME_ID) == target)
                      .select(pl.col(COLUMN_LENGTH))
                      .row(0)[0])
@@ -121,6 +240,7 @@ def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
         ls_median = 'dotted'
         ls_bound = '--'
 
+        # constrain to the target
         sample_set = (coverage_full.lazy()
                                    .filter(pl.col(COLUMN_GENOME_ID) == target)
                                    .select(pl.col(COLUMN_SAMPLE_ID))
@@ -130,21 +250,22 @@ def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
         ls_median = 'dashed'
         ls_bound = '-.'
 
+        # take all samples
         sample_set = coverage_full.select(pl.col(COLUMN_SAMPLE_ID).unique())
     else:
         raise ValueError(f"Unknown monte_type='{monte_type}'")
 
     coverage = coverage_full.filter(pl.col(COLUMN_GENOME_ID) == target)
     metadata = metadata_full.filter(pl.col(COLUMN_SAMPLE_ID)
-                                      .is_in(sample_set))
+                                      .is_in(sample_set[COLUMN_SAMPLE_ID]))
 
     monte_y = []
-    monte_x = list(range(1, max_x + 1))
+    monte_x = list(range(max_x))
 
     for it in range(iters):
         monte = (metadata.select(pl.col(COLUMN_SAMPLE_ID)
                                    .shuffle())
-                         .head(max_x))
+                         .head(max_x))[COLUMN_SAMPLE_ID]
         grp_monte = metadata.filter(pl.col(COLUMN_SAMPLE_ID)
                                       .is_in(monte))
 
@@ -171,9 +292,47 @@ def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
                     alpha=fill_alpha)
     return f'Monte Carlo {monte_type} (n={len(monte_x)})'
 
+
 def coverage_curve(metadata_full, coverage_full, positions, target, variable, output,
                    target_name, iters=None, with_monte=None,
                    accumulate=False, min_group_size=10):
+    """Construct coverage curves.
+
+    Parameters
+    ----------
+    metadata_full : pl.DataFrame
+        The metadata for all samples with nonzero coverage to any target
+    coverage_full : pl.DataFrame
+        The per sample per genome coverage for all samples and genomes
+    positions : pl.DataFrame
+        The per sample per genome regions covered
+    target : str
+        The genome of interest
+    variable : str
+        The specific metadata variable to use for stratification
+    output : str
+        A prefix to use on plotting. This can include a directory, for instance,
+        "foo/bar/theprefix"
+    target_name : str
+        The name of the target
+    iters : int, optional
+        The number of Monte Carlo iterations to perform
+    with_monte : str, optional
+        Add in a Monte Carlo curve if 'focused' or 'unfocused'. See `add_monte`
+        for more information.
+    accumulate : bool
+        If true, construct a cumulative curve. If false, construct a non
+        cumulative curve.
+    min_group_size : int, optional
+        The minimum number of samples to have coverage against the target
+        in order to be plotted
+
+    Notes
+    -----
+    A coverage curve, whether cumulative or non-cumulative, is plotted
+    per sample group described by the `variable`.
+
+    """
     if with_monte is not None and iters is None:
         raise ValueError("Running with Monte Carlo but no iterations set")
 
@@ -188,7 +347,8 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
 
     target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target)
     coverage = coverage_full.filter(pl.col(COLUMN_GENOME_ID) == target)
-    cov_samples = coverage.select(pl.col(COLUMN_SAMPLE_ID).unique())
+    cov_samples = (coverage.select(pl.col(COLUMN_SAMPLE_ID)
+                                     .unique())[COLUMN_SAMPLE_ID])
     metadata = metadata_full.filter(pl.col(COLUMN_SAMPLE_ID).is_in(cov_samples))
 
     if len(target_positions) == 0:
@@ -265,206 +425,31 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
     plt.savefig(f'{output}.{target_name}.{target}.{variable}.{tag}.png')
     plt.close()
 
-def cumulative_monte(metadata, coverage, positions, target, variable, output,
-                     target_name, iters):
-    plt.figure(figsize=(12, 8))
-    labels = []
-
-    target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target)
-    coverage = coverage.filter(pl.col(COLUMN_GENOME_ID) == target)
-    cov_samples = coverage.select(pl.col(COLUMN_SAMPLE_ID).unique())
-    metadata = metadata.filter(pl.col(COLUMN_SAMPLE_ID).is_in(cov_samples))
-
-    if len(target_positions) == 0:
-        raise ValueError()
-
-    if len(coverage) == 0:
-        raise ValueError()
-
-    lengths = coverage[[COLUMN_GENOME_ID, COLUMN_LENGTH]].unique()
-
-    if len(lengths) > 1:
-        raise ValueError()
-
-    length = lengths[COLUMN_LENGTH].item(0)
-    value_order = metadata.select(pl.col(variable)
-                                    .unique()
-                                    .sort())[variable]
-    max_n = 0
-    for name, color in zip(value_order, range(0, 10)):
-        color = f'C{color}'
-
-        grp = metadata.filter(pl.col(variable) == name)
-
-        n = len(grp)
-        if n < 10:
-            continue
-        max_n = max(n, max_n)
-
-        cur_x, cur_y = compute_cumulative(coverage, grp, target,
-                                          target_positions, lengths)
-        if cur_x is None:
-            continue
-        else:
-            labels.append(f"{name} (n={len(cur_x)})")
-            plt.plot(cur_x, cur_y, color=color)
-
-    if not labels:
-        return
-
-    monte_y = []
-    for it in range(iters):
-        monte = (metadata.select(pl.col(COLUMN_SAMPLE_ID)
-                                   .shuffle())
-                         .head(max_n))
-        grp_monte = metadata.filter(pl.col(COLUMN_SAMPLE_ID)
-                                      .is_in(monte))
-        monte_x, cur_y = compute_cumulative(coverage, grp_monte, target,
-                                            target_positions, lengths)
-        monte_y.append(cur_y)
-
-    monte_y = np.asarray(monte_y)
-    median = np.median(monte_y, axis=0)
-    std = np.std(monte_y, axis=0)
-
-    plt.plot(monte_x, median, color='k', linestyle='dotted', linewidth=1,
-             alpha=0.6)
-    plt.plot(monte_x, median + std, color='k', linestyle='--', linewidth=1,
-             alpha=0.6)
-    plt.plot(monte_x, median - std, color='k', linestyle='--', linewidth=1,
-             alpha=0.6)
-    plt.fill_between(monte_x, median - std, median + std, color='k',
-                     alpha=0.1)
-    labels.append(f'Monte Carlo (n={len(monte_x)})')
-
-    ax = plt.gca()
-    ax.set_ylabel('Percent genome covered', fontsize=16)
-    ax.set_xlabel('Within group sample rank by coverage', fontsize=16)
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    ax.tick_params(axis='both', which='minor', labelsize=16)
-    ax.set_xlim(0, max_n - 1)
-    ax.set_ylim(0, 100)
-    ax.set_title((f'Cumulative: {target_name}({target}) '
-                  f'({length}bp)'), fontsize=16)
-    plt.legend(labels, fontsize=14)
-
-    plt.tight_layout()
-    plt.savefig(f'{output}.{target_name}.{target}.{variable}.cumulative-monte.png')
-    plt.close()
-
-
-def cumulative(metadata, coverage, positions, target, variable, output):
-    plt.figure(figsize=(12, 8))
-    labels = []
-    covs = []
-
-    target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target)
-    coverage = coverage.filter(pl.col(COLUMN_GENOME_ID) == target)
-
-    if len(target_positions) == 0:
-        raise ValueError()
-
-    if len(coverage) == 0:
-        raise ValueError()
-
-    lengths = coverage[[COLUMN_GENOME_ID, COLUMN_LENGTH]].unique()
-
-    if len(lengths) > 1:
-        raise ValueError()
-
-    length = lengths[COLUMN_LENGTH].item(0)
-
-    value_order = metadata.select(pl.col(variable).unique().sort())[variable]
-    for name in value_order:
-        grp = metadata.filter(pl.col(variable) == name)
-        current = pl.DataFrame([], schema=BED_COV_SCHEMA.dtypes_flat)
-
-        grp_coverage = ordered_coverage(coverage, grp, target, length)
-
-        cur_x, cur_y = compute_cumulative(coverage, grp, target,
-                                          target_positions, lengths)
-        if cur_x is None:
-            continue
-        labels.append(name)
-
-        covs.append(cur_y)
-        plt.plot(cur_x, cur_y)
-
-    if len(covs) > 1:
-        k, p = ss.kruskal(*covs)
-        stat = f'\nKruskal: stat={k:.2f}; p={p:.2e}'
-    else:
-        stat = ''
-
-    ax = plt.gca()
-    ax.set_ylabel('Percent genome covered', fontsize=20)
-    ax.set_xlabel('Proportion of samples', fontsize=20)
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    ax.tick_params(axis='both', which='minor', labelsize=16)
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 100)
-    ax.set_title((f'Cumulative: {target} '
-                  f'({length}bp){stat}'), fontsize=20)
-    plt.legend(labels, fontsize=20)
-
-    plt.tight_layout()
-    plt.savefig(f'{output}.{target}.{variable}.cumulative.png')
-    plt.close()
-
-
-def non_cumulative(metadata, coverage, target, variable, output):
-    plt.figure(figsize=(12, 8))
-    labels = []
-    covs = []
-
-    value_order = metadata.select(pl.col(variable)
-                                    .unique()
-                                    .sort())[variable]
-    for name in value_order:
-        grp = metadata.filter(pl.col(variable) == name)
-        grp_coverage = ordered_coverage(coverage, grp, target, length)
-
-        # assumes all the same contig, so if `ordered_coverage` changes than
-        # this assumption would not be valid
-        # n.b. intentionally leaking `length`
-        length = grp_coverage[COLUMN_LENGTH].item(0)
-
-        if len(grp_coverage) == 0:
-            continue
-
-        labels.append(name)
-        covs.append(grp_coverage[COLUMN_PERCENT_COVERED])
-        plt.plot(grp_coverage['x'], grp_coverage[COLUMN_PERCENT_COVERED])
-
-
-    if len(covs) > 1:
-        k, p = ss.kruskal(*covs)
-        stat = f'\nKruskal: stat={k:.2f}; p={p:.2e}'
-    else:
-        stat = ''
-
-    ax = plt.gca()
-    ax.set_ylabel('Percent genome covered', fontsize=20)
-    ax.set_xlabel('Proportion of samples', fontsize=20)
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    ax.tick_params(axis='both', which='minor', labelsize=16)
-    ax.set_xlim(0, 1)
-    ax.set_ylim(0, 100)
-    ax.set_title((f'Non-cumulative: {target} '
-                  f'({length}bp){stat}'), fontsize=20)
-    plt.legend(labels, fontsize=20)
-
-    plt.tight_layout()
-    plt.savefig(f'{output}.{target}.{variable}.non-cumulative.png')
-    plt.close()
-
 
 @numba.jit(nopython=True)
-def _get_covered(x_start_stop):
+def get_covered(x_start_stop):
+    """Remap (x, y1, y1) into [(x, y1), (x, y2)]."""
     return [[(x, start), (x, stop)] for (x, start, stop) in x_start_stop]
 
 
 def single_sample_position_plot(positions, lengths, output, scale=None):
+    """Construct a metadata-independent position plot.
+
+    Parameters
+    ----------
+    positions : pl.DataFrame
+        The genome positions to plot
+    lengths : pl.DataFrame
+        The genome lengths
+    output : str
+        A prefix to use on plotting. This can include a directory, for instance,
+        "foo/bar/theprefix"
+    scale : int, optional
+        If specified, represent the genome as `scale` number of buckets. A
+        bucket is considered represented if any position within the bucket
+        is covered
+
+    """
     positions = (positions
                     .lazy()
                     .join(lengths.lazy(), on=COLUMN_GENOME_ID)
@@ -478,7 +463,7 @@ def single_sample_position_plot(positions, lengths, output, scale=None):
                         pl.col(COLUMN_START) / pl.col(COLUMN_LENGTH),
                         pl.col(COLUMN_STOP) / pl.col(COLUMN_LENGTH)))
 
-        covered_positions = _get_covered(grp.collect().to_numpy())
+        covered_positions = get_covered(grp.collect().to_numpy())
         lc = mc.LineCollection(covered_positions,
                                linewidths=2, alpha=0.7)
         ax.add_collection(lc)
@@ -499,6 +484,34 @@ def single_sample_position_plot(positions, lengths, output, scale=None):
 
 def position_plot(metadata, coverage, positions, target, variable, output,
                   target_name, scale=None):
+    """Construct position plots stratified by metadata value.
+
+    Parameters
+    ----------
+    metadata : pl.DataFrame
+        The metadata for all samples with nonzero coverage to any target
+    coverage : pl.DataFrame
+        The per sample per genome coverage for all samples and genomes
+    positions : pl.DataFrame
+        The per sample per genome regions covered
+    target : str
+        The genome of interest
+    variable : str
+        The specific metadata variable to use for stratification
+    output : str
+        A prefix to use on plotting. This can include a directory, for instance,
+        "foo/bar/theprefix"
+    target_name : str
+        The name of the target
+    scale : int, optional
+        If specified, represent the genome as `scale` number of buckets. A
+        bucket is considered represented if any position within the bucket
+        is covered
+
+    """
+    if scale is not None and scale <= 1:
+        raise ValueError("`scale` must be greater than 1")
+
     plt.figure(figsize=(12, 8))
     ax = plt.gca()
     labels = []
@@ -541,7 +554,7 @@ def position_plot(metadata, coverage, positions, target, variable, output,
                                          pl.col(COLUMN_STOP) / length))
 
             if scale is None:
-                covered_positions = _get_covered(cur_positions.collect().to_numpy())
+                covered_positions = get_covered(cur_positions.collect().to_numpy())
                 lc = mc.LineCollection(covered_positions, color=color,
                                        linewidths=0.5, alpha=0.7)
                 ax.add_collection(lc)

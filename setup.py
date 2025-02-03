@@ -11,7 +11,7 @@ setup(name='micov',
       author_email='damcdonald@ucsd.edu',
       packages=find_packages(),
       install_requires=[
-          'polars',
+          'polars-u64-idx >= 1.21',
           'matplotlib >= 3.9',
           'scipy',
           'click',
