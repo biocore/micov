@@ -19,7 +19,7 @@ available from that resource.
 ## Installation
 
 We currently recommend creating a separate conda environment, and installing
-into that
+into that.
 
 ```bash
 $ conda create -n micov -c conda-forge polars matplotlib scipy click tqdm numba duckdb pyarrow
@@ -45,37 +45,86 @@ $ micov qiita-coverage \
     --samples-to-keep metadata-with-samples-of-interest.tsv
 ```
 
-The above command can be constrained to particular features as well.
-
-If instead, the desire is to produce non-cumulative, cumulative and coverage
-maps, the command is slightly restructured. This command as well can be limited
-to specific features.
+Exising SAM/BAM data can be compressed into a BED-like format. Genome lengths and taxonomy are optional, but useful for downstream analysis:
 
 ```bash
-$ micov per-sample-group \
-    --qiita-coverages /qmounts/qiita_data/BIOM/191463/coverages.tgz \
-    --qiita-coverages /qmounts/qiita_data/BIOM/191556/coverages.tgz \
-    --qiita-coverages /qmounts/qiita_data/BIOM/191575/coverages.tgz \
-    --qiita-coverages /qmounts/qiita_data/BIOM/191879/coverages.tgz \
-    --lengths genome-lengths-in-reference.map \
-    --sample-metadata metadata-with-samples-of-interest.tsv \
-    --sample-metadata-column cool_categorical_variable \
-    --output plots-example 
+$ micov compress \
+    --data input.sam \
+    --output compressed.tsv \
+    --lengths genome-lengths.tsv \
+    --taxonomy taxonomy.tsv
 ```
 
-Exising .SAM/.BAM can be compressed into a BED-like format by file or pipe. A
-pipe example is shown below:
+Compressed SAM/BAM data can also be piped in:
 
 ```bash
-$ xzcat some_data.sam.xz | micov compress | compressed.tsv
+$ xzcat some_data.sam.xz | micov compress > compressed_output.tsv
 ```
 
-Compressed BED-like representations can be aggregated into Qiita-like coverage
-files as well:
+Generate a coverage visualization for a single sample:
+
+```bash
+$ micov position-plot \
+    --positions sample_coverage.bed \
+    --output sample_coverage_plot.png \
+    --lengths genome-lengths.tsv
+```
+
+Consolidate multiple coverage files into a Qiita-like archive:
 
 ```bash
 $ micov consolidate \
+    --paths file_with_list_of_coverages.txt \
+    --output consolidated_coverages.tgz \
+    --lengths genome-lengths.tsv
+```
+
+Convert Qiita coverage data to Parquet for efficient querying:
+
+```bash
+$ micov qiita-to-parquet \
+    --qiita-coverages /path/to/coverage1.tgz \
+    --qiita-coverages /path/to/coverage2.tgz \
+    --output coverage_data_base \
     --lengths genome-lengths.tsv \
-    --paths a-file-with-a-list-of-paths \
-    --output consolidated.tgz
+    --samples-to-keep sample_metadata.tsv
+```
+
+Generate per-sample group analysis plots from precomputed parquet coverage. Include `--plot` to generate visualizations and `--monte focused` to generate a null coverage curve:
+
+```bash
+$ micov per-sample-group \
+    --parquet-coverage coverage_data_base \
+    --sample-metadata sample_metadata.tsv \
+    --sample-metadata-column experimental_group \
+    --output per_sample_plots \
+    --features-to-keep features_list.tsv \
+    --plot \
+    --monte focused \
+    --monte-iters 100 \
+    --target-names target_names.tsv
+```
+
+Monte Carlo simulation can also be run as a separate command to generate a null coverage curve:
+
+```bash
+$ micov per-sample-monte \
+    --parquet-coverage coverage_data_base \
+    --sample-metadata sample_metadata.tsv \
+    --sample-metadata-column group_column \
+    --output monte_results \
+    --plot \
+    --iters 500 \
+    --target-names target_names.tsv
+```
+
+Analyze coverage distribution by binning the genome positions for a genome of interest:
+
+```bash
+$ micov binning \
+    --covered-positions all_samples_covered_positions.tsv \
+    --outdir binning_results \
+    --genome-id G000005825 \
+    --genome-length 4249288 \
+    --bin-num 1000
 ```
