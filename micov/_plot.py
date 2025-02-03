@@ -433,7 +433,7 @@ def get_covered(x_start_stop):
 
 
 def single_sample_position_plot(positions, lengths, output, scale=None):
-    """A simple position plot.
+    """Construct a metadata-independent position plot.
 
     Parameters
     ----------
@@ -444,6 +444,10 @@ def single_sample_position_plot(positions, lengths, output, scale=None):
     output : str
         A prefix to use on plotting. This can include a directory, for instance,
         "foo/bar/theprefix"
+    scale : int, optional
+        If specified, represent the genome as `scale` number of buckets. A
+        bucket is considered represented if any position within the bucket
+        is covered
 
     """
     positions = (positions
@@ -505,7 +509,6 @@ def position_plot(metadata, coverage, positions, target, variable, output,
         is covered
 
     """
-
     if scale is not None and scale <= 1:
         raise ValueError("`scale` must be greater than 1")
 
