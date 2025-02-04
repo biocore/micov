@@ -22,7 +22,7 @@ We currently recommend creating a separate conda environment, and installing
 into that
 
 ```bash
-$ conda create -n micov -c conda-forge polars matplotlib scipy click tqdm numba duckdb pyarrow
+$ conda env create -f micov.yml
 $ pip install micov
 ```
 
