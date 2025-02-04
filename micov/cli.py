@@ -21,6 +21,7 @@ from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID,
                          BED_COV_SAMPLEID_SCHEMA,
                          COLUMN_START, COLUMN_CIGAR, COLUMN_STOP)
 from ._quant import pos_to_bins, make_csv_ready
+from ._rank import rank_genome_of_interest
 
 
 def _first_col_as_set(fp):
@@ -278,6 +279,12 @@ def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
     per_sample_plots(all_coverage, all_covered_positions, metadata_pl,
                      sample_metadata_column, output, monte, monte_iters,
                      target_names)
+
+    outdir = os.path.dirname(output)
+    ranked_genomes = rank_genome_of_interest(outdir)
+    ranked_genomes = pl.DataFrame(ranked_genomes)
+    ranked_genomes.write_csv(
+        f"{outdir}/genome_ranks.tsv", separator="\t")
 
 
 def _load_db(dbbase, sample_metadata, features_to_keep):
