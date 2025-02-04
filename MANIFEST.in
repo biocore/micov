@@ -4,6 +4,7 @@ include ChangeLog.md
 include Makefile
 include pyproject.toml
 include cli_test.sh
+include micov.yml
 
 graft micov
 graft ci
@@ -14,4 +15,3 @@ global-exclude .git
 global-exclude *.c
 global-exclude *.so
 global-exclude .*.swp
-global-exclude .*.yml
