@@ -45,12 +45,12 @@ $ micov qiita-coverage \
     --samples-to-keep metadata-with-samples-of-interest.tsv
 ```
 
-Exising SAM/BAM data can be compressed into a BED-like format. Genome lengths and taxonomy are optional, but useful for downstream analysis:
+Existing SAM/BAM data can be compressed into a BED-like format. Genome lengths and taxonomy are optional, but useful for downstream analysis:
 
 ```bash
 $ micov compress \
     --data input.sam \
-    --output compressed.tsv \
+    --output compressed_output.tsv \
     --lengths genome-lengths.tsv \
     --taxonomy taxonomy.tsv
 ```
@@ -65,7 +65,7 @@ Generate a coverage visualization for a single sample:
 
 ```bash
 $ micov position-plot \
-    --positions sample_coverage.bed \
+    --positions covered-positions.tsv \
     --output sample_coverage_plot.png \
     --lengths genome-lengths.tsv
 ```
@@ -74,8 +74,8 @@ Consolidate multiple coverage files into a Qiita-like archive:
 
 ```bash
 $ micov consolidate \
-    --paths file_with_list_of_coverages.txt \
-    --output consolidated_coverages.tgz \
+    --paths /path/to/coverage/files \
+    --output consolidated_coverages \
     --lengths genome-lengths.tsv
 ```
 
