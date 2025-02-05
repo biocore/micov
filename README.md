@@ -43,10 +43,11 @@ See below for examples of running micov on SAM files.
 First, activate the **Conda environment** where **micov** is installed:  
 ```bash
 conda activate micov
-cd micov
 ```
 
 ### 2. Process SAM Files to Extract Covered Positions
+If you already have tgz format coverage files from Qitta, go to step 4. 
+
 micov currently only processes **headerless** SAM/BAM files. If your input files contain headers, remove them using `samtools` before running micov:  
 ```bash
 samtools view -h input.sam | grep -v '^@' > input_no_header.sam
@@ -70,7 +71,7 @@ done
 ```
 
 ### 3. Consolidate Coverage Files
-After extracting coverage data, consolidate the `.cov` files into a compressed `.tgz` archive. This requires a **length mapping file (`length.tsv`)**, which maps genome IDs to their corresponding genome lengths. If this file is not available, it can be generated using `seqkit`:
+After extracting coverage data, consolidate the `.cov` files into a compressed `.tgz` archive. This requires a **length mapping file (`length.tsv`)**, which maps genome IDs to their corresponding genome lengths. An example length file can be found in `./example/metadata/length.tsv`. If this file is not available, it can be generated using `seqkit`:
 ```bash
 seqkit fx2tab --length --name --header-line foo.fasta > length.tsv
 ```
@@ -129,13 +130,8 @@ micov per-sample-group \
  --monte-iters 100
 ```
 
-### 7. Deactivate Conda Environment 
-Once the analysis is complete, deactivate the Conda environment:
-```bash
-conda deactivate
-```
 
-### 8. Additional usage (optional)
+### 7. Additional usage (optional)
 
 Exising .SAM/.BAM can be compressed into a BED-like format by file or pipe. A
 pipe example is shown below:
