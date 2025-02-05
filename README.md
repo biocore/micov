@@ -50,7 +50,7 @@ If you already have tgz format coverage files from Qitta, go to step 4.
 
 micov currently only processes **headerless** SAM/BAM files. If your input files contain headers, remove them using `samtools` before running micov:  
 ```bash
-samtools view -h input.sam | grep -v '^@' > input_no_header.sam
+samtools view -S input.sam > output.sam
 ```
 
 Now, create an output directory and run micov on each SAM file:  
@@ -65,7 +65,6 @@ for file in ./example/samfiles/*.sam.xz; do
     # Run micov compress
     micov compress \
         --data "$file"  \
-        --disable-compression \
         --output "./example/coverages/${filename}.cov"
 done
 ```
