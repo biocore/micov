@@ -6,6 +6,14 @@ include pyproject.toml
 include cli_test.sh
 include micov.yml
 
+recursive-include example *.gz
+recursive-include example *.parquet
+recursive-include example *.png
+recursive-include example *.tgz
+recursive-include example *.tsv
+recursive-include example *.txt
+recursive-include example *.xz
+
 graft micov
 graft ci
 

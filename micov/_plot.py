@@ -1,14 +1,18 @@
-import matplotlib.pyplot as plt
 import numba
+import warnings
 import numpy as np
-from matplotlib import collections as mc
 import polars as pl
 import scipy.stats as ss
+import matplotlib.pyplot as plt
+from matplotlib import collections as mc
 from ._cov import coverage_percent, compress
 from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID,
                          COLUMN_PERCENT_COVERED, COLUMN_LENGTH,
                          COLUMN_COVERED,
                          BED_COV_SCHEMA, COLUMN_START, COLUMN_STOP)
+
+
+warnings.simplefilter("ignore", category=UserWarning)
 
 
 def ordered_coverage(coverage, grp, target, length):
@@ -530,6 +534,11 @@ def position_plot(metadata, coverage, positions, target, variable, output,
     value_order = metadata.select(pl.col(variable)
                                     .unique()
                                     .sort())[variable]
+
+    tsv_x = []
+    tsv_y = []
+    tsv_group = []
+
     for name, color in zip(value_order, range(0, 10)):
         grp = metadata.filter(pl.col(variable) == name)
         color = f'C{color}'
@@ -573,6 +582,9 @@ def position_plot(metadata, coverage, positions, target, variable, output,
 
         if scale is not None:
             ax.scatter(hist_x, hist_y, s=.2, color=color, alpha=0.7)
+            tsv_x += hist_x
+            tsv_y += hist_y
+            tsv_group += [name] * len(hist_x)
 
     ax.set_xlim(-0.01, 1.0)
     ax.set_ylim(0, 1.0)
@@ -582,6 +594,16 @@ def position_plot(metadata, coverage, positions, target, variable, output,
         ax.set_ylabel('Unit normalized genome position', fontsize=20)
         scaletag = ""
     else:
+        df = pl.DataFrame({
+                "group": tsv_group,
+                "x": tsv_x,
+                "y": tsv_y
+            })
+        df.write_csv(
+            f"{output}.{target_name}.{target}.{variable}."
+            f"position-plot-1_{scale}th-scale.tsv",
+            separator="\t"
+        )
         ax.set_title(f'Scaled position plot: {target} ({length}bp)', fontsize=20)
         ax.set_ylabel(f'Coverage (1/{scale})th scale', fontsize=20)
         scaletag = f"-1_{scale}th-scale"
