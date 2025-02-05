@@ -1,5 +1,4 @@
 tqdm
-versioneer
 scipy
 pyarrow<16.0.0
 polars=1.21.0

@@ -14,4 +14,3 @@ dependencies:
   - versioneer
   - pip:
       - pip
-      - polars-u64-idx==1.21.0
