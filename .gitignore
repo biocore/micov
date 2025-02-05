@@ -1,0 +1,20 @@
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# bash
+.nfs*
+
+# vscode
+.vscode
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+*.egg-info/
+.installed.cfg
+*.egg

@@ -1,14 +1,18 @@
-import matplotlib.pyplot as plt
 import numba
+import warnings
 import numpy as np
-from matplotlib import collections as mc
 import polars as pl
 import scipy.stats as ss
+import matplotlib.pyplot as plt
+from matplotlib import collections as mc
 from ._cov import coverage_percent, compress
 from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID,
                          COLUMN_PERCENT_COVERED, COLUMN_LENGTH,
                          COLUMN_COVERED,
                          BED_COV_SCHEMA, COLUMN_START, COLUMN_STOP)
+
+
+warnings.simplefilter("ignore", category=UserWarning)
 
 
 def ordered_coverage(coverage, grp, target, length):
