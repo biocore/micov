@@ -1,8 +1,9 @@
-polars
-matplotlib
-scipy
-click
-numba
+tqdm
 versioneer
-duckdb
+scipy
 pyarrow<16.0.0
+polars=1.21.0
+numba
+matplotlib>=3.9.0
+duckdb
+click

@@ -8,8 +8,10 @@ dependencies:
   - matplotlib>=3.9.0
   - numba
   - polars=1.21.0
-  - pyarrow
+  - pyarrow<16.0.0
   - scipy
   - tqdm
+  - versioneer
   - pip:
+      - pip
       - polars-u64-idx==1.21.0
