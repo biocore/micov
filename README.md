@@ -63,9 +63,7 @@ for file in ./example/samfiles/*.sam.xz; do
     echo "Processing $file..."
     
     # Run micov compress
-    micov compress \
-        --data "$file"  \
-        --output "./example/coverages/${filename}.cov"
+    xzcat $file | micov compress | gzip > "./example/coverages/${filename}.cov.gz"
 done
 ```
 
@@ -79,7 +77,7 @@ Now, consolidate the coverage files:
 ```bash
 mkdir -p "./example/consolidate"
 
-find "./example/coverages" -type f -name '*.cov' > "./example/consolidate/paths.txt"
+find "./example/coverages" -type f -name '*.cov.gz' > "./example/consolidate/paths.txt"
 
 micov consolidate \
     --lengths "./example/metadata/length.tsv" \
