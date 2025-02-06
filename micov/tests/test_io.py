@@ -2,11 +2,11 @@ import unittest
 import io
 import sys
 from micov._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
-                       parse_qiita_coverages, _single_df, _check_and_compress, 
+                       parse_qiita_coverages, _single_df, _check_and_compress,
                        parse_sam_to_df, compress_from_stream, write_qiita_cov)
 from micov._constants import (BED_COV_SCHEMA, COLUMN_GENOME_ID, COLUMN_START,
-                              COLUMN_LENGTH, COLUMN_TAXONOMY, 
-                              SAM_SUBSET_SCHEMA_PARSED, GENOME_COVERAGE_SCHEMA, 
+                              COLUMN_LENGTH, COLUMN_TAXONOMY,
+                              SAM_SUBSET_SCHEMA_PARSED, GENOME_COVERAGE_SCHEMA,
                               GENOME_LENGTH_SCHEMA)
 import tempfile
 import tarfile
@@ -114,8 +114,13 @@ class QiitaCovTests(unittest.TestCase):
 
         obs_artifact_cov = obs_artifact_cov.sort([COLUMN_GENOME_ID, COLUMN_START])
         obs_cov_percent = obs_cov_percent.sort([COLUMN_GENOME_ID, ])
-        plt.assert_frame_equal(obs_artifact_cov, exp_artifact_cov)
-        plt.assert_frame_equal(obs_cov_percent, exp_cov_percent)
+
+        # we disable type assertion as these are read from CSV, and the type
+        # is inferred
+        plt.assert_frame_equal(obs_artifact_cov, exp_artifact_cov,
+                               check_dtypes=False)
+        plt.assert_frame_equal(obs_cov_percent, exp_cov_percent,
+                               check_dtypes=False)
 
         for name, exp in covs:
             obs = tgz.extractfile(f'coverages/{name}')
@@ -310,7 +315,7 @@ class IOTests(unittest.TestCase):
                 "a\tspecies1\txyz\n"
                 "b\tspecies2\txyz\n"
                 "c\tspecies3\txyz\n")
-        
+
         with open(self.name, 'w') as fp:
             fp.write(data)
 
@@ -325,7 +330,7 @@ class IOTests(unittest.TestCase):
         data = ("a\tspecies1\txyz\n"
                 "b\tspecies2\txyz\n"
                 "c\tspecies3\txyz\n")
-        
+
         with open(self.name, 'w') as fp:
             fp.write(data)
 
