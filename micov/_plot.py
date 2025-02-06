@@ -159,7 +159,7 @@ def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
              alpha=line_alpha)
     ax.fill_between(monte_x, median - std, median + std, color=color,
                     alpha=fill_alpha)
-    return f'Monte Carlo {monte_type} (n={len(monte_x)})'
+    return f'Monte Carlo {monte_type} (n={len(monte_x)})', median
 
 
 def coverage_curve(metadata_full, coverage_full, positions, target, variable, output,
@@ -213,6 +213,7 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
     ax.set_prop_cycle(None)
 
     labels = []
+    curves = {}
 
     target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target)
     coverage = coverage_full.filter(pl.col(COLUMN_GENOME_ID) == target)
@@ -261,15 +262,18 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
 
         labels.append(f"{name} (n={len(cur_x)})")
         ax.plot(cur_x, cur_y, color=color)
+        curves[name] = cur_y
 
     if not labels:
         return
 
     if with_monte is not None:
-        label = add_monte(with_monte, ax, max_x, iters, metadata_full, target,
-                          target_positions, coverage_full, accumulate,
-                          lengths)
+        label, median_curve = add_monte(with_monte, ax, max_x, iters,
+                                        metadata_full, target,
+                                        target_positions, coverage_full,
+                                        accumulate, lengths)
         labels.append(label)
+        curves[label] = median_curve
 
     if accumulate:
         tag = 'cumulative'
@@ -293,6 +297,22 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
 
     plt.savefig(f'{output}.{target_name}.{target}.{variable}.{tag}.png')
     plt.close()
+
+    if accumulate:
+        ksresults = []
+        curve_items = list(curves.items())
+
+        for idx, (label_a, curve_a) in enumerate(curve_items):
+            for label_b, curve_b in curve_items[idx+1:]:
+                ks = ss.ks_2samp(curve_a, curve_b)
+                ksresults.append([label_a, label_b, ks.statistic, ks.pvalue])
+
+        outf = f'{output}.{target_name}.{target}.{variable}.{tag}.ks.tsv'
+        pl.DataFrame(ksresults,
+                     schema=[('label_A', str), ('label_B', str),
+                             ('ks-statistic', float),
+                             ('ks-pvalue', float)],
+                     orient='row').write_csv(outf)
 
 
 def single_sample_position_plot(positions, lengths, output, scale=None):
