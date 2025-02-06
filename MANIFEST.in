@@ -4,6 +4,7 @@ include ChangeLog.md
 include Makefile
 include pyproject.toml
 include cli_test.sh
+include micov.yml
 
 recursive-include example *.gz
 recursive-include example *.parquet

@@ -1,8 +1,8 @@
-polars
-matplotlib
+tqdm
 scipy
-click
-numba
-versioneer
-duckdb
 pyarrow<16.0.0
+polars-u64-idx>=1.21.0
+numba
+matplotlib>=3.9.0
+duckdb
+click
