@@ -23,6 +23,7 @@ def coverage_percent(coverages, lengths):
     -------
     pl.LazyFrame
         The genome coverages
+
     """
     missing = (set(coverages[COLUMN_GENOME_ID]) -
                set(lengths[COLUMN_GENOME_ID]))
@@ -122,6 +123,7 @@ def compress(df):
                  -------
                          -----
                               ---
+
     Returns
     -------
     pl.DataFrame
