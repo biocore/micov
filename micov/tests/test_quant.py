@@ -2,7 +2,8 @@ import unittest
 import polars as pl
 import polars.testing as plt
 from micov._quant import create_bin_list, pos_to_bins
-from micov._constants import BED_COV_SAMPLEID_SCHEMA
+from micov._constants import (BED_COV_SAMPLEID_SCHEMA, COLUMN_STOP_DTYPE,
+                              COLUMN_START_DTYPE)
 
 
 class CovTests(unittest.TestCase):
@@ -109,8 +110,8 @@ class CovTests(unittest.TestCase):
             orient="row",
             schema=[
                 ("genome_id", str),
-                ("start", int),
-                ("stop", int),
+                ("start", COLUMN_START_DTYPE),
+                ("stop", COLUMN_STOP_DTYPE),
                 ("sample_id", str),
                 ("start_bin_idx", int),
                 ("stop_bin_idx", int),
@@ -173,8 +174,8 @@ class CovTests(unittest.TestCase):
             orient="row",
             schema=[
                 ("genome_id", str),
-                ("start", int),
-                ("stop", int),
+                ("start", COLUMN_START_DTYPE),
+                ("stop", COLUMN_STOP_DTYPE),
                 ("sample_id", str),
                 ("start_bin_idx", int),
                 ("stop_bin_idx", int),
@@ -232,8 +233,8 @@ class CovTests(unittest.TestCase):
             orient="row",
             schema=[
                 ("genome_id", str),
-                ("start", int),
-                ("stop", int),
+                ("start", COLUMN_START_DTYPE),
+                ("stop", COLUMN_STOP_DTYPE),
                 ("sample_id", str),
                 ("start_bin_idx", int),
                 ("stop_bin_idx", int),
@@ -292,8 +293,8 @@ class CovTests(unittest.TestCase):
             orient="row",
             schema=[
                 ("genome_id", str),
-                ("start", int),
-                ("stop", int),
+                ("start", COLUMN_START_DTYPE),
+                ("stop", COLUMN_STOP_DTYPE),
                 ("sample_id", str),
                 ("start_bin_idx", int),
                 ("stop_bin_idx", int),
