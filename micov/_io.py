@@ -13,7 +13,8 @@ from ._cov import compress, coverage_percent
 from ._constants import (BED_COV_SCHEMA, GENOME_COVERAGE_SCHEMA,
                          COLUMN_GENOME_ID, COLUMN_LENGTH, COLUMN_TAXONOMY,
                          SAM_SUBSET_SCHEMA, COLUMN_CIGAR, COLUMN_STOP,
-                         COLUMN_START, COLUMN_SAMPLE_ID)
+                         COLUMN_START, COLUMN_SAMPLE_ID, COLUMN_STOP_DTYPE,
+                         COLUMN_START_DTYPE)
 from ._convert import cigar_to_lens
 
 
@@ -109,6 +110,11 @@ def parse_qiita_coverages(tgzs, *args, **kwargs):
         kwargs['compress_size'] = compress_size
 
     frame = _parse_qiita_coverages(tgzs[0], *args, **kwargs)
+
+    if len(tgzs) == 1:
+        # short circuit, already compressed
+        return frame
+
     for tgz in tgzs[1:]:
         next_frame = _parse_qiita_coverages(tgz, *args, **kwargs)
         frame = _single_df(_check_and_compress([frame, next_frame],
@@ -318,16 +324,24 @@ def set_taxonomy_as_id(coverages, taxonomy):
 # TODO: this is not the greatest method name
 def parse_sam_to_df(sam):
     """Minimally parse SAM and compute stop coordinates from CIGAR."""
-    df = pl.read_csv(sam, separator='\t', has_header=False,
-                     columns=SAM_SUBSET_SCHEMA.column_indices,
-                     comment_prefix='@',
-                     new_columns=SAM_SUBSET_SCHEMA.columns).lazy()
-
-    return (df
-             .with_columns(stop=pl.col(COLUMN_CIGAR).map_elements(cigar_to_lens,
-                                                                  return_dtype=int))  # noqa
-             .with_columns(stop=pl.col(COLUMN_STOP) + pl.col(COLUMN_START))
-             .collect())
+    # scan_csv does not seem to support this juggling
+    # and it seems we cannot pass in a Schema while also specifying the column
+    # indices and names. there probably is a better way here.
+    df = (pl.read_csv(sam, separator='\t', has_header=False,
+                      columns=SAM_SUBSET_SCHEMA.column_indices,
+                      comment_prefix='@',
+                      new_columns=SAM_SUBSET_SCHEMA.columns)
+             .lazy()
+             .with_columns(pl.col(COLUMN_START)
+                             .cast(COLUMN_START_DTYPE),
+                           pl.col(COLUMN_CIGAR)
+                             .map_elements(cigar_to_lens,
+                                           return_dtype=COLUMN_STOP_DTYPE)
+                             .alias(COLUMN_STOP))
+             .with_columns((pl.col(COLUMN_STOP) + pl.col(COLUMN_START))
+                              .cast(COLUMN_STOP_DTYPE)
+                              .alias(COLUMN_STOP)))
+    return df.collect()
 
 
 def _add_file(tf, name, data):
