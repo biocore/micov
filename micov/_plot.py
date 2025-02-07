@@ -491,6 +491,9 @@ def position_plot(metadata, coverage, positions, target, variable, output,
             tsv_y += hist_y
             tsv_group += [name] * len(hist_x)
 
+        x_offset += count
+        boundaries.append(x_offset)
+
     ax.set_xlim(0, max_x)
     ax.set_ylim(0, 1.0)
 
