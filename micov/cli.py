@@ -240,6 +240,80 @@ def qiita_to_parquet(qiita_coverages, lengths, output, samples_to_keep,
 
 
 @cli.command()
+@click.option('--pattern', type=str,
+              required=True, help='Glob pattern for BED3-like files. Must end '
+                                  'in .cov or .cov.gz')
+@click.option('--output', type=click.Path(exists=False))
+@click.option('--lengths', type=click.Path(exists=True), required=True,
+              help="Genome lengths")
+@click.option('--memory', type=str, default='16gb', required=False)
+@click.option('--threads', type=int, default=4, required=False)
+def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
+    """Aggregate BED3 files to parquet."""
+    lengths = parse_genome_lengths(lengths)
+
+    columns = "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', 'stop': 'UINTEGER'}"
+    duckdb.sql(f"SET memory_limit TO '{memory}'")
+    duckdb.sql(f"SET threads TO {threads}")
+    duckdb.sql("CREATE TABLE genome_lengths AS FROM lengths")
+
+    # stream the .cov or .cov.gz files into parquet. Extract the name of the
+    # file, without the extension, and store as the sample_id
+    duckdb.sql(f"""
+        COPY (SELECT genome_id,
+                     start,
+                     stop,
+                     regexp_extract(filename,
+                                    '^(.*/)?(.+).cov(.gz)?$', 2) AS sample_id
+              FROM read_csv('{pattern}',
+                            delim='\t',
+                            filename=true,
+                            header=true,
+                            columns={columns}))
+        TO '{output}.covered_positions.parquet'
+            (FORMAT PARQUET, PARQUET_VERSION V2,
+             COMPRESSION zstd)"""
+    )
+
+    # scan the aggregated position information, compute the amount covered
+    # and the percent coverage per sample per genome, stream to parquet.
+    duckdb.sql(f"""
+        COPY (WITH covered_amount AS (
+                  SELECT sample_id,
+                         genome_id,
+                         SUM(stop - start)::UINTEGER AS covered
+                  FROM read_parquet('{output}.covered_positions.parquet')
+                  GROUP BY sample_id, genome_id)
+              SELECT sample_id,
+                     genome_id,
+                     covered,
+                     length,
+                     (covered / length) * 100 AS percent_covered
+              FROM covered_amount JOIN genome_lengths using (genome_id))
+        TO '{output}.coverage.parquet'
+            (FORMAT PARQUET, PARQUET_VERSION V2,
+             COMPRESSION zstd)"""
+    )
+
+    # n.b. a comparable action can be taken with polars. however, polars does
+    # not currently allow limiting memory, and in testing, the use exceeded
+    # 16gb.
+    #(pl.scan_csv(pattern,
+    #             separator='\t',
+    #             has_header=True,
+    #             schema=pl.Schema({'genome_id': str,
+    #                               'start': pl.UInt32,
+    #                               'stop': pl.UInt32}),
+    #             include_file_paths='filename')
+    #   .with_columns(pl.col('filename')
+    #                   .str.extract(r"(.+).cov.gz$")
+    #                   .alias('sample_id'))
+    #   .drop('filename')
+    #   .sink_parquet(f"{output}.covered_positions_pl.parquet",
+    #                 compression='zstd'))
+
+
+@cli.command()
 @click.option('--parquet-coverage', type=click.Path(exists=False),
               required=True, help=('Pre-computed coverage data as parquet. '
                                    'This should be the basename used, i.e. '
