@@ -288,7 +288,7 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
     ax.set_ylim(0, 100)
     ax.set_title((f'{tag}: {target_name}({target}) '
                   f'({length}bp)'), fontsize=16)
-    ax.legend(labels, fontsize=14)
+    ax.legend(labels, fontsize=14, loc='center left')
 
     plt.tight_layout()
 
@@ -410,18 +410,44 @@ def position_plot(metadata, coverage, positions, target, variable, output,
 
     target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target).lazy()
 
-    value_order = metadata.select(pl.col(variable)
-                                    .unique()
-                                    .sort())[variable]
+    samples_with_positions = (target_positions.select(pl.col(COLUMN_SAMPLE_ID))
+                                              .unique()
+                                              .collect())[COLUMN_SAMPLE_ID]
+    metadata = metadata.filter(pl.col(COLUMN_SAMPLE_ID)
+                                 .is_in(samples_with_positions))
 
+    # TODO: expose to allow ordering by a variable rather than coverage
+    custom_yorder = None
+
+    group_order = metadata.group_by(variable).len().sort(by='len')
+    max_x = group_order['len'].sum()
+
+    color_order = (metadata.select(pl.col(variable)
+                                      .unique()
+                                      .sort())
+                           .with_row_index(name='color')
+                           .select([pl.col(variable), pl.col('color')]))
+    order = group_order.join(color_order, on=variable).sort(by='len')
+
+
+    x_offset = 0
+    boundaries = []
     tsv_x = []
     tsv_y = []
     tsv_group = []
 
-    for name, color in zip(value_order, range(0, 10)):
+    for name, count, color in order[variable, 'len', 'color'].iter_rows():
         grp = metadata.filter(pl.col(variable) == name)
         color = f'C{color}'
-        grp_coverage = ordered_coverage(coverage, grp, target, length)
+
+        if custom_yorder is not None:
+            grp_coverage = (grp.filter(pl.col(custom_yorder).is_not_null())
+                               .sort(by=custom_yorder)
+                               .with_row_index(name='x_unscaled', offset=x_offset)
+                               .with_columns(pl.lit(target).alias(COLUMN_GENOME_ID)))
+        else:
+            grp_coverage = ordered_coverage(coverage, grp, target, length)
+            grp_coverage = grp_coverage.with_columns(pl.col('x_unscaled') + x_offset)
 
         if len(grp_coverage) == 0:
             continue
@@ -432,12 +458,12 @@ def position_plot(metadata, coverage, positions, target, variable, output,
         hist_x = []
         hist_y = []
 
-        col_selection = [COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, 'x']
+        col_selection = [COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, 'x_unscaled']
         for sid, gid, x in grp_coverage[col_selection].rows():
             cur_positions = (target_positions
                                  .filter(pl.col(COLUMN_SAMPLE_ID) == sid)
                                  .join(grp_coverage.lazy(), on=COLUMN_SAMPLE_ID)
-                                 .select(pl.col('x'),
+                                 .select(pl.col('x_unscaled'),
                                          pl.col(COLUMN_START) / length,
                                          pl.col(COLUMN_STOP) / length))
 
@@ -465,8 +491,14 @@ def position_plot(metadata, coverage, positions, target, variable, output,
             tsv_y += hist_y
             tsv_group += [name] * len(hist_x)
 
-    ax.set_xlim(-0.01, 1.0)
+        x_offset += count
+        boundaries.append(x_offset)
+
+    ax.set_xlim(0, max_x)
     ax.set_ylim(0, 1.0)
+
+    for x in boundaries[:-1]:
+        ax.plot([x, x], [0, 1], color='k', ls='--', alpha=0.6)
 
     if scale is None:
         ax.set_title(f'Position plot: {target} ({length}bp)', fontsize=20)
@@ -487,16 +519,19 @@ def position_plot(metadata, coverage, positions, target, variable, output,
         ax.set_ylabel(f'Coverage (1/{scale})th scale', fontsize=20)
         scaletag = f"-1_{scale}th-scale"
 
-    ax.set_xlabel('Proportion of samples', fontsize=20)
+    ax.set_xlabel('Within group sample rank by coverage', fontsize=16)
 
-    plt.legend(labels, fontsize=20)
+    plt.legend(labels, fontsize=20, loc='center left')
     leg = ax.get_legend()
     for i, lh in enumerate(leg.legend_handles):
         lh.set_color(colors[i])
         lh._sizes = [5.0, ]
 
-    ax.tick_params(axis='both', which='major', labelsize=16)
-    ax.tick_params(axis='both', which='minor', labelsize=16)
+    ax.tick_params(axis='y', which='major', labelsize=16)
+    ax.tick_params(axis='y', which='minor', labelsize=16)
+    ax.set_xticks([])
+    ax.grid(axis='y', ls='--', alpha=1, color='k')
+
     plt.tight_layout()
     plt.savefig(f'{output}.{target_name}.{target}.{variable}.position-plot{scaletag}.png')
     plt.close()
