@@ -38,6 +38,7 @@ def choose_most_variable_group(group_df):
 
 def rank_genome_of_interest(plotdir):
     all_files = glob.glob(f"{plotdir}/*.tsv")
+    all_files = [file for file in all_files if ".ks.tsv" not in file]
     metrics_selected = []
 
     for file in all_files:
