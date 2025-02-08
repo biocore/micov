@@ -288,7 +288,7 @@ def coverage_curve(metadata_full, coverage_full, positions, target, variable, ou
     ax.set_ylim(0, 100)
     ax.set_title((f'{tag}: {target_name}({target}) '
                   f'({length}bp)'), fontsize=16)
-    ax.legend(labels, fontsize=14)
+    ax.legend(labels, fontsize=14, loc='center left')
 
     plt.tight_layout()
 
@@ -521,7 +521,7 @@ def position_plot(metadata, coverage, positions, target, variable, output,
 
     ax.set_xlabel('Within group sample rank by coverage', fontsize=16)
 
-    plt.legend(labels, fontsize=20)
+    plt.legend(labels, fontsize=20, loc='center left')
     leg = ax.get_legend()
     for i, lh in enumerate(leg.legend_handles):
         lh.set_color(colors[i])
