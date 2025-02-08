@@ -37,12 +37,12 @@ def choose_most_variable_group(group_df):
 
 
 def rank_genome_of_interest(plotdir):
-    all_files = glob.glob(f"{plotdir}/*.tsv")
+    all_files = glob.glob(f"{plotdir}/*.tsv.gz")
     all_files = [file for file in all_files if ".ks.tsv" not in file]
     metrics_selected = []
 
     for file in all_files:
-        df = pd.read_csv(file, sep="\t")
+        df = pd.read_csv(file, sep="\t", compression="gzip")
 
         # Compute variability metrics for each group in this file
         y_distribution = df.groupby(["group", "y"])["x"].count().reset_index()
