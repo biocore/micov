@@ -1,3 +1,4 @@
+import gzip
 import numba
 import warnings
 import numpy as np
@@ -510,11 +511,12 @@ def position_plot(metadata, coverage, positions, target, variable, output,
                 "x": tsv_x,
                 "y": tsv_y
             })
-        df.write_csv(
+        filename = (
             f"{output}.{target_name}.{target}.{variable}."
-            f"position-plot-1_{scale}th-scale.tsv",
-            separator="\t"
+            f"position-plot-1_{scale}th-scale.tsv.gz"
         )
+        with gzip.open(filename, 'wb') as fo:
+            df.write_csv(fo, separator="\t")
         ax.set_title(f'Scaled position plot: {target} ({length}bp)', fontsize=20)
         ax.set_ylabel(f'Coverage (1/{scale})th scale', fontsize=20)
         scaletag = f"-1_{scale}th-scale"
