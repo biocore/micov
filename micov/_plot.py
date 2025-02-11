@@ -126,19 +126,16 @@ def add_monte(monte_type, ax, max_x, iters, metadata_full, target,
         raise ValueError(f"Unknown monte_type='{monte_type}'")
 
     coverage = coverage_full.filter(pl.col(COLUMN_GENOME_ID) == target)
-    metadata = metadata_full.filter(pl.col(COLUMN_SAMPLE_ID)
-                                      .is_in(sample_set[COLUMN_SAMPLE_ID]))
 
     monte_y = []
     monte_x = list(range(max_x))
 
     for it in range(iters):
-        monte = (metadata.select(pl.col(COLUMN_SAMPLE_ID)
-                                   .shuffle())
-                         .head(max_x))[COLUMN_SAMPLE_ID]
-        grp_monte = metadata.filter(pl.col(COLUMN_SAMPLE_ID)
-                                      .is_in(monte))
-
+        monte = (sample_set.select(pl.col(COLUMN_SAMPLE_ID)
+                                     .shuffle())
+                           .head(max_x + 1))[COLUMN_SAMPLE_ID]
+        grp_monte = sample_set.filter(pl.col(COLUMN_SAMPLE_ID)
+                                        .is_in(monte))
         if accumulate:
             _, cur_y = compute_cumulative(coverage, grp_monte, target,
                                           target_positions, lengths)
@@ -431,13 +428,19 @@ def position_plot(metadata, coverage, positions, target, variable, output,
     order = group_order.join(color_order, on=variable).sort(by='len')
 
 
+    label_pos = []
     x_offset = 0
     boundaries = []
     tsv_x = []
     tsv_y = []
     tsv_group = []
 
-    for name, count, color in order[variable, 'len', 'color'].iter_rows():
+    if len(order) == 2:
+        invert = True
+    else:
+        invert = False
+
+    for oidx, (name, count, color) in enumerate(order[variable, 'len', 'color'].iter_rows()):
         grp = metadata.filter(pl.col(variable) == name)
         color = f'C{color}'
 
@@ -453,7 +456,13 @@ def position_plot(metadata, coverage, positions, target, variable, output,
         if len(grp_coverage) == 0:
             continue
 
-        labels.append(name)
+        # reverse plot order if we have two groups and in second group
+        if invert and oidx == 1:
+            grp_coverage = (grp_coverage.sort(by='x_unscaled', descending=True)
+                                        .with_row_index('x_rev', offset=x_offset)
+                                        .drop(pl.col('x_unscaled'))
+                                        .with_columns(pl.col('x_rev').alias('x_unscaled')))
+
         colors.append(color)
 
         hist_x = []
@@ -492,6 +501,8 @@ def position_plot(metadata, coverage, positions, target, variable, output,
             tsv_y += hist_y
             tsv_group += [name] * len(hist_x)
 
+        label_pos.append(x_offset + (count // 2))
+        labels.append(name)
         x_offset += count
         boundaries.append(x_offset)
 
@@ -522,16 +533,10 @@ def position_plot(metadata, coverage, positions, target, variable, output,
         scaletag = f"-1_{scale}th-scale"
 
     ax.set_xlabel('Within group sample rank by coverage', fontsize=16)
-
-    plt.legend(labels, fontsize=20, loc='center left')
-    leg = ax.get_legend()
-    for i, lh in enumerate(leg.legend_handles):
-        lh.set_color(colors[i])
-        lh._sizes = [5.0, ]
+    ax.set_xticks(label_pos, labels, rotation=45, ha='right', fontsize=16)
 
     ax.tick_params(axis='y', which='major', labelsize=16)
     ax.tick_params(axis='y', which='minor', labelsize=16)
-    ax.set_xticks([])
     ax.grid(axis='y', ls='--', alpha=1, color='k')
 
     plt.tight_layout()

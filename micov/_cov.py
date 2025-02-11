@@ -278,7 +278,7 @@ def compute_cumulative(coverage, grp, target, target_positions, lengths):
         next_ = slice_positions(target_positions, id_).collect()
         current = compress(pl.concat([current, next_]))
         per_cov = coverage_percent(current, lengths).collect()
-        print(id_, per_cov)
+
         # no observed coverage can occur in the unfocused monte carlo simulation
         # in which case the coverage is zero
         if len(per_cov) == 0:
