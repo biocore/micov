@@ -322,6 +322,7 @@ class IOTests(unittest.TestCase):
         exp = pl.DataFrame([['a', "species1"],
                             ['b', "species2"],
                             ['c', "species3"]],
+                           orient='row',
                            schema=[COLUMN_GENOME_ID, COLUMN_TAXONOMY])
         obs = parse_taxonomy(self.name)
         plt.assert_frame_equal(obs, exp)
@@ -337,6 +338,7 @@ class IOTests(unittest.TestCase):
         exp = pl.DataFrame([['a', "species1"],
                             ['b', "species2"],
                             ['c', "species3"]],
+                           orient='row',
                            schema=[COLUMN_GENOME_ID, COLUMN_TAXONOMY])
         obs = parse_taxonomy(self.name)
         plt.assert_frame_equal(obs, exp)
