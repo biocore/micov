@@ -74,7 +74,7 @@ def coverage_percent(coverages, lengths):
                 COLUMN_PERCENT_COVERED
             )
         )
-    )  # noqa
+    )
 
 
 # TODO: replace compression logic with a duckdb query
@@ -106,7 +106,9 @@ def coverage_percent(coverages, lengths):
 # cumulative_groups AS (
 #     SELECT
 #         *,
-#         SUM(new_group_flag) OVER (ORDER BY start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS group_id
+#         SUM(new_group_flag) OVER (ORDER BY start
+#                                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+#                                  AS group_id
 #     FROM grouped_ranges
 # )
 # SELECT
