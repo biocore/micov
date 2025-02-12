@@ -62,13 +62,13 @@ class View:
         positions = f"{self.dbbase}.covered_positions.parquet"
 
         if not os.path.exists(coverage):
-            raise IOError(f"'{coverage}' not found")
+            raise OSError(f"'{coverage}' not found")
 
         if not os.path.exists(positions):
-            raise IOError(f"'{positions}' not found")
+            raise OSError(f"'{positions}' not found")
 
-        feat_df = self.features_to_keep
-        md_df = self.sample_metadata
+        feat_df = self.features_to_keep  # noqa: F841
+        md_df = self.sample_metadata  # noqa: F841
         self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
         self.con.sql(f"""CREATE TABLE metadata AS
                          SELECT md.*
