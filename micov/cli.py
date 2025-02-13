@@ -30,7 +30,7 @@ from ._io import (
 )
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
-from ._quant import combine_pos_metadata_length, make_csv_ready, pos_to_bins
+from ._quant import make_csv_ready, pos_to_bins
 from ._rank import rank_genome_of_interest
 from ._utils import logger
 from ._view import View
