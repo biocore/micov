@@ -22,3 +22,6 @@ ignore = [
     "D400", # redundant with D415 in place
     "D301", # forces raw string literals
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"micov/tests/*" = ["D"]
