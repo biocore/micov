@@ -450,10 +450,6 @@ def per_sample_group(
     all_covered_positions = view.positions().pl()
     all_coverage = view.coverages().pl()
     metadata_pl = view.metadata().pl()
-
-    all_covered_positions = view.positions().pl()
-    all_coverage = view.coverages().pl()
-    metadata_pl = view.metadata().pl()
     feature_metadata_pl = view.feature_metadata().pl()
     target_names = view.target_names(target_names)
 
