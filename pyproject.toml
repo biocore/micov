@@ -6,9 +6,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 target-version = "py310"
-exclude = [
-    "micov/tests/*", 
-]
 
 [tool.check-manifest]
 ignore = [
@@ -17,10 +14,14 @@ ignore = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "W", "D"]  # pycodestyle (E, W), pydocstyle (D)
+select = ["E", "W", "D"] # pycodestyle (E, W), pydocstyle (D)
 ignore = [
-    "D203",  # puts a space before class docstrings
-    "D213",  # puts summary on second line
-    "D400",  # redundant with D415 in place
-    "D301",  # forces raw string literals
+    "ANN",  # annotations are not enforced
+    "D203", # puts a space before class docstrings
+    "D213", # puts summary on second line
+    "D400", # redundant with D415 in place
+    "D301", # forces raw string literals
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"micov/tests/*" = ["D"]

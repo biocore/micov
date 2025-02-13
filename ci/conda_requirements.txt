@@ -1,4 +1,3 @@
-tqdm
 scipy
 pyarrow<16.0.0
 polars-u64-idx>=1.21.0
