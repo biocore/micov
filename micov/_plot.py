@@ -202,11 +202,12 @@ def add_monte(
 
     coverage = coverage_full.filter(pl.col(COLUMN_GENOME_ID) == target)
 
+    max_x += 1  # it comes in as zero index but we need count
     monte_y = []
     monte_x = list(range(max_x))
 
     for it in range(iters):
-        monte = (sample_set.select(pl.col(COLUMN_SAMPLE_ID).shuffle()).head(max_x + 1))[
+        monte = (sample_set.select(pl.col(COLUMN_SAMPLE_ID).shuffle()).head(max_x))[
             COLUMN_SAMPLE_ID
         ]
         grp_monte = sample_set.filter(pl.col(COLUMN_SAMPLE_ID).is_in(monte))
