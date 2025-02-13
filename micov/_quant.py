@@ -1,9 +1,10 @@
+import warnings
+
 import numpy as np
 import polars as pl
-from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID)
 
+from ._constants import COLUMN_GENOME_ID, COLUMN_SAMPLE_ID
 
-import warnings
 warnings.simplefilter("ignore", category=pl.exceptions.PerformanceWarning)
 
 
@@ -44,7 +45,7 @@ def create_bin_list(genome_length, bin_num):
     # setting the bin_stop of the last bin to be exactly the genome length + 1
     bin_list = bin_list.with_columns(
         pl.when(pl.col("bin_idx") == bin_num)
-        .then(genome_length+1)
+        .then(genome_length + 1)
         .otherwise(pl.col("bin_stop"))
         .alias("bin_stop")
     ).lazy()
@@ -52,7 +53,7 @@ def create_bin_list(genome_length, bin_num):
 
 
 def pos_to_bins(pos, variable, bin_num):
-    genome_length = pos.select('length').limit(1).collect().item()
+    genome_length = pos.select("length").limit(1).collect().item()
     bin_list = create_bin_list(genome_length, bin_num)
 
     # get start_bin_idx and stop_bin_idx
@@ -86,9 +87,7 @@ def pos_to_bins(pos, variable, bin_num):
     pos = pos.with_columns([cut_start, cut_stop])
 
     # update stop_bin_idx +1 for pl.arange and generate range of bins
-    pos = pos.with_columns(
-        (pl.col("stop_bin_idx") + 1).alias("stop_bin_idx_add1")
-    )
+    pos = pos.with_columns((pl.col("stop_bin_idx") + 1).alias("stop_bin_idx_add1"))
 
     # generate range of bins covered
     pos = pos.with_columns(
