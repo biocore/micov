@@ -1,12 +1,36 @@
-import numpy as np
-
 import numba
-
 import polars as pl
-from ._constants import (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP,
-                         COLUMN_COVERED, BED_COV_SCHEMA, COLUMN_SAMPLE_ID,
-                         COLUMN_LENGTH, COLUMN_PERCENT_COVERED,
-                         COLUMN_COVERED_DTYPE, COLUMN_LENGTH_DTYPE)
+
+from ._constants import (
+    BED_COV_SCHEMA,
+    COLUMN_COVERED,
+    COLUMN_COVERED_DTYPE,
+    COLUMN_GENOME_ID,
+    COLUMN_LENGTH,
+    COLUMN_LENGTH_DTYPE,
+    COLUMN_PERCENT_COVERED,
+    COLUMN_SAMPLE_ID,
+    COLUMN_START,
+    COLUMN_STOP,
+)
+
+
+def coverage_percent_per_sample(coverages, lengths):
+    """Compute coverage percent per sample."""
+    frames = []
+    for (sample,), sample_df in coverages.group_by(
+        [
+            COLUMN_SAMPLE_ID,
+        ]
+    ):
+        cov = coverage_percent(sample_df, lengths)
+        cov = cov.with_columns(pl.lit(sample).alias(COLUMN_SAMPLE_ID))
+        frames.append(cov)
+
+    if frames:
+        return pl.concat(frames).collect()
+    else:
+        return pl.DataFrame()
 
 
 def coverage_percent(coverages, lengths):
@@ -25,24 +49,76 @@ def coverage_percent(coverages, lengths):
         The genome coverages
 
     """
-    missing = (set(coverages[COLUMN_GENOME_ID]) -
-               set(lengths[COLUMN_GENOME_ID]))
+    missing = set(coverages[COLUMN_GENOME_ID]) - set(lengths[COLUMN_GENOME_ID])
     if len(missing) > 0:
-        raise ValueError(f"{len(missing)} genome(s) appear unrepresented in "
-                         f"the length information, examples: "
-                         f"{sorted(missing)[:5]}")
+        raise ValueError(
+            f"{len(missing)} genome(s) appear unrepresented in "
+            f"the length information, examples: "
+            f"{sorted(missing)[:5]}"
+        )
 
-    return (coverages
-               .lazy()
-               .with_columns((pl.col(COLUMN_STOP) -
-                              pl.col(COLUMN_START)).alias(COLUMN_COVERED))
-               .group_by([COLUMN_GENOME_ID, ])
-               .agg(pl.col(COLUMN_COVERED).sum())
-               .join(lengths.lazy(), on=COLUMN_GENOME_ID)
-               .with_columns(((pl.col(COLUMN_COVERED) /
-                               pl.col(COLUMN_LENGTH)) * 100).alias(COLUMN_PERCENT_COVERED)))  # noqa
+    return (
+        coverages.lazy()
+        .with_columns(
+            (pl.col(COLUMN_STOP) - pl.col(COLUMN_START)).alias(COLUMN_COVERED)
+        )
+        .group_by(
+            [
+                COLUMN_GENOME_ID,
+            ]
+        )
+        .agg(pl.col(COLUMN_COVERED).sum())
+        .join(lengths.lazy(), on=COLUMN_GENOME_ID)
+        .with_columns(
+            ((pl.col(COLUMN_COVERED) / pl.col(COLUMN_LENGTH)) * 100).alias(
+                COLUMN_PERCENT_COVERED
+            )
+        )
+    )
 
 
+# TODO: replace compression logic with a duckdb query
+# we should obtain benefit of parallelization natively
+# code was generated and then minorly adapted using chatgpt 4o
+# by firsts providing the "_compress" function below and requesting
+# it be expressed as duckdb compatible SQL. The resulting code
+# passes the current unit tests (without having provided them)
+# NOTE: operation _including_ sample_id has only been loosely checked
+# NOTE: this needs to be checked on _large_ data. while the query
+#   engine is good, it is not perfect and could trigger large
+#   use of tmp
+#
+# WITH sorted_ranges AS (
+#     SELECT
+#         *,
+#         LAG(stop) OVER (ORDER BY start) AS prev_stop
+#     FROM ranges
+# ),
+# grouped_ranges AS (
+#     SELECT
+#         *,
+#         CASE
+#             WHEN prev_stop IS NULL OR start > prev_stop THEN 1
+#             ELSE 0
+#         END AS new_group_flag
+#     FROM sorted_ranges
+# ),
+# cumulative_groups AS (
+#     SELECT
+#         *,
+#         SUM(new_group_flag) OVER (ORDER BY start
+#                                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+#                                  AS group_id
+#     FROM grouped_ranges
+# )
+# SELECT
+#     sample_id,
+#     genome_id,
+#     MIN(start) AS merged_start,
+#     MAX(stop) AS merged_stop
+# FROM cumulative_groups
+# GROUP BY sample_id, genome_id, group_id
+# ORDER BY sample_id, genome_id, merged_start;
 @numba.jit(nopython=True)
 def _compress(rows):
     # derived from zebra
@@ -72,6 +148,25 @@ def _compress(rows):
         new_ranges.append(new_range)
 
     return new_ranges
+
+
+def compress_per_sample(df):
+    """Compress data per sample."""
+    frames = []
+    for (sample,), sample_df in df.group_by(
+        [
+            COLUMN_SAMPLE_ID,
+        ]
+    ):
+        compressed = compress(sample_df).with_columns(
+            pl.lit(sample).alias(COLUMN_SAMPLE_ID)
+        )
+        frames.append(compressed)
+
+    if frames:
+        return pl.concat(frames)
+    else:
+        return pl.DataFrame([], schema=df.collect_schema())
 
 
 def compress(df):
@@ -131,25 +226,32 @@ def compress(df):
         represented by another region, are described by a single interval.
 
     """
+
     def make_frame(data, genome):
-        frame = pl.LazyFrame(data,
-                             schema=[BED_COV_SCHEMA.dtypes_flat[1],
-                                     BED_COV_SCHEMA.dtypes_flat[2]],
-                             orient='row')
-        return (frame.with_columns(pl.lit(genome)
-                                     .cast(str)
-                                     .alias(COLUMN_GENOME_ID))
-                     .select(BED_COV_SCHEMA.columns)
-                     .collect())
+        frame = pl.LazyFrame(
+            data,
+            schema=[BED_COV_SCHEMA.dtypes_flat[1], BED_COV_SCHEMA.dtypes_flat[2]],
+            orient="row",
+        )
+        return (
+            frame.with_columns(pl.lit(genome).cast(str).alias(COLUMN_GENOME_ID))
+            .select(BED_COV_SCHEMA.columns)
+            .collect()
+        )
 
     compressed = []
-    for (genome, ), grp in df.group_by([COLUMN_GENOME_ID, ]):
-        rows = (grp
-                 .lazy()
-                 .select([COLUMN_START, COLUMN_STOP])
-                 .sort(COLUMN_START)
-                 .collect()
-                 .to_numpy(order='c'))
+    for (genome,), grp in df.group_by(
+        [
+            COLUMN_GENOME_ID,
+        ]
+    ):
+        rows = (
+            grp.lazy()
+            .select([COLUMN_START, COLUMN_STOP])
+            .sort(COLUMN_START)
+            .collect()
+            .to_numpy(order="c")
+        )
 
         grp_compressed = _compress(rows)
         grp_compressed_df = make_frame(grp_compressed, genome)
@@ -189,33 +291,33 @@ def ordered_coverage(coverage, grp, target, length):
     coverage = coverage.lazy()
     grp = grp.lazy()
 
-    on_target = (coverage.join(grp, on=COLUMN_SAMPLE_ID)
-                         .filter(pl.col(COLUMN_GENOME_ID) == target)
-                         .collect())
+    on_target = (
+        coverage.join(grp, on=COLUMN_SAMPLE_ID)
+        .filter(pl.col(COLUMN_GENOME_ID) == target)
+        .collect()
+    )
 
     on_target_sids = on_target[COLUMN_SAMPLE_ID]
 
-    off_target = (grp.filter(~(pl.col(COLUMN_SAMPLE_ID)
-                                 .is_in(on_target_sids)))
-                     .with_columns(pl.lit(0.)
-                                     .alias(COLUMN_PERCENT_COVERED),
-                                   pl.lit(0)
-                                     .cast(COLUMN_COVERED_DTYPE)
-                                     .alias(COLUMN_COVERED),
-                                   pl.lit(length)
-                                     .cast(COLUMN_LENGTH_DTYPE)
-                                     .alias(COLUMN_LENGTH),
-                                   pl.lit(target)
-                                     .alias(COLUMN_GENOME_ID))
-                     .select(on_target.columns))
+    off_target = (
+        grp.filter(~(pl.col(COLUMN_SAMPLE_ID).is_in(on_target_sids)))
+        .with_columns(
+            pl.lit(0.0).alias(COLUMN_PERCENT_COVERED),
+            pl.lit(0).cast(COLUMN_COVERED_DTYPE).alias(COLUMN_COVERED),
+            pl.lit(length).cast(COLUMN_LENGTH_DTYPE).alias(COLUMN_LENGTH),
+            pl.lit(target).alias(COLUMN_GENOME_ID),
+        )
+        .select(on_target.columns)
+    )
 
-    return (pl.concat([on_target.lazy(), off_target])
-              .sort(COLUMN_PERCENT_COVERED)
-              .with_row_index()
-              .with_columns(x=pl.col('index') / pl.len(),
-                            x_unscaled=pl.col('index'))
-              .drop(pl.col('index'))
-              .collect())
+    return (
+        pl.concat([on_target.lazy(), off_target])
+        .sort(COLUMN_PERCENT_COVERED)
+        .with_row_index()
+        .with_columns(x=pl.col("index") / pl.len(), x_unscaled=pl.col("index"))
+        .drop(pl.col("index"))
+        .collect()
+    )
 
 
 def slice_positions(positions, id_):
@@ -234,11 +336,11 @@ def slice_positions(positions, id_):
         The subset of positions
 
     """
-    return (positions
-                .lazy()
-                .filter(pl.col(COLUMN_SAMPLE_ID) == id_)
-                .select(pl.col(COLUMN_GENOME_ID), pl.col(COLUMN_START),
-                        pl.col(COLUMN_STOP)))
+    return (
+        positions.lazy()
+        .filter(pl.col(COLUMN_SAMPLE_ID) == id_)
+        .select(pl.col(COLUMN_GENOME_ID), pl.col(COLUMN_START), pl.col(COLUMN_STOP))
+    )
 
 
 def compute_cumulative(coverage, grp, target, target_positions, lengths):
@@ -273,16 +375,16 @@ def compute_cumulative(coverage, grp, target, target_positions, lengths):
         return None, None
 
     cur_y = []
-    cur_x = grp_coverage['x_unscaled']
+    cur_x = grp_coverage["x_unscaled"]
     for id_ in grp_coverage[COLUMN_SAMPLE_ID]:
         next_ = slice_positions(target_positions, id_).collect()
         current = compress(pl.concat([current, next_]))
         per_cov = coverage_percent(current, lengths).collect()
-        print(id_, per_cov)
+
         # no observed coverage can occur in the unfocused monte carlo simulation
         # in which case the coverage is zero
         if len(per_cov) == 0:
-            val = 0.
+            val = 0.0
         else:
             val = per_cov[COLUMN_PERCENT_COVERED].item(0)
 
