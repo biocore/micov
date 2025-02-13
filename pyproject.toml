@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 target-version = "py310"
-exclude = ["micov/tests/*"]
 
 [tool.check-manifest]
 ignore = [
