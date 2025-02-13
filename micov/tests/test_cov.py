@@ -1,17 +1,33 @@
 import unittest
-import numpy as np
 
-from micov._cov import (compress, coverage_percent, slice_positions,
-                        ordered_coverage, compute_cumulative, get_covered)
-from micov._constants import (BED_COV_SCHEMA, COLUMN_GENOME_ID,
-                              COLUMN_SAMPLE_ID, COLUMN_START, COLUMN_STOP,
-                              GENOME_LENGTH_SCHEMA, COLUMN_START,
-                              GENOME_COVERAGE_SCHEMA, COLUMN_COVERED,
-                              COLUMN_COVERED_DTYPE, COLUMN_LENGTH_DTYPE,
-                              COLUMN_START_DTYPE, COLUMN_STOP_DTYPE,
-                              COLUMN_LENGTH, COLUMN_PERCENT_COVERED)
+import numpy as np
 import polars as pl
 import polars.testing as plt
+
+from micov._constants import (
+    BED_COV_SCHEMA,
+    COLUMN_COVERED,
+    COLUMN_COVERED_DTYPE,
+    COLUMN_GENOME_ID,
+    COLUMN_LENGTH,
+    COLUMN_LENGTH_DTYPE,
+    COLUMN_PERCENT_COVERED,
+    COLUMN_SAMPLE_ID,
+    COLUMN_START,
+    COLUMN_START_DTYPE,
+    COLUMN_STOP,
+    COLUMN_STOP_DTYPE,
+    GENOME_COVERAGE_SCHEMA,
+    GENOME_LENGTH_SCHEMA,
+)
+from micov._cov import (
+    compress,
+    compute_cumulative,
+    coverage_percent,
+    get_covered,
+    ordered_coverage,
+    slice_positions,
+)
 
 
 class CovTests(unittest.TestCase):

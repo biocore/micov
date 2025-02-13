@@ -62,7 +62,6 @@ select = [
     "C4",     # flake8-comprehensions
     "D",      # flake8-docstrings
     "E",      # pycodestyle
-    "EM",     # flake8-errmsg
     "F",      # pyflakes
     "FA",     # flake8-future-annotations
     "FBT001", # flake8-boolean-trap
@@ -72,13 +71,11 @@ select = [
     "PERF",   # perflint
     "PIE",    # flake8-pie
     "PT",     # flake8-pytest-style
-    "PTH",    # flake8-use-pathlib
     "PYI",    # flake8-pyi
     "RUF",    # ruff-specific rules
     "SIM",    # flake8-simplify
     "TCH",    # flake8-type-checking
     "TID",    # flake8-tidy-imports
-    "TRY",    # tryceratops
     "UP",     # pyupgrade
     "W",      # pycodestyle
 ]

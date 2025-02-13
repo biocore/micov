@@ -1,12 +1,19 @@
 import unittest
+
 import polars as pl
 import polars.testing as plt
-from micov._quant import create_bin_list, pos_to_bins
+
 from micov._constants import (
-    COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE,
-    COLUMN_START, COLUMN_START_DTYPE,
-    COLUMN_STOP, COLUMN_STOP_DTYPE,
-    COLUMN_SAMPLE_ID, COLUMN_SAMPLE_ID_DTYPE)
+    COLUMN_GENOME_ID,
+    COLUMN_GENOME_ID_DTYPE,
+    COLUMN_SAMPLE_ID,
+    COLUMN_SAMPLE_ID_DTYPE,
+    COLUMN_START,
+    COLUMN_START_DTYPE,
+    COLUMN_STOP,
+    COLUMN_STOP_DTYPE,
+)
+from micov._quant import create_bin_list, pos_to_bins
 
 
 class Tests(unittest.TestCase):
