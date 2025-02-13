@@ -4,9 +4,9 @@ name: micov CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 env:
   latest_python: "3.12"
@@ -74,7 +74,8 @@ jobs:
         if: ${{ matrix.use_conda }}
         shell: bash -l {0}
         run: |
-          conda install -q --yes -c conda-forge --file ci/conda_requirements.txt
+          conda env create -f micov.yml
+          conda activate micov
           pip install . --no-deps
           conda list
       - name: Install dependencies (pip)
