@@ -37,6 +37,13 @@ def create_bin_list(genome_length, bin_num):
         .with_columns(pl.col("bin_idx").cast(pl.Int64))
         .lazy()
     )
+    # setting the bin_stop of the last bin to be exactly the genome length + 1 
+    bin_list = bin_list.with_columns(
+        pl.when(pl.col("bin_idx") == bin_num)
+        .then(genome_length+1)
+        .otherwise(pl.col("bin_stop"))
+        .alias("bin_stop")
+    ).lazy()
     return bin_list
 
 
