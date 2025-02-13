@@ -33,7 +33,7 @@ class _SCHEMA:
 
 
 class _BED_COV_SCHEMA(_SCHEMA):
-    dtypes_flat = [
+    dtypes_flat = [  # noqa: RUF012
         (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
         (COLUMN_START, COLUMN_START_DTYPE),
         (COLUMN_STOP, COLUMN_STOP_DTYPE),
@@ -44,7 +44,7 @@ BED_COV_SCHEMA = _BED_COV_SCHEMA()
 
 
 class _BED_COV_WITH_SAMPLEID_SCHEMA(_SCHEMA):
-    dtypes_flat = [
+    dtypes_flat = [  # noqa: RUF012
         (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
         (COLUMN_START, COLUMN_START_DTYPE),
         (COLUMN_STOP, COLUMN_STOP_DTYPE),
@@ -60,8 +60,8 @@ class _SAM_SUBSET_SCHEMA(_SCHEMA):
     # concerned about.
     # for binary coverage, we don't care about the flag, but we're parsing it
     # now so we can care in the future.
-    column_indices = [0, 1, 2, 3, 5]
-    dtypes_flat = [
+    column_indices = [0, 1, 2, 3, 5]  # noqa: RUF012
+    dtypes_flat = [  # noqa: RUF012
         (COLUMN_READ_ID, COLUMN_READ_ID_DTYPE),
         (COLUMN_FLAG, COLUMN_FLAG_DTYPE),
         (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
@@ -74,7 +74,7 @@ SAM_SUBSET_SCHEMA = _SAM_SUBSET_SCHEMA()
 
 
 class _SAM_SUBSET_SCHEMA_PARSED(_SCHEMA):
-    dtypes_flat = [
+    dtypes_flat = [  # noqa: RUF012
         (COLUMN_READ_ID, COLUMN_READ_ID_DTYPE),
         (COLUMN_FLAG, COLUMN_FLAG_DTYPE),
         (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
@@ -88,7 +88,7 @@ SAM_SUBSET_SCHEMA_PARSED = _SAM_SUBSET_SCHEMA_PARSED()
 
 
 class _GENOME_LENGTH_SCHEMA(_SCHEMA):
-    dtypes_flat = [
+    dtypes_flat = [  # noqa: RUF012
         (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
         (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
     ]
@@ -98,7 +98,7 @@ GENOME_LENGTH_SCHEMA = _GENOME_LENGTH_SCHEMA()
 
 
 class _GENOME_TAXONOMY_SCHEMA(_SCHEMA):
-    dtypes_flat = [
+    dtypes_flat = [  # noqa: RUF012
         (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
         (COLUMN_TAXONOMY, COLUMN_TAXONOMY_DTYPE),
     ]
@@ -108,7 +108,7 @@ GENOME_TAXNOMY_SCHEMA = _GENOME_TAXONOMY_SCHEMA()
 
 
 class _GENOME_COVERAGE_SCHEMA(_SCHEMA):
-    dtypes_flat = [
+    dtypes_flat = [  # noqa: RUF012
         (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
         (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
         (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
@@ -120,7 +120,7 @@ GENOME_COVERAGE_SCHEMA = _GENOME_COVERAGE_SCHEMA()
 
 
 class _GENOME_COVERAGE_WITH_SAMPLEID_SCHEMA(_SCHEMA):
-    dtypes_flat = [
+    dtypes_flat = [  # noqa: RUF012
         (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
         (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
         (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),

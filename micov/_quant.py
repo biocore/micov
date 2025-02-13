@@ -57,7 +57,7 @@ def pos_to_bins(pos, variable, bin_num):
     bin_list = create_bin_list(genome_length, bin_num)
 
     # get start_bin_idx and stop_bin_idx
-    bin_edges = [0.0] + bin_list.select(
+    bin_edges = [0.0] + bin_list.select(  # noqa: RUF005
         pl.col("bin_stop")
     ).collect().to_series().to_list()
     cut_start = (
