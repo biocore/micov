@@ -18,6 +18,7 @@ setup(
         "scipy",
         "click",
         "numba",
+        "pyarrow<16.0.0",
     ],
     entry_points="""
           [console_scripts]
