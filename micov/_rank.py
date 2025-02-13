@@ -1,6 +1,7 @@
-import pandas as pd
-import numpy as np
 import glob
+
+import numpy as np
+import pandas as pd
 from scipy.stats import entropy
 
 
@@ -25,7 +26,8 @@ def rank_sample_groups(group_df):
     cv_rank = group_df["cv"].rank(ascending=False)
 
     group_df["ranking"] = (entropy_rank + gini_rank + cv_rank).rank(
-        method="dense", ascending=True) # tie wil be given the same rank
+        method="dense", ascending=True
+    )  # tie wil be given the same rank
 
     return group_df
 
@@ -49,26 +51,21 @@ def rank_genome_of_interest(plotdir):
         y_distribution.rename(columns={"x": "count_x"}, inplace=True)
 
         # Compute all metrics per group
-        metrics = y_distribution.groupby("group")["count_x"].agg(
-            mean="mean",
-            std="std",
-            entropy=compute_entropy,
-            gini=gini
-        ).assign(cv=lambda x: x["std"] / x["mean"])
+        metrics = (
+            y_distribution.groupby("group")["count_x"]
+            .agg(mean="mean", std="std", entropy=compute_entropy, gini=gini)
+            .assign(cv=lambda x: x["std"] / x["mean"])
+        )
 
         selected_group = choose_most_variable_group(metrics)
-        selected_group["filename"] = file.split('/')[-1]
+        selected_group["filename"] = file.split("/")[-1]
         metrics_selected.append(selected_group)
 
     metrics_df = pd.concat(metrics_selected)
 
-    genomes_ranked = rank_sample_groups(metrics_df).sort_values('ranking')
+    genomes_ranked = rank_sample_groups(metrics_df).sort_values("ranking")
 
-    genomes_ranked = (
-        genomes_ranked
-        .reset_index()
-        .rename(columns={"index": "group"})
-    )
+    genomes_ranked = genomes_ranked.reset_index().rename(columns={"index": "group"})
     column_order = ["filename", "group"] + [
         col for col in genomes_ranked.columns if col not in ["filename", "group"]
     ]

@@ -1,83 +1,95 @@
 """microbiome coverage CLI."""
 
-import click
-import polars as pl
-import duckdb
 import os
-import io
 import sys
 from glob import glob
-from ._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
-                  parse_qiita_coverages, parse_sam_to_df, write_qiita_cov,
-                  parse_sample_metadata, compress_from_stream,
-                  parse_bed_cov_to_df, _single_df, _check_and_compress)
+
+import click
+import duckdb
+import polars as pl
+
+from ._constants import (
+    COLUMN_GENOME_ID,
+    COLUMN_START_DTYPE,
+    COLUMN_STOP_DTYPE,
+)
 from ._cov import coverage_percent
-from ._convert import cigar_to_lens
+from ._io import (
+    _check_and_compress,
+    _single_df,
+    combine_pos_metadata_length,
+    compress_from_stream,
+    parse_bed_cov_to_df,
+    parse_features_to_keep,
+    parse_genome_lengths,
+    parse_qiita_coverages,
+    parse_sample_metadata,
+    parse_taxonomy,
+    set_taxonomy_as_id,
+    write_qiita_cov,
+)
 from ._per_sample import per_sample_coverage
-from ._plot import (per_sample_plots,
-                    single_sample_position_plot)
+from ._plot import per_sample_plots, single_sample_position_plot
+from ._quant import make_csv_ready, pos_to_bins
 from ._utils import logger
-from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID,
-                         BED_COV_SAMPLEID_SCHEMA,
-                         COLUMN_START, COLUMN_CIGAR, COLUMN_STOP)
-from ._quant import pos_to_bins, make_csv_ready
-from ._rank import rank_genome_of_interest
+from ._view import View
 
 
 def _first_col_as_set(fp):
-    df = pl.read_csv(fp, separator='\t', infer_schema_length=0)
+    df = pl.read_csv(fp, separator="\t", infer_schema_length=0)
     return set(df[df.columns[0]])
-
-
-def _set_target_names(target_names):
-    if target_names is not None:
-        target_names = dict(pl.scan_csv(target_names,
-                                        separator='\t',
-                                        new_columns=['feature-id', 'lineage'],
-                                        has_header=False)
-                              .with_columns(pl.col('lineage')
-                                              .str
-                                              .split(';')
-                                              .list
-                                              .get(-1)
-                                              .str
-                                              .replace_all(r" |\[|\]", "_")
-                                              .alias('species'))
-                              .select('feature-id', 'species')
-                              .collect()
-                              .iter_rows())
-    else:
-        sql = "SELECT DISTINCT genome_id FROM coverage"
-        target_names = {k[0]: k[0] for k in duckdb.sql(sql).fetchall()}
-    return target_names
 
 
 @click.group()
 def cli():
     """micov: microbiome coverage."""
-    pass
 
 
 @cli.command()
-@click.option('--qiita-coverages', type=click.Path(exists=True), multiple=True,
-              required=True, help='Pre-computed Qiita coverage data')
-@click.option('--samples-to-keep', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the samples to keep')
-@click.option('--samples-to-ignore', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the samples to ignore')
-@click.option('--features-to-keep', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the features to keep')
-@click.option('--features-to-ignore', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the features to ignore')
-@click.option('--output', type=click.Path(exists=False), required=True)
-@click.option('--lengths', type=click.Path(exists=True), required=True,
-              help="Genome lengths")
-def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
-                   features_to_keep, features_to_ignore, output, lengths):
+@click.option(
+    "--qiita-coverages",
+    type=click.Path(exists=True),
+    multiple=True,
+    required=True,
+    help="Pre-computed Qiita coverage data",
+)
+@click.option(
+    "--samples-to-keep",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the samples to keep",
+)
+@click.option(
+    "--samples-to-ignore",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the samples to ignore",
+)
+@click.option(
+    "--features-to-keep",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the features to keep",
+)
+@click.option(
+    "--features-to-ignore",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the features to ignore",
+)
+@click.option("--output", type=click.Path(exists=False), required=True)
+@click.option(
+    "--lengths", type=click.Path(exists=True), required=True, help="Genome lengths"
+)
+def qiita_coverage(
+    qiita_coverages,
+    samples_to_keep,
+    samples_to_ignore,
+    features_to_keep,
+    features_to_ignore,
+    output,
+    lengths,
+):
     """Compute aggregated coverage from one or more Qiita coverage files."""
     if samples_to_keep:
         samples_to_keep = _first_col_as_set(samples_to_keep)
@@ -93,29 +105,47 @@ def qiita_coverage(qiita_coverages, samples_to_keep, samples_to_ignore,
 
     lengths = parse_genome_lengths(lengths)
 
-    coverage = parse_qiita_coverages(qiita_coverages,
-                                     sample_keep=samples_to_keep,
-                                     sample_drop=samples_to_ignore,
-                                     feature_keep=features_to_keep,
-                                     feature_drop=features_to_ignore)
-    coverage.write_csv(output + '.covered-positions.tsv', separator='\t',
-                       include_header=True)
+    coverage = parse_qiita_coverages(
+        qiita_coverages,
+        sample_keep=samples_to_keep,
+        sample_drop=samples_to_ignore,
+        feature_keep=features_to_keep,
+        feature_drop=features_to_ignore,
+    )
+    coverage.write_csv(
+        output + ".covered-positions.tsv", separator="\t", include_header=True
+    )
 
     genome_coverage = coverage_percent(coverage, lengths).collect()
-    genome_coverage.write_csv(output + '.coverage.tsv', separator='\t',
-                              include_header=True)
+    genome_coverage.write_csv(
+        output + ".coverage.tsv", separator="\t", include_header=True
+    )
 
 
 @cli.command()
-@click.option('--data', type=click.Path(exists=True), required=False)
-@click.option('--output', type=click.Path(exists=False))
-@click.option('--disable-compression', is_flag=True, default=False,
-              help='Do not compress the regions')
-@click.option('--lengths', type=click.Path(exists=True), required=False,
-              help='Genome lengths, if provided compute coverage')
-@click.option('--taxonomy', type=click.Path(exists=True), required=False,
-              help=('Genome taxonomy, if provided show species in coverage '
-                    'percentage. Only works when --length is provided'))
+@click.option("--data", type=click.Path(exists=True), required=False)
+@click.option("--output", type=click.Path(exists=False))
+@click.option(
+    "--disable-compression",
+    is_flag=True,
+    default=False,
+    help="Do not compress the regions",
+)
+@click.option(
+    "--lengths",
+    type=click.Path(exists=True),
+    required=False,
+    help="Genome lengths, if provided compute coverage",
+)
+@click.option(
+    "--taxonomy",
+    type=click.Path(exists=True),
+    required=False,
+    help=(
+        "Genome taxonomy, if provided show species in coverage "
+        "percentage. Only works when --length is provided"
+    ),
+)
 def compress(data, output, disable_compression, lengths, taxonomy):
     """Compress BAM/SAM/BED mapping data.
 
@@ -123,7 +153,7 @@ def compress(data, output, disable_compression, lengths, taxonomy):
 
     samtools view foo.bam | micov coverage | gzip > foo.cov.gz
     """
-    if output == '-' or output is None:
+    if output == "-" or output is None:
         output = sys.stdout
 
     if lengths is not None:
@@ -133,16 +163,15 @@ def compress(data, output, disable_compression, lengths, taxonomy):
             taxonomy = parse_taxonomy(taxonomy)
 
     if data is not None and os.path.isdir(data):
-        file_list = (glob(data + "/*.sam")
-                    + glob(data + '/*.sam.xz')
-                    + glob(data + '/*.sam.gz'))
+        file_list = (
+            glob(data + "/*.sam") + glob(data + "/*.sam.xz") + glob(data + "/*.sam.gz")
+        )
     else:
         file_list = [data]
 
     dfs = []
     for samfile in file_list:
-        df = compress_from_stream(samfile,
-                                    disable_compression=disable_compression)
+        df = compress_from_stream(samfile, disable_compression=disable_compression)
         if df is None or len(df) == 0:
             logger.warning("File appears empty...")
         else:
@@ -150,32 +179,33 @@ def compress(data, output, disable_compression, lengths, taxonomy):
     coverage = _single_df(_check_and_compress(dfs, compress_size=0))
 
     if lengths is None:
-        coverage.write_csv(output, separator='\t', include_header=True)
+        coverage.write_csv(output, separator="\t", include_header=True)
     else:
         genome_coverage = coverage_percent(coverage, lengths).collect()
 
         if taxonomy is None:
-            genome_coverage.write_csv(output, separator='\t',
-                                      include_header=True)
+            genome_coverage.write_csv(output, separator="\t", include_header=True)
         else:
-            genome_coverage_with_taxonomy = set_taxonomy_as_id(genome_coverage,
-                                                               taxonomy)
-            genome_coverage_with_taxonomy.write_csv(output, separator='\t',
-                                                    include_header=True)
+            genome_coverage_with_taxonomy = set_taxonomy_as_id(
+                genome_coverage, taxonomy
+            )
+            genome_coverage_with_taxonomy.write_csv(
+                output, separator="\t", include_header=True
+            )
 
 
 @cli.command()
-@click.option('--positions', type=click.Path(exists=True), required=False,
-              help='BED3')
-@click.option('--output', type=click.Path(exists=False), required=False)
-@click.option('--lengths', type=click.Path(exists=True), required=True,
-              help="Genome lengths")
+@click.option("--positions", type=click.Path(exists=True), required=False, help="BED3")
+@click.option("--output", type=click.Path(exists=False), required=False)
+@click.option(
+    "--lengths", type=click.Path(exists=True), required=True, help="Genome lengths"
+)
 def position_plot(positions, output, lengths):
     """Construct a single sample coverage plot."""
     if positions is None:
         data = sys.stdin
     else:
-        data = open(positions, 'rb')
+        data = open(positions, "rb")
 
     lengths = parse_genome_lengths(lengths)
     df = parse_bed_cov_to_df(data)
@@ -183,37 +213,59 @@ def position_plot(positions, output, lengths):
 
 
 @cli.command()
-@click.option('--paths', type=click.Path(exists=True), required=True)
-@click.option('--output', type=click.Path(exists=False))
-@click.option('--lengths', type=click.Path(exists=True), required=True,
-              help="Genome lengths")
+@click.option("--paths", type=click.Path(exists=True), required=True)
+@click.option("--output", type=click.Path(exists=False))
+@click.option(
+    "--lengths", type=click.Path(exists=True), required=True, help="Genome lengths"
+)
 def consolidate(paths, output, lengths):
     """Consolidate coverage files into a Qiita-like coverage.tgz."""
     paths = [path.strip() for path in open(paths)]
     for path in paths:
         if not os.path.exists(path):
-            raise IOError(f"{path} not found")
+            raise OSError(f"{path} not found")
     lengths = parse_genome_lengths(lengths)
     write_qiita_cov(output, paths, lengths)
 
 
 @cli.command()
-@click.option('--qiita-coverages', type=click.Path(exists=True), multiple=True,
-              required=True, help='Pre-computed Qiita coverage data')
-@click.option('--output', type=click.Path(exists=False))
-@click.option('--lengths', type=click.Path(exists=True), required=True,
-              help="Genome lengths")
-@click.option('--samples-to-keep', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the sample metadata')
-@click.option('--features-to-keep', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the features to keep')
-@click.option('--features-to-ignore', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the features to ignore')
-def qiita_to_parquet(qiita_coverages, lengths, output, samples_to_keep,
-                     features_to_keep, features_to_ignore):
+@click.option(
+    "--qiita-coverages",
+    type=click.Path(exists=True),
+    multiple=True,
+    required=True,
+    help="Pre-computed Qiita coverage data",
+)
+@click.option("--output", type=click.Path(exists=False))
+@click.option(
+    "--lengths", type=click.Path(exists=True), required=True, help="Genome lengths"
+)
+@click.option(
+    "--samples-to-keep",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the sample metadata",
+)
+@click.option(
+    "--features-to-keep",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the features to keep",
+)
+@click.option(
+    "--features-to-ignore",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the features to ignore",
+)
+def qiita_to_parquet(
+    qiita_coverages,
+    lengths,
+    output,
+    samples_to_keep,
+    features_to_keep,
+    features_to_ignore,
+):
     """Aggregate Qiita coverage to parquet."""
     if features_to_keep:
         features_to_keep = _first_col_as_set(features_to_keep)
@@ -225,34 +277,42 @@ def qiita_to_parquet(qiita_coverages, lengths, output, samples_to_keep,
         samples_to_keep = _first_col_as_set(samples_to_keep)
 
     lengths = parse_genome_lengths(lengths)
-    covered_positions, coverage = per_sample_coverage(qiita_coverages,
-                                                      samples_to_keep,
-                                                      features_to_keep,
-                                                      features_to_ignore,
-                                                      lengths)
+    covered_positions, coverage = per_sample_coverage(
+        qiita_coverages, samples_to_keep, features_to_keep, features_to_ignore, lengths
+    )
 
-    coverage.collect().write_parquet(output + '.coverage.parquet',
-                                     compression='zstd',
-                                     compression_level=3)  # default afaik
-    covered_positions.write_parquet(output + '.covered_positions.parquet',
-                                    compression='zstd',
-                                    compression_level=3)  # default afaik
+    coverage.collect().write_parquet(
+        output + ".coverage.parquet", compression="zstd", compression_level=3
+    )  # default afaik
+    covered_positions.write_parquet(
+        output + ".covered_positions.parquet", compression="zstd", compression_level=3
+    )  # default afaik
 
 
 @cli.command()
-@click.option('--pattern', type=str,
-              required=True, help='Glob pattern for BED3-like files. Must end '
-                                  'in .cov or .cov.gz')
-@click.option('--output', type=click.Path(exists=False))
-@click.option('--lengths', type=click.Path(exists=True), required=True,
-              help="Genome lengths")
-@click.option('--memory', type=str, default='16gb', required=False)
-@click.option('--threads', type=int, default=4, required=False)
+@click.option(
+    "--pattern",
+    type=str,
+    required=True,
+    help="Glob pattern for BED3-like files. Must end " "in .cov or .cov.gz",
+)
+@click.option("--output", type=click.Path(exists=False))
+@click.option(
+    "--lengths", type=click.Path(exists=True), required=True, help="Genome lengths"
+)
+@click.option("--memory", type=str, default="16gb", required=False)
+@click.option("--threads", type=int, default=4, required=False)
 def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
     """Aggregate BED3 files to parquet."""
+    global THREADS
+    global MEMORY
+    MEMORY = memory
+    THREADS = threads
+
     lengths = parse_genome_lengths(lengths)
 
     columns = "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', 'stop': 'UINTEGER'}"
+    # TODO: use a connection, passparams in as config dict
     duckdb.sql(f"SET memory_limit TO '{memory}'")
     duckdb.sql(f"SET threads TO {threads}")
     duckdb.sql("CREATE TABLE genome_lengths AS FROM lengths")
@@ -272,8 +332,7 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
                             columns={columns}))
         TO '{output}.covered_positions.parquet'
             (FORMAT PARQUET, PARQUET_VERSION V2,
-             COMPRESSION zstd)"""
-    )
+             COMPRESSION zstd)""")
 
     # scan the aggregated position information, compute the amount covered
     # and the percent coverage per sample per genome, stream to parquet.
@@ -292,13 +351,12 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
               FROM covered_amount JOIN genome_lengths using (genome_id))
         TO '{output}.coverage.parquet'
             (FORMAT PARQUET, PARQUET_VERSION V2,
-             COMPRESSION zstd)"""
-    )
+             COMPRESSION zstd)""")
 
     # n.b. a comparable action can be taken with polars. however, polars does
     # not currently allow limiting memory, and in testing, the use exceeded
     # 16gb.
-    #(pl.scan_csv(pattern,
+    # (pl.scan_csv(pattern,
     #             separator='\t',
     #             has_header=True,
     #             schema=pl.Schema({'genome_id': str,
@@ -314,115 +372,215 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
 
 
 @cli.command()
-@click.option('--parquet-coverage', type=click.Path(exists=False),
-              required=True, help=('Pre-computed coverage data as parquet. '
-                                   'This should be the basename used, i.e. '
-                                   'for "foo.coverage.parquet", please use '
-                                   '"foo"'))
-@click.option('--sample-metadata', type=click.Path(exists=True),
-              required=True,
-              help='A metadata file with the sample metadata')
-@click.option('--sample-metadata-column', type=str,
-              required=True,
-              help='The column to consider in the sample metadata')
-@click.option('--features-to-keep', type=click.Path(exists=True),
-              required=False,
-              help='A metadata file with the features to keep')
-@click.option('--output', type=click.Path(exists=False), required=True)
-@click.option('--plot', is_flag=True, default=False,
-              help='Generate plots from features')
-@click.option('--monte', type=click.Choice(['focused', 'unfocused']),
-              required=False, default=None,
-              help='Perform a Monte Carlo simulation for a coverage curve')
-@click.option('--monte-iters', type=int,
-              required=False, default=100,
-              help='The number of permutations to perform')
-@click.option('--target-names', type=str, required=False)
-def per_sample_group(parquet_coverage, sample_metadata, sample_metadata_column,
-                     features_to_keep, output, plot, monte, monte_iters,
-                     target_names):
+@click.option(
+    "--parquet-coverage",
+    type=click.Path(exists=False),
+    required=True,
+    help=(
+        "Pre-computed coverage data as parquet. "
+        "This should be the basename used, i.e. "
+        'for "foo.coverage.parquet", please use '
+        '"foo"'
+    ),
+)
+@click.option(
+    "--sample-metadata",
+    type=click.Path(exists=True),
+    required=True,
+    help="A metadata file with the sample metadata",
+)
+@click.option(
+    "--sample-metadata-column",
+    type=str,
+    required=True,
+    help="The column to consider in the sample metadata",
+)
+@click.option(
+    "--features-to-keep",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the features to keep",
+)
+@click.option("--output", type=click.Path(exists=False), required=True)
+@click.option(
+    "--plot", is_flag=True, default=False, help="Generate plots from features"
+)
+@click.option(
+    "--monte",
+    type=click.Choice(["focused", "unfocused"]),
+    required=False,
+    default=None,
+    help="Perform a Monte Carlo simulation for a coverage curve",
+)
+@click.option(
+    "--monte-iters",
+    type=int,
+    required=False,
+    default=100,
+    help="The number of permutations to perform",
+)
+@click.option("--memory", type=str, default="16gb", required=False)
+@click.option("--threads", type=int, default=4, required=False)
+@click.option("--target-names", type=str, required=False)
+def per_sample_group(
+    parquet_coverage,
+    sample_metadata,
+    sample_metadata_column,
+    features_to_keep,
+    output,
+    plot,
+    monte,
+    monte_iters,
+    target_names,
+    memory,
+    threads,
+):
     """Generate sample group plots and coverage data."""
-    _load_db(parquet_coverage, sample_metadata, features_to_keep)
+    # TODO: make this "set_resources()" or something
+    global THREADS
+    global MEMORY
+    MEMORY = memory
+    THREADS = threads
 
-    all_covered_positions = duckdb.sql("SELECT * from covered_positions").pl()
-    all_coverage = duckdb.sql("SELECT * FROM coverage").pl()
-    metadata_pl = duckdb.sql("SELECT * FROM metadata").pl()
-
-    target_names = _set_target_names(target_names)
-
-    per_sample_plots(all_coverage, all_covered_positions, metadata_pl,
-                     sample_metadata_column, output, monte, monte_iters,
-                     target_names)
-
-    outdir = os.path.dirname(output)
-    ranked_genomes = rank_genome_of_interest(outdir)
-    ranked_genomes = pl.DataFrame(ranked_genomes)
-    ranked_genomes.write_csv(
-        f"{outdir}/genome_ranks.tsv", separator="\t")
-
-
-def _load_db(dbbase, sample_metadata, features_to_keep):
     metadata_pl = parse_sample_metadata(sample_metadata)
-    sample_column = metadata_pl.columns[0]
-    metadata_pl = metadata_pl.rename({sample_column: COLUMN_SAMPLE_ID})
+    features_pl = parse_features_to_keep(features_to_keep)
+    view = View(parquet_coverage, metadata_pl, features_pl)
 
-    samples = tuple(metadata_pl[sample_column].unique())
+    all_covered_positions = view.positions().pl()
+    all_coverage = view.coverages().pl()
+    metadata_pl = view.metadata().pl()
+    feature_metadata_pl = view.feature_metadata().pl()
+    target_names = view.target_names(target_names)
 
-    sfilt = f'WHERE sample_id IN {samples}'
-    if features_to_keep:
-        features_to_keep = tuple(_first_col_as_set(features_to_keep))
-        sgfilt = f"{sfilt} AND genome_id IN {features_to_keep}"
-    else:
-        sgfilt = sfilt
-
-    duckdb.sql(f"""CREATE VIEW coverage
-                   AS SELECT *
-                   FROM '{dbbase}.coverage.parquet'
-                   {sgfilt}""")
-    duckdb.sql(f"""CREATE VIEW covered_positions
-                   AS SELECT *
-                   FROM '{dbbase}.covered_positions.parquet'
-                   {sgfilt}""")
-    duckdb.sql(f"""CREATE TABLE metadata
-                   AS SELECT *
-                   FROM metadata_pl
-                   {sfilt}
-                   AND {COLUMN_SAMPLE_ID} IN (SELECT DISTINCT {COLUMN_SAMPLE_ID}
-                                              FROM coverage)""")
+    per_sample_plots(
+        all_coverage,
+        all_covered_positions,
+        metadata_pl,
+        feature_metadata_pl,
+        sample_metadata_column,
+        output,
+        monte,
+        monte_iters,
+        target_names,
+    )
 
 
 @cli.command()
-@click.option('-pos', '--covered-positions', type=click.Path(exists=True),
-              required=True,
-              help='Covered positions calculated from one or more samples')
-@click.option('-o', '--outdir', type=click.Path(exists=True),
-              required=True, help="Output directory. If new, will be created.")
-@click.option('-g', '--genome-id', type=str,
-              required=True, help="Genome ID of the genome of interest")
-@click.option('-l', '--genome-length', type=int,
-              required=True, help="Length of the genome of interest")
-@click.option('-n', '--bin-num', type=int, default=1000,
-              required=False, help="Number of bins")
-def binning(covered_positions, outdir, genome_id, genome_length, bin_num):
+@click.option(
+    "--covered-positions",
+    type=click.Path(exists=True),
+    required=True,
+    help="Parquet file containing the covered positions data",
+)
+@click.option(
+    "--sample-metadata",
+    type=click.Path(exists=True),
+    required=True,
+    help="A metadata file with the sample metadata",
+)
+@click.option(
+    "--features-to-keep",
+    type=click.Path(exists=True),
+    required=False,
+    help="A file with the features to keep. Must have header",
+)
+@click.option(
+    "--metadata-variable",
+    type=str,
+    required=True,
+    help="The variable to consider in the sample metadata",
+)
+@click.option(
+    "--length", type=click.Path(exists=True), required=True, help="Genome lengths"
+)
+@click.option(
+    "--outdir",
+    type=click.Path(exists=False),
+    required=True,
+    help="Output directory for results",
+)
+@click.option(
+    "--bin-num", type=int, default=1000, help="Number of bins (default: 1000)"
+)
+@click.option(
+    "--rank", is_flag=True, default=False, help="Enable ranking (default: False)"
+)
+def binning(
+    covered_positions,
+    sample_metadata,
+    features_to_keep,
+    metadata_variable,
+    length,
+    outdir,
+    bin_num,
+    rank,
+):
     """Bin genome positions and quantify read and sample hits across bins."""
-    pos = pl.read_csv(covered_positions, separator='\t',
-                      new_columns=BED_COV_SAMPLEID_SCHEMA.columns,
-                      schema_overrides=BED_COV_SAMPLEID_SCHEMA.dtypes_dict,
-                      has_header=False, skip_rows=1).lazy()
-    pos = pos.filter(pl.col(COLUMN_GENOME_ID).is_in([genome_id]))
+    df_pos_md = combine_pos_metadata_length(
+        sample_metadata, length, covered_positions, features_to_keep
+    )
 
-    bin_df, pos_updated = pos_to_bins(pos, genome_length, bin_num)
+    df_bins_list = []
+    genome_ids = (
+        df_pos_md.select(COLUMN_GENOME_ID).unique().collect().to_series().to_list()
+    )
+    for genome_id in genome_ids:
+        pos = df_pos_md.filter(pl.col(COLUMN_GENOME_ID) == genome_id)
+        df_bins = pos_to_bins(pos, metadata_variable, bin_num)
+        df_bins_list.append(df_bins)
 
-    if not os.path.exists(outdir):
-        os.makedirs(outdir)
+    df_bins = pl.concat(df_bins_list)
 
-    bin_df = make_csv_ready(bin_df)
-    pos_updated = make_csv_ready(pos_updated)
+    df_bins_by_sample_hits = (
+        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
+        .agg(pl.col("sample_hits").std().alias("sample_hits_std"))
+        .fill_null(0)
+        .sort("sample_hits_std", descending=True)
+    )
 
-    bin_df.write_csv(f"{outdir}/bin_stats.tsv", separator="\t", include_header=True)
-    pos_updated.write_csv(f"{outdir}/pos_binned.tsv", separator="\t",
-                          include_header=True)
+    df_bins_by_read_hits = (
+        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
+        .agg(pl.col("read_hits").std().alias("read_hits_std"))
+        .fill_null(0)
+        .sort("read_hits_std", descending=True)
+    )
+
+    df_bins = df_bins.with_columns(
+        [
+            pl.col("bin_start").cast(COLUMN_START_DTYPE),
+            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
+        ]
+    )
+    df_bins_by_sample_hits = df_bins_by_sample_hits.with_columns(
+        [
+            pl.col("bin_start").cast(COLUMN_START_DTYPE),
+            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
+        ]
+    )
+    df_bins_by_read_hits = df_bins_by_read_hits.with_columns(
+        [
+            pl.col("bin_start").cast(COLUMN_START_DTYPE),
+            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
+        ]
+    )
+
+    os.makedirs(outdir, exist_ok=True)
+    make_csv_ready(df_bins).collect().write_csv(
+        f"{outdir}/stats_bins.tsv",
+        separator="\t",
+        include_header=True,
+    )
+    df_bins_by_sample_hits.collect().write_csv(
+        f"{outdir}/stats_by_variance_of_sample_hits.tsv",
+        separator="\t",
+        include_header=True,
+    )
+    df_bins_by_read_hits.collect().write_csv(
+        f"{outdir}/stats_by_variance_of_read_hits.tsv",
+        separator="\t",
+        include_header=True,
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     cli()
