@@ -448,14 +448,14 @@ def binning(
     df_bins = pl.concat(df_bins_list)
 
     df_bins_by_sample_hits = (
-        df_bins.group_by("genome_id", "bin_idx", "bin_start", "bin_stop")
+        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
         .agg(pl.col("sample_hits").std().alias("sample_hits_std"))
         .fill_null(0)
         .sort("sample_hits_std", descending=True)
     )
 
     df_bins_by_read_hits = (
-        df_bins.group_by("genome_id", "bin_idx", "bin_start", "bin_stop")
+        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
         .agg(pl.col("read_hits").std().alias("read_hits_std"))
         .fill_null(0)
         .sort("read_hits_std", descending=True)
