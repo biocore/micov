@@ -105,7 +105,7 @@ def pos_to_bins(pos, variable, bin_num):
             pl.col(COLUMN_SAMPLE_ID).n_unique().alias("sample_hits"),
             pl.col(COLUMN_SAMPLE_ID).unique().sort().alias("samples"),
         )
-        .sort(by=["bin_idx", "variable"])
+        .sort(by=["bin_idx", variable])
         .join(bin_list, how="left", on="bin_idx")
     )
     return df_bins
