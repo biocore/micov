@@ -511,3 +511,26 @@ def parse_coverage(data, features_to_keep):
         cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
 
     return cov_df
+
+
+def combine_pos_metadata_length(
+    sample_metadata,
+    length,
+    covered_positions,
+    features_to_keep):
+    df_md = parse_sample_metadata(sample_metadata).lazy()
+    df_length = parse_genome_lengths(length).lazy()
+    df_pos = pl.scan_parquet(covered_positions)
+
+    df_pos_md = df_pos.join(
+        df_md, on=COLUMN_SAMPLE_ID, how="left"
+    ).join(
+        df_length, on=COLUMN_GENOME_ID, how="left"
+    )
+
+    if features_to_keep:
+        features_to_keep = _first_col_as_set(features_to_keep)
+        df_pos_md = df_pos_md.filter(
+            pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
+
+    return df_pos_md

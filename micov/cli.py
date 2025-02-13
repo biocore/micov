@@ -10,16 +10,18 @@ from glob import glob
 from ._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
                   parse_qiita_coverages, parse_sam_to_df, write_qiita_cov,
                   parse_sample_metadata, compress_from_stream,
-                  parse_bed_cov_to_df, _single_df, _check_and_compress)
+                  parse_bed_cov_to_df, _single_df, _check_and_compress,
+                  combine_pos_metadata_length)
 from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
 from ._plot import (per_sample_plots,
                     single_sample_position_plot)
 from ._utils import logger
-from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID,
+from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, COLUMN_LENGTH,
                          BED_COV_SAMPLEID_SCHEMA,
-                         COLUMN_START, COLUMN_CIGAR, COLUMN_STOP)
+                         COLUMN_START, COLUMN_CIGAR, COLUMN_STOP,
+                         COLUMN_START_DTYPE, COLUMN_STOP_DTYPE)
 from ._quant import pos_to_bins, make_csv_ready
 from ._rank import rank_genome_of_interest
 
@@ -392,36 +394,92 @@ def _load_db(dbbase, sample_metadata, features_to_keep):
 
 
 @cli.command()
-@click.option('-pos', '--covered-positions', type=click.Path(exists=True),
-              required=True,
-              help='Covered positions calculated from one or more samples')
-@click.option('-o', '--outdir', type=click.Path(exists=True),
-              required=True, help="Output directory. If new, will be created.")
-@click.option('-g', '--genome-id', type=str,
-              required=True, help="Genome ID of the genome of interest")
-@click.option('-l', '--genome-length', type=int,
-              required=True, help="Length of the genome of interest")
-@click.option('-n', '--bin-num', type=int, default=1000,
-              required=False, help="Number of bins")
-def binning(covered_positions, outdir, genome_id, genome_length, bin_num):
+@click.option("--covered-positions", type=click.Path(exists=True),
+    required=True,
+    help="Parquet file containing the covered positions data")
+@click.option("--sample-metadata", type=click.Path(exists=True),
+    required=True,
+    help="A metadata file with the sample metadata")
+@click.option("--features-to-keep", type=click.Path(exists=True),
+    required=False,
+    help="A file with the features to keep. Must have header")
+@click.option("--metadata-variable", type=str, required=True,
+    help="The variable to consider in the sample metadata")
+@click.option("--length", type=click.Path(exists=True), required=True,
+    help="Genome lengths")
+@click.option("--outdir", type=click.Path(exists=False), required=True,
+    help="Output directory for results",)
+@click.option("--bin-num", type=int, default=1000,
+    help="Number of bins (default: 1000)")
+@click.option("--rank", is_flag=True, default=False,
+    help="Enable ranking (default: False)")
+def binning(
+    covered_positions,
+    sample_metadata,
+    features_to_keep,
+    metadata_variable,
+    length,
+    outdir,
+    bin_num,
+    rank
+):
     """Bin genome positions and quantify read and sample hits across bins."""
-    pos = pl.read_csv(covered_positions, separator='\t',
-                      new_columns=BED_COV_SAMPLEID_SCHEMA.columns,
-                      schema_overrides=BED_COV_SAMPLEID_SCHEMA.dtypes_dict,
-                      has_header=False, skip_rows=1).lazy()
-    pos = pos.filter(pl.col(COLUMN_GENOME_ID).is_in([genome_id]))
+    df_pos_md = combine_pos_metadata_length(
+        sample_metadata, length, covered_positions, features_to_keep)
 
-    bin_df, pos_updated = pos_to_bins(pos, genome_length, bin_num)
+    df_bins_list = []
+    genome_ids = df_pos_md.select(
+        COLUMN_GENOME_ID).unique().collect().to_series().to_list()
+    for genome_id in genome_ids:
+        pos = df_pos_md.filter(pl.col(COLUMN_GENOME_ID) == genome_id)
+        df_bins = pos_to_bins(pos, metadata_variable, bin_num)
+        df_bins_list.append(df_bins)
 
-    if not os.path.exists(outdir):
-        os.makedirs(outdir)
+    df_bins = pl.concat(df_bins_list)
 
-    bin_df = make_csv_ready(bin_df)
-    pos_updated = make_csv_ready(pos_updated)
+    df_bins_by_sample_hits = (
+        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
+        .agg(pl.col("sample_hits").std().alias("sample_hits_std"))
+        .fill_null(0)
+        .sort("sample_hits_std", descending=True)
+    )
 
-    bin_df.write_csv(f"{outdir}/bin_stats.tsv", separator="\t", include_header=True)
-    pos_updated.write_csv(f"{outdir}/pos_binned.tsv", separator="\t",
-                          include_header=True)
+    df_bins_by_read_hits = (
+        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
+        .agg(pl.col("read_hits").std().alias("read_hits_std"))
+        .fill_null(0)
+        .sort("read_hits_std", descending=True)
+    )
+
+    df_bins = df_bins.with_columns([
+        pl.col("bin_start").cast(COLUMN_START_DTYPE),
+        pl.col("bin_stop").cast(COLUMN_STOP_DTYPE)
+    ])
+    df_bins_by_sample_hits = df_bins_by_sample_hits.with_columns([
+        pl.col("bin_start").cast(COLUMN_START_DTYPE),
+        pl.col("bin_stop").cast(COLUMN_STOP_DTYPE)
+    ])
+    df_bins_by_read_hits = df_bins_by_read_hits.with_columns([
+        pl.col("bin_start").cast(COLUMN_START_DTYPE),
+        pl.col("bin_stop").cast(COLUMN_STOP_DTYPE)
+    ])
+
+    os.makedirs(outdir, exist_ok=True)
+    make_csv_ready(df_bins).collect().write_csv(
+        f"{outdir}/stats_bins.tsv",
+        separator="\t",
+        include_header=True,
+    )
+    df_bins_by_sample_hits.collect().write_csv(
+        f"{outdir}/stats_by_variance_of_sample_hits.tsv",
+        separator="\t",
+        include_header=True,
+    )
+    df_bins_by_read_hits.collect().write_csv(
+        f"{outdir}/stats_by_variance_of_read_hits.tsv",
+        separator="\t",
+        include_header=True,
+    )
 
 
 if __name__ == '__main__':
