@@ -87,7 +87,8 @@ class Tests(unittest.TestCase):
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
                 (COLUMN_SAMPLE_ID, COLUMN_SAMPLE_ID_DTYPE),
                 ("variable", str),
-                ("length", int)],
+                ("length", int),
+            ],
         ).lazy()
         bin_num = 5
 
@@ -99,6 +100,7 @@ class Tests(unittest.TestCase):
                 ["G000006605", "B", 4, 1, 1, ["s2"], 60.0, 80.0],
                 ["G000006605", "B", 5, 1, 1, ["s2"], 80.0, 101.0],
             ],
+            orient="row",
             schema=[
                 (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
                 ("variable", str),
@@ -120,7 +122,7 @@ class Tests(unittest.TestCase):
         pos = pl.DataFrame(
             [
                 ["G000006605", 5, 39, "s1", "A", 100],
-                ["G000006605", 25, 45,"s1", "A", 100],
+                ["G000006605", 25, 45, "s1", "A", 100],
                 ["G000006605", 11, 15, "s1", "A", 100],
                 ["G000006605", 45, 65, "s1", "A", 100],
                 ["G000006605", 71, 76, "s2", "B", 100],
@@ -133,7 +135,8 @@ class Tests(unittest.TestCase):
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
                 (COLUMN_SAMPLE_ID, COLUMN_SAMPLE_ID_DTYPE),
                 ("variable", str),
-                ("length", int)],
+                ("length", int),
+            ],
         ).lazy()
         bin_num = 5
 
@@ -147,6 +150,7 @@ class Tests(unittest.TestCase):
                 ["G000006605", "B", 4, 2, 1, ["s2"], 60.0, 80.0],
                 ["G000006605", "B", 5, 1, 1, ["s2"], 80.0, 101.0],
             ],
+            orient="row",
             schema=[
                 (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
                 ("variable", str),
@@ -179,7 +183,8 @@ class Tests(unittest.TestCase):
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
                 (COLUMN_SAMPLE_ID, COLUMN_SAMPLE_ID_DTYPE),
                 ("variable", str),
-                ("length", int)],
+                ("length", int),
+            ],
         ).lazy()
         bin_num = 5
         obs_bin_df = pos_to_bins(pos, "variable", bin_num)
@@ -190,6 +195,7 @@ class Tests(unittest.TestCase):
                 ["G000006605", "B", 4, 1, 1, ["s2"], 60.0, 80.0],
                 ["G000006605", "B", 5, 1, 1, ["s2"], 80.0, 101.0],
             ],
+            orient="row",
             schema=[
                 (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
                 ("variable", str),
