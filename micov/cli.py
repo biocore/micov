@@ -31,7 +31,6 @@ from ._io import (
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
 from ._quant import make_csv_ready, pos_to_bins
-from ._rank import rank_genome_of_interest
 from ._utils import logger
 from ._view import View
 
@@ -464,11 +463,6 @@ def per_sample_group(
         monte_iters,
         target_names,
     )
-
-    outdir = os.path.dirname(output)
-    ranked_genomes = rank_genome_of_interest(outdir)
-    ranked_genomes = pl.DataFrame(ranked_genomes)
-    ranked_genomes.write_csv(f"{outdir}/genome_ranks.tsv", separator="\t")
 
 
 @cli.command()
