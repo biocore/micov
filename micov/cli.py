@@ -10,7 +10,8 @@ from glob import glob
 from ._io import (parse_genome_lengths, parse_taxonomy, set_taxonomy_as_id,
                   parse_qiita_coverages, parse_sam_to_df, write_qiita_cov,
                   parse_sample_metadata, compress_from_stream,
-                  parse_bed_cov_to_df, _single_df, _check_and_compress)
+                  parse_bed_cov_to_df, _single_df, _check_and_compress,
+                  combine_pos_metadata_length)
 from ._cov import coverage_percent
 from ._convert import cigar_to_lens
 from ._per_sample import per_sample_coverage
@@ -19,7 +20,8 @@ from ._plot import (per_sample_plots,
 from ._utils import logger
 from ._constants import (COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, COLUMN_LENGTH,
                          BED_COV_SAMPLEID_SCHEMA,
-                         COLUMN_START, COLUMN_CIGAR, COLUMN_STOP)
+                         COLUMN_START, COLUMN_CIGAR, COLUMN_STOP,
+                         COLUMN_START_DTYPE, COLUMN_STOP_DTYPE)
 from ._quant import pos_to_bins, make_csv_ready
 from ._rank import rank_genome_of_interest
 
@@ -422,20 +424,8 @@ def binning(
     rank
 ):
     """Bin genome positions and quantify read and sample hits across bins."""
-    df_md = parse_sample_metadata(sample_metadata).lazy()
-    df_length = parse_genome_lengths(length).lazy()
-    df_pos = pl.scan_parquet(covered_positions)
-
-    df_pos_md = df_pos.join(
-        df_md, on=COLUMN_SAMPLE_ID, how="left"
-    ).join(
-        df_length, on=COLUMN_GENOME_ID, how="left"
-    )
-
-    if features_to_keep:
-        features_to_keep = _first_col_as_set(features_to_keep)
-        df_pos_md = df_pos_md.filter(
-            pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
+    df_pos_md = combine_pos_metadata_length(
+        sample_metadata, length, covered_positions, features_to_keep)
 
     df_bins_list = []
     genome_ids = df_pos_md.select(
@@ -462,16 +452,16 @@ def binning(
     )
 
     df_bins = df_bins.with_columns([
-        pl.col("bin_start").cast(pl.Int64),
-        pl.col("bin_stop").cast(pl.Int64)
+        pl.col("bin_start").cast(COLUMN_START_DTYPE),
+        pl.col("bin_stop").cast(COLUMN_STOP_DTYPE)
     ])
     df_bins_by_sample_hits = df_bins_by_sample_hits.with_columns([
-        pl.col("bin_start").cast(pl.Int64),
-        pl.col("bin_stop").cast(pl.Int64)
+        pl.col("bin_start").cast(COLUMN_START_DTYPE),
+        pl.col("bin_stop").cast(COLUMN_STOP_DTYPE)
     ])
     df_bins_by_read_hits = df_bins_by_read_hits.with_columns([
-        pl.col("bin_start").cast(pl.Int64),
-        pl.col("bin_stop").cast(pl.Int64)
+        pl.col("bin_start").cast(COLUMN_START_DTYPE),
+        pl.col("bin_stop").cast(COLUMN_STOP_DTYPE)
     ])
 
     os.makedirs(outdir, exist_ok=True)
@@ -490,8 +480,6 @@ def binning(
         separator="\t",
         include_header=True,
     )
-
-    return
 
 
 if __name__ == '__main__':
