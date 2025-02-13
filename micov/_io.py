@@ -112,7 +112,7 @@ def parse_qiita_coverages(tgzs, *args, **kwargs):
         Forwarded to _parse_qiita_coverages
 
     """
-    if not isinstance(tgzs, (list, tuple, set, frozenset)):
+    if not isinstance(tgzs, list | tuple | set | frozenset):
         tgzs = [
             tgzs,
         ]
@@ -120,7 +120,8 @@ def parse_qiita_coverages(tgzs, *args, **kwargs):
     compress_size = kwargs.get("compress_size", 50_000_000)
 
     if compress_size is not None:
-        assert isinstance(compress_size, int) and compress_size >= 0
+        assert isinstance(compress_size, int)
+        assert compress_size >= 0
     else:
         compress_size = math.inf
         kwargs["compress_size"] = compress_size
@@ -189,8 +190,8 @@ def _parse_qiita_coverages(
 
     try:
         fp.extractfile("coverage_percentage.txt")
-    except KeyError:
-        raise KeyError(f"{tgz} does not look like a Qiita coverage tgz")
+    except KeyError as e:
+        raise KeyError(f"{tgz} does not look like a Qiita coverage tgz") from e
 
     if sample_keep is None:
         sample_keep = SetOfAll()
@@ -558,24 +559,24 @@ def parse_coverage(data, features_to_keep):
     return cov_df
 
 
+def _first_col_as_set(fp):
+    df = pl.read_csv(fp, separator="\t", infer_schema_length=0)
+    return set(df[df.columns[0]])
+
+
 def combine_pos_metadata_length(
-    sample_metadata,
-    length,
-    covered_positions,
-    features_to_keep):
+    sample_metadata, length, covered_positions, features_to_keep
+):
     df_md = parse_sample_metadata(sample_metadata).lazy()
     df_length = parse_genome_lengths(length).lazy()
     df_pos = pl.scan_parquet(covered_positions)
 
-    df_pos_md = df_pos.join(
-        df_md, on=COLUMN_SAMPLE_ID, how="left"
-    ).join(
+    df_pos_md = df_pos.join(df_md, on=COLUMN_SAMPLE_ID, how="left").join(
         df_length, on=COLUMN_GENOME_ID, how="left"
     )
 
     if features_to_keep:
         features_to_keep = _first_col_as_set(features_to_keep)
-        df_pos_md = df_pos_md.filter(
-            pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
+        df_pos_md = df_pos_md.filter(pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
 
     return df_pos_md

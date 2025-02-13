@@ -484,7 +484,7 @@ class IOTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "[G000008865]"):
-            obs = set_taxonomy_as_id(cov, tax)
+            set_taxonomy_as_id(cov, tax)
 
     def test_compress_from_stream(self):
         data = io.BytesIO(

@@ -1,7 +1,8 @@
-from ._io import parse_qiita_coverages
-from ._constants import COLUMN_SAMPLE_ID
-from ._cov import coverage_percent, compress
 import polars as pl
+
+from ._constants import COLUMN_SAMPLE_ID
+from ._cov import compress, coverage_percent
+from ._io import parse_qiita_coverages
 
 
 def per_sample_coverage(qiita_coverages, current_samples, features_to_keep,

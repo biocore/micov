@@ -206,7 +206,7 @@ def add_monte(
     monte_y = []
     monte_x = list(range(max_x))
 
-    for it in range(iters):
+    for _ in range(iters):
         monte = (sample_set.select(pl.col(COLUMN_SAMPLE_ID).shuffle()).head(max_x))[
             COLUMN_SAMPLE_ID
         ]
@@ -460,7 +460,6 @@ def single_sample_position_plot(positions, lengths, output, scale=None):
 
         ax.set_title(f"Position plot: {name}", fontsize=20)
         ax.set_ylabel("Unit normalized position", fontsize=20)
-        scaletag = ""
 
         ax.tick_params(axis="both", which="major", labelsize=16)
         ax.tick_params(axis="both", which="minor", labelsize=16)
@@ -582,8 +581,8 @@ def position_plot(
         hist_x = []
         hist_y = []
 
-        col_selection = [COLUMN_SAMPLE_ID, COLUMN_GENOME_ID, "x_unscaled"]
-        for sid, gid, x in grp_coverage[col_selection].rows():
+        col_selection = [COLUMN_SAMPLE_ID, "x_unscaled"]
+        for sid, x in grp_coverage[col_selection].rows():
             cur_positions = (
                 target_positions.filter(pl.col(COLUMN_SAMPLE_ID) == sid)
                 .join(grp_coverage.lazy(), on=COLUMN_SAMPLE_ID)
@@ -614,7 +613,7 @@ def position_plot(
                 )
                 obs_bins = obs_bins[:-1][obs_count > 0]
                 hist_x.extend([x for _ in obs_bins])
-                hist_y.extend([b for b in obs_bins])
+                hist_y.extend(obs_bins)
 
         if scale is not None:
             ax.scatter(hist_x, hist_y, s=0.2, color=color, alpha=0.7)
