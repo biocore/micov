@@ -31,6 +31,7 @@ from ._io import (
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
 from ._quant import combine_pos_metadata_length, make_csv_ready, pos_to_bins
+from ._rank import rank_genome_of_interest
 from ._utils import logger
 from ._view import View
 
@@ -449,6 +450,10 @@ def per_sample_group(
     all_covered_positions = view.positions().pl()
     all_coverage = view.coverages().pl()
     metadata_pl = view.metadata().pl()
+
+    all_covered_positions = view.positions().pl()
+    all_coverage = view.coverages().pl()
+    metadata_pl = view.metadata().pl()
     feature_metadata_pl = view.feature_metadata().pl()
     target_names = view.target_names(target_names)
 
@@ -465,9 +470,9 @@ def per_sample_group(
     )
 
     outdir = os.path.dirname(output)
-    # ranked_genomes = rank_genome_of_interest(outdir)
-    # ranked_genomes = pl.DataFrame(ranked_genomes)
-    # ranked_genomes.write_csv(f"{outdir}/genome_ranks.tsv", separator="\t")
+    ranked_genomes = rank_genome_of_interest(outdir)
+    ranked_genomes = pl.DataFrame(ranked_genomes)
+    ranked_genomes.write_csv(f"{outdir}/genome_ranks.tsv", separator="\t")
 
 
 @cli.command()
