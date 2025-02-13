@@ -25,6 +25,7 @@ def per_sample_plots(
     all_coverage,
     all_covered_positions,
     metadata,
+    feature_metadata,
     sample_metadata_column,
     output,
     monte,
@@ -44,6 +45,8 @@ def per_sample_plots(
         The exact covered regions per sample per genome
     metadata : pl.DataFrame
         The sample metadata
+    feature_metadata : pl.DataFrame
+        The feature metadata
     sample_metadata_column : str
         The specific column to stratify when plotting. Note it is assumed
         this column is categorical.
@@ -59,7 +62,13 @@ def per_sample_plots(
 
     """
     for genome in all_coverage[COLUMN_GENOME_ID].unique():
+        # TODO: move this into feaure_metadata
         target_name = target_lookup[genome]
+        ymin, ymax = (
+            feature_metadata.filter(pl.col(COLUMN_GENOME_ID) == genome)
+            .select([COLUMN_START, COLUMN_STOP])
+            .row(0)
+        )
 
         coverage_curve(
             metadata,
@@ -93,6 +102,8 @@ def per_sample_plots(
             sample_metadata_column,
             output,
             target_name,
+            ymin,
+            ymax,
             scale=None,
         )
         position_plot(
@@ -103,6 +114,8 @@ def per_sample_plots(
             sample_metadata_column,
             output,
             target_name,
+            ymin,
+            ymax,
             scale=10000,
         )
 
@@ -362,10 +375,7 @@ def coverage_curve(
         labels.append(label)
         curves[label] = median_curve
 
-    if accumulate:
-        tag = "cumulative"
-    else:
-        tag = "non-cumulative"
+    tag = "cumulative" if accumulate else "non-cumulative"
 
     ax.set_ylabel("Percent genome covered", fontsize=16)
     ax.set_xlabel("Within group sample rank by coverage", fontsize=16)
@@ -459,7 +469,16 @@ def single_sample_position_plot(positions, lengths, output, scale=None):
 
 
 def position_plot(
-    metadata, coverage, positions, target, variable, output, target_name, scale=None
+    metadata,
+    coverage,
+    positions,
+    target,
+    variable,
+    output,
+    target_name,
+    ymin,
+    ymax,
+    scale=None,
 ):
     """Construct position plots stratified by metadata value.
 
@@ -480,6 +499,10 @@ def position_plot(
         "foo/bar/theprefix"
     target_name : str
         The name of the target
+    ymin : int
+        For forcing ax.ylim.
+    ymax : int
+        For forcing ax.ylim.
     scale : int, optional
         If specified, represent the genome as `scale` number of buckets. A
         bucket is considered represented if any position within the bucket
@@ -494,13 +517,7 @@ def position_plot(
     labels = []
     colors = []
 
-    lengths = coverage.filter(pl.col(COLUMN_GENOME_ID) == target)
-    lengths = lengths[[COLUMN_GENOME_ID, COLUMN_LENGTH]].unique()
-
-    if len(lengths) > 1:
-        raise ValueError("More than one length provided for the genome")
-
-    length = lengths[COLUMN_LENGTH].item(0)
+    length = ymax - ymin
 
     target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target).lazy()
 
@@ -510,7 +527,7 @@ def position_plot(
     metadata = metadata.filter(pl.col(COLUMN_SAMPLE_ID).is_in(samples_with_positions))
 
     # TODO: expose to allow ordering by a variable rather than coverage
-    custom_yorder = None
+    custom_xorder = None
 
     group_order = metadata.group_by(variable).len().sort(by="len")
     max_x = group_order["len"].sum()
@@ -529,20 +546,17 @@ def position_plot(
     tsv_y = []
     tsv_group = []
 
-    if len(order) == 2:
-        invert = True
-    else:
-        invert = False
+    invert = len(order) == 2
 
     selection = [variable, "len", "color"]
     for oidx, (name, count, color) in enumerate(order[selection].iter_rows()):
         grp = metadata.filter(pl.col(variable) == name)
         color = f"C{color}"
 
-        if custom_yorder is not None:
+        if custom_xorder is not None:
             grp_coverage = (
-                grp.filter(pl.col(custom_yorder).is_not_null())
-                .sort(by=custom_yorder)
+                grp.filter(pl.col(custom_xorder).is_not_null())
+                .sort(by=custom_xorder)
                 .with_row_index(name="x_unscaled", offset=x_offset)
                 .with_columns(pl.lit(target).alias(COLUMN_GENOME_ID))
             )
@@ -574,8 +588,8 @@ def position_plot(
                 .join(grp_coverage.lazy(), on=COLUMN_SAMPLE_ID)
                 .select(
                     pl.col("x_unscaled"),
-                    pl.col(COLUMN_START) / length,
-                    pl.col(COLUMN_STOP) / length,
+                    pl.col(COLUMN_START),
+                    pl.col(COLUMN_STOP),
                 )
             )
 
@@ -586,6 +600,7 @@ def position_plot(
                 )
                 ax.add_collection(lc)
             else:
+                # obs_bins = position_histogram(cur_positions, scale, ymin, ymax)
                 covered_positions = pl.concat(
                     [
                         cur_positions.select(pl.col("start").alias("common")),
@@ -594,7 +609,7 @@ def position_plot(
                 ).collect()
 
                 obs_count, obs_bins = np.histogram(
-                    covered_positions, bins=scale, range=(0, 1)
+                    covered_positions, bins=scale, range=(ymin, ymax)
                 )
                 obs_bins = obs_bins[:-1][obs_count > 0]
                 hist_x.extend([x for _ in obs_bins])
@@ -612,14 +627,14 @@ def position_plot(
         boundaries.append(x_offset)
 
     ax.set_xlim(0, max_x)
-    ax.set_ylim(0, 1.0)
+    ax.set_ylim(ymin, ymax)
 
     for x in boundaries[:-1]:
-        ax.plot([x, x], [0, 1], color="k", ls="--", alpha=0.6)
+        ax.plot([x, x], [ymin, ymax], color="k", ls="--", alpha=0.6)
 
     if scale is None:
         ax.set_title(f"Position plot: {target} ({length}bp)", fontsize=20)
-        ax.set_ylabel("Unit normalized genome position", fontsize=20)
+        ax.set_ylabel("Genome position", fontsize=20)
         scaletag = ""
     else:
         df = pl.DataFrame({"group": tsv_group, "x": tsv_x, "y": tsv_y})
@@ -638,6 +653,7 @@ def position_plot(
 
     ax.tick_params(axis="y", which="major", labelsize=16)
     ax.tick_params(axis="y", which="minor", labelsize=16)
+    ax.ticklabel_format(style="plain", axis="y")
     ax.grid(axis="y", ls="--", alpha=1, color="k")
 
     plt.tight_layout()
