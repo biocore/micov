@@ -4,11 +4,51 @@
 requires = ["setuptools", "wheel", "versioneer[toml]"]
 build-backend = "setuptools.build_meta"
 
-[tool.ruff]
-target-version = "py310"
-exclude = [
-    "micov/tests/*", 
+[project]
+name = "micov"
+requires-python = ">=3.9"
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
 ]
+
+dynamic = ["version"]
+
+dependencies = [
+    "click",
+    "scipy",
+    "pyarrow<16.0.0",
+    "polars-u64-idx>=1.21.0",
+    "numba",
+    "matplotlib>=3.9.0",
+    "duckdb>=1.2.0",
+    "pytest",
+]
+
+readme = "README.md"
+authors = [
+    { name = "Daniel McDonald", email = "damcdonald@ucsd.edu" },
+    { name = "Sherlyn Weng", email = "y1weng@ucsd.edu" },
+    { name = "Caitlin Guccione", email = "cguccion@ucsd.edu" },
+]
+license = { file = "LICENSE" }
+keywords = ["microbiome", "bioinformatics"]
+
+[project.scripts]
+micov = "micov.cli:cli"
+
+[tool.ruff]
+fix = true
+line-length = 88
 
 [tool.check-manifest]
 ignore = [
@@ -17,10 +57,46 @@ ignore = [
 ]
 
 [tool.ruff.lint]
-select = ["E", "W", "D"]  # pycodestyle (E, W), pydocstyle (D)
-ignore = [
-    "D203",  # puts a space before class docstrings
-    "D213",  # puts summary on second line
-    "D400",  # redundant with D415 in place
-    "D301",  # forces raw string literals
+# adapted from https://github.com/pola-rs/polars/blob/main/py-polars/pyproject.toml
+select = [
+    "ANN",    # flake8-annotations
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "D",      # flake8-docstrings
+    "E",      # pycodestyle
+    "EM",     # flake8-errmsg
+    "F",      # pyflakes
+    "FA",     # flake8-future-annotations
+    "FBT001", # flake8-boolean-trap
+    "I",      # isort
+    "ICN",    # flake8-import-conventions
+    "INT",    # flake8-gettext
+    "PERF",   # perflint
+    "PIE",    # flake8-pie
+    "PT",     # flake8-pytest-style
+    "PTH",    # flake8-use-pathlib
+    "PYI",    # flake8-pyi
+    "RUF",    # ruff-specific rules
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "TID",    # flake8-tidy-imports
+    "TRY",    # tryceratops
+    "UP",     # pyupgrade
+    "W",      # pycodestyle
 ]
+ignore = [
+    "ANN",  # annotations are not enforced
+    "D203", # puts a space before class docstrings
+    "D213", # puts summary on second line
+    "D400", # redundant with D415 in place
+    "D301", # forces raw string literals
+]
+
+[tool.ruff.lint.per-file-ignores]
+"micov/tests/*" = ["D"]
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 88
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
