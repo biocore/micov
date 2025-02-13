@@ -31,7 +31,6 @@ from ._io import (
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
 from ._quant import make_csv_ready, pos_to_bins
-from ._rank import rank_genome_of_interest
 from ._utils import logger
 from ._view import View
 
@@ -39,32 +38,6 @@ from ._view import View
 def _first_col_as_set(fp):
     df = pl.read_csv(fp, separator="\t", infer_schema_length=0)
     return set(df[df.columns[0]])
-
-
-def _set_target_names(target_names):
-    if target_names is not None:
-        target_names = dict(
-            pl.scan_csv(
-                target_names,
-                separator="\t",
-                new_columns=["feature-id", "lineage"],
-                has_header=False,
-            )
-            .with_columns(
-                pl.col("lineage")
-                .str.split(";")
-                .list.get(-1)
-                .str.replace_all(r" |\[|\]", "_")
-                .alias("species")
-            )
-            .select("feature-id", "species")
-            .collect()
-            .iter_rows()
-        )
-    else:
-        sql = "SELECT DISTINCT genome_id FROM coverage"
-        target_names = {k[0]: k[0] for k in duckdb.sql(sql).fetchall()}
-    return target_names
 
 
 @click.group()
@@ -339,6 +312,7 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
     lengths = parse_genome_lengths(lengths)
 
     columns = "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', 'stop': 'UINTEGER'}"
+    # TODO: use a connection, passparams in as config dict
     duckdb.sql(f"SET memory_limit TO '{memory}'")
     duckdb.sql(f"SET threads TO {threads}")
     duckdb.sql("CREATE TABLE genome_lengths AS FROM lengths")
@@ -445,6 +419,8 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
     default=100,
     help="The number of permutations to perform",
 )
+@click.option("--memory", type=str, default="16gb", required=False)
+@click.option("--threads", type=int, default=4, required=False)
 @click.option("--target-names", type=str, required=False)
 def per_sample_group(
     parquet_coverage,
@@ -456,8 +432,16 @@ def per_sample_group(
     monte,
     monte_iters,
     target_names,
+    memory,
+    threads,
 ):
     """Generate sample group plots and coverage data."""
+    # TODO: make this "set_resources()" or something
+    global THREADS
+    global MEMORY
+    MEMORY = memory
+    THREADS = threads
+
     metadata_pl = parse_sample_metadata(sample_metadata)
     features_pl = parse_features_to_keep(features_to_keep)
     view = View(parquet_coverage, metadata_pl, features_pl)
@@ -465,13 +449,14 @@ def per_sample_group(
     all_covered_positions = view.positions().pl()
     all_coverage = view.coverages().pl()
     metadata_pl = view.metadata().pl()
-
-    target_names = _set_target_names(target_names)
+    feature_metadata_pl = view.feature_metadata().pl()
+    target_names = view.target_names(target_names)
 
     per_sample_plots(
         all_coverage,
         all_covered_positions,
         metadata_pl,
+        feature_metadata_pl,
         sample_metadata_column,
         output,
         monte,
@@ -480,9 +465,9 @@ def per_sample_group(
     )
 
     outdir = os.path.dirname(output)
-    ranked_genomes = rank_genome_of_interest(outdir)
-    ranked_genomes = pl.DataFrame(ranked_genomes)
-    ranked_genomes.write_csv(f"{outdir}/genome_ranks.tsv", separator="\t")
+    # ranked_genomes = rank_genome_of_interest(outdir)
+    # ranked_genomes = pl.DataFrame(ranked_genomes)
+    # ranked_genomes.write_csv(f"{outdir}/genome_ranks.tsv", separator="\t")
 
 
 @cli.command()
