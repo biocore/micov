@@ -98,7 +98,7 @@ class CovTests(unittest.TestCase):
                           orient='row', schema=[(COLUMN_SAMPLE_ID, str),
                                                 (COLUMN_GENOME_ID, str),
                                                 (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
-                                                (COLUMN_LENGTH, int),
+                                                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
                                                 (COLUMN_PERCENT_COVERED, float)])
         grp = pl.DataFrame([['S1', 'foo'],
                             ['S2', 'foo'],
@@ -116,7 +116,7 @@ class CovTests(unittest.TestCase):
                            orient='row', schema=[(COLUMN_SAMPLE_ID, str),
                                                  (COLUMN_GENOME_ID, str),
                                                  (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
-                                                 (COLUMN_LENGTH, int),
+                                                 (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
                                                  (COLUMN_PERCENT_COVERED, float),
                                                  ('x', float),
                                                  ('x_unscaled', pl.UInt64),
@@ -136,7 +136,7 @@ class CovTests(unittest.TestCase):
                           orient='row', schema=[(COLUMN_SAMPLE_ID, str),
                                                 (COLUMN_GENOME_ID, str),
                                                 (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
-                                                (COLUMN_LENGTH, int),
+                                                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
                                                 (COLUMN_PERCENT_COVERED, float)])
         pos = pl.DataFrame([['S1', 'G2', 1, 16],
                             ['S2', 'G2', 14, 20],
