@@ -74,19 +74,16 @@ jobs:
         if: ${{ matrix.use_conda }}
         shell: bash -l {0}
         run: |
-          conda env create -f micov.yml
-          conda activate micov
+          conda install -q --yes -c conda-forge --file ci/conda_requirements.txt
           pip install . --no-deps
           conda list
       - name: Install dependencies (pip)
         if: ${{ !matrix.use_conda }}
         shell: bash -l {0}
         run: |
-          conda activate micov
           pip install .
           conda list
       - name: Run unit tests
         shell: bash -l {0}
         run: |
-          conda activate micov
           make test
