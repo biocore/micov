@@ -10,5 +10,6 @@ dependencies:
   - polars-u64-idx>=1.21.0
   - pyarrow<16.0.0
   - scipy
+  - pip
   - pip:
       - pip
