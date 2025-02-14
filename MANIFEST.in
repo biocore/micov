@@ -13,3 +13,7 @@ global-exclude .git
 global-exclude *.c
 global-exclude *.so
 global-exclude .*.swp
+global-exclude .DS_Store
+global-exclude .gitignore
+global-exclude *.sh
+global-exclude Makefile
