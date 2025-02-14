@@ -4,31 +4,26 @@ We introduce aggregate MIcrobiome COVerage (micov), a bioinformatic tool that ef
 
 ## Design
 
-The primary input mapping structure for micov is SAM/BAM or BED (3-column). 
-Coverage data can be aggregated into Qiita-like `coverage.tgz` files. Per-sample
-coverages can be then be harvested from multiple `coverage.tgz` files.
-
-Why `coverage.tgz` files? Qiita provides a rich set of already computed 
-coverage data in a BED3 compatible format. Rather than invent 
-*yet-another-format*, we opted to establish functionality on what is readily
-available from that resource.
+The primary input mapping structure for micov is per-sample SAM/BAM or BED
+(3-column). These data are then consolidated into Parquet files to utilize
+pushdown filters.
 
 ## Installation
 
-We currently recommend creating a separate conda environment, and installing
-into that
+We recommend creating a separate conda environment, and installing
+into that.
 
 ```bash
-$ conda env create -f micov.yml
-$ conda activate micov
 $ pip install micov
 ```
 
 ## Installation From Source
 
 To install the most up-to-date version of micov
+
 ```bash
-$ conda create -n micov -c conda-forge polars matplotlib scipy click tqdm numba duckdb pyarrow
+$ conda create -n micov python=3.12
+$ conda install -q --yes -n micov -c conda-forge --file ci/conda_requirements.txt
 $ conda activate micov
 $ git clone https://github.com/biocore/micov.git
 $ cd micov
@@ -37,59 +32,83 @@ $ pip install -e .
 
 ## Example Usages
 
-See below for examples of running micov on SAM files. 
+See below for examples of running `micov` on SAM files.
 
 ### 1. Set Up Environment
-First, activate the **Conda environment** where **micov** is installed:  
+First, activate the **Conda environment** where `micov` is installed:
+
 ```bash
 conda activate micov
 ```
 
 ### 2. Process SAM Files to Extract Covered Positions
-If you already have tgz format coverage files from Qitta, go to step 4. 
+Next, we will process SAM files to extract covered positions. Note: If you have
+`coverages.tgz` coverage files from Qitta, please go to step 4. `micov` accepts
+**headerless** SAM/BAM files, and writes out BED-like files which describe the
+observed start and stop positions on the references in the SAM data.
 
-micov currently only processes **headerless** SAM/BAM files. If your input files contain headers, remove them using `samtools` before running micov:  
+If your input files contain headers, remove them using `samtools` before running micov:
+
 ```bash
 samtools view -S input.sam > output.sam
 ```
 
-Now, create an output directory and run micov on each SAM file:  
+Similarly, if your input files are in BAM format, convert them to SAM format using `samtools`:
+
+```bash
+samtools view input.bam > output.sam
+```
+
+Next, compress the SAM data into BED coverge files. The `samtools` command above
+can be piped into `micov` to compress the SAM data into BED-like files if
+desired, but for simplicity, we will demonstrate use from SAM. In writing, we
+asssume the name of the SAM file corresponds to a sample name. The subsequent
+code expects the BED files to have either a `.cov` or `.cov.gz` extension.
+
 ```bash
 mkdir -p "./example/coverages"
 
 for file in ./example/samfiles/*.sam.xz; do
-    filename=$(basename "$file" .sam.xz)
+    sample_id=$(basename "$file" .sam.xz)
 
     echo "Processing $file..."
-    
+
     # Run micov compress
-    xzcat $file | micov compress | gzip > "./example/coverages/${filename}.cov.gz"
+    xzcat $file | micov compress | gzip > "./example/coverages/${sample_id}.cov.gz"
 done
 ```
 
+
 ### 3. Consolidate Coverage Files
-After extracting coverage data, consolidate the `.cov` files into a compressed `.tgz` archive. This requires a **length mapping file (`length.tsv`)**, which maps genome IDs to their corresponding genome lengths. An example length file can be found in `./example/metadata/length.tsv`. If this file is not available, it can be generated using `seqkit`:
+After extracting coverage data, consolidate the `.cov` files into Parquet
+representations. This requires a **length mapping file (`length.tsv`)**, which
+maps genome IDs to their corresponding genome lengths. An example length file
+can be found in `./example/metadata/length.tsv`. If this file is not available,
+it can for example be generated using `seqkit`:
+
 ```bash
 seqkit fx2tab --length --name --header-line foo.fasta > length.tsv
 ```
 
-Now, consolidate the coverage files:
+Now, consolidate the coverage files. On read, `micov` will interpret the non-extension
+portion of a filename as the sample ID. For example, given `foo/bar/baz.cov.gz`, the
+sample ID will be `baz`.
+
 ```bash
-mkdir -p "./example/consolidate"
 
-find "./example/coverages" -type f -name '*.cov.gz' > "./example/consolidate/paths.txt"
-
-micov consolidate \
-    --lengths "./example/metadata/length.tsv" \
-    --paths "./example/consolidate/paths.txt" \
-    --output "./example/consolidate/consolidated.tgz"
+micov nonqiita-to-parquet \
+    --pattern "example/coverages/*.cov.gz" \
+    --output example/parquet/example \
+    --lengths example/metadata/length.tsv
 ```
 
 ### 4. Convert Coverage Data to Parquet Format
-micov provides functionality to convert **TGZ-formatted coverage data** into **Parquet format** for efficient querying and processing:
+`micov` provides functionality to convert **Qiita-formatted coverage data** into **Parquet format** as well.
+
 ```bash
 mkdir -p "./example/parquet"
 
+# note: multiple coverage files can be specified by repeating the --qiita-coverages argument
 micov qiita-to-parquet \
  --qiita-coverages  "./example/consolidate/consolidated.tgz" \
  --output "./example/parquet/example" \
@@ -97,7 +116,31 @@ micov qiita-to-parquet \
 ```
 
 ### 5. Generate Per-Sample-Group Plots
-micov can generate **per-sample-group plots** based on **sample metadata** and a **feature metadata file**. Ensure that `feature_metadata.txt` has a header like `feature_id` as the first line and no blank lines at the end. This produces non-cumulative, cumulative, scaled, and unscaled position plots for each genome in feature metadata.
+A series of plots can be constructed guided by metadata. Specifically, `micov` produces the following:
+
+* **Non-cumulative coverage curves** for each genome in the feature metadata.
+* **Cumulative coverage curves** for each genome in the feature metadata. These accumulation data are supported by K-S tests written to the output directory.
+* **Scaled and unscaled position plots** for each genome in the feature metadata.
+
+Categorical metadata can be used to group samples; `sample-metadata` is
+required. The genomes to examine can optionally be constrained using
+`features-to-keep`. Specific start and stop regions of genomes can also be
+specified within the `features-to-keep` but limited to a single region per
+genome currently.
+
+`micov` expects the first column of a sample metadata file to be the sample ID
+under the header `sample_id`. Similarly, the first column of a feature metadata
+file should be the feature ID under the header `genome_id`.
+
+The `--output` parameter specified a prefix for the output files.
+
+Optionally, Monte Carlo curves can be produced for the cumulative plots by
+specifying `--monte`. There are two Monte Carlo options: `unfocused` and
+`focused`. The `unfocused` option will select samples at random with _any_
+coverage data, while the `focused` option will randomly select samples with
+nonzero coverage of the current genome. Both options select independent of
+sample metadata, and will select the max number of samples observed in a sample
+group.
 
 ```bash
 mkdir -p "./example/plots/per_sample_groups"
@@ -111,41 +154,16 @@ micov per-sample-group \
  --plot
 ```
 
-### 6. Generate Monte Carlo-Based Plots
-For Monte Carlo-based sample group plots, run:
-```bash
-mkdir -p "./example/plots/per_sample_groups_monte"
+### 6. Additional usage (optional)
 
-micov per-sample-group \
- --parquet-coverage "./example/parquet/example" \
- --sample-metadata "./example/metadata/sample_metadata.txt" \
- --sample-metadata-column "dog" \
- --features-to-keep "./example/metadata/feature_metadata.txt" \
- --output "./example/plots/per_sample_groups_monte/example" \
- --plot \
- --monte "unfocused" \
- --monte-iters 100
-```
+Existing .SAM/.BAM can be converted into coverage percentages by specifying length data at compression:
 
-
-### 7. Additional usage (optional)
-
-Exising .SAM/.BAM can be compressed into a BED-like format by file or pipe. A
-pipe example is shown below:
-
-```bash
-$ xzcat some_data.sam.xz | micov compress > compressed.tsv
-```
-
-Aggregate genome coverages can be calculated using 
 ```bash
 $ xzcat some_data.sam.xz | micov compress --length length.tsv > coverages.tsv
 ```
-or 
+
+Multiple coverage files for the same sample can be aggregated into a single file:
+
 ```bash
-$ micov compress \
-    --data input.sam \
-    --output compressed_output.tsv \
-    --lengths genome-lengths.tsv \
-    --taxonomy taxonomy.tsv
+$ zcat run1/sample1.cov.gz run2/sample1.cov.gz | micov compress | gzip > combined/sample1.cov.gz
 ```

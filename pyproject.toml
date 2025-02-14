@@ -24,7 +24,7 @@ dependencies = [
     "click",
     "scipy",
     "pyarrow<16.0.0",
-    "polars-u64-idx>=1.21.0",
+    "polars-u64-idx<1.23.0",
     "numba",
     "matplotlib>=3.9.0",
     "duckdb>=1.2.0",
@@ -94,3 +94,6 @@ max-doc-length = 88
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
+
+[tool.setuptools.packages.find]
+exclude = ["wheelhouse", "tests", "examples", "ci"]

@@ -4,14 +4,14 @@ name: micov CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 env:
   latest_python: "3.12"
   supported_pythons: '["3.9", "3.10", "3.11", "3.12"]'
-  miniforge_version: "22.9.0-2"
+  miniforge_version: "23.11.0-0"
   miniforge_variant: "Mambaforge"
 
 jobs:
@@ -85,4 +85,5 @@ jobs:
           conda list
       - name: Run unit tests
         shell: bash -l {0}
-        run: make test
+        run: |
+          make test
