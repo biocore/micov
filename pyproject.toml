@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "wheel", "setuptools_scm>=8"]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -42,6 +42,9 @@ keywords = ["microbiome", "bioinformatics"]
 
 [project.scripts]
 micov = "micov.cli:cli"
+
+# an empty section is needed to allow setuptools to pull version information
+[tool.setuptools_scm]
 
 [tool.ruff]
 fix = true
