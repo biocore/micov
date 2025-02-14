@@ -82,8 +82,11 @@ jobs:
         if: ${{ !matrix.use_conda }}
         shell: bash -l {0}
         run: |
+          conda activate micov
           pip install .
           conda list
       - name: Run unit tests
         shell: bash -l {0}
-        run: make test
+        run: |
+          conda activate micov
+          make test
