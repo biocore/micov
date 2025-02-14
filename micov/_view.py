@@ -96,7 +96,7 @@ class View:
                              FROM '{positions}' pos
                                  JOIN feature_constraint fc
                                      ON pos.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
-                                         AND pos.{COLUMN_START} < fc.{COLUMN_STOP}
+                                         AND pos.{COLUMN_START} <= fc.{COLUMN_STOP}
                                          AND pos.{COLUMN_STOP} > fc.{COLUMN_START}
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
