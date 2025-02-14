@@ -2,18 +2,13 @@
 name: Build and upload to PyPI
 
 on:
-  workflow_dispatch:
-  pull_request:
   push:
-    branches:
-      - main
-  release:
-    types:
-      - published
+    tags:
+      - "*"
 
 jobs:
   build_wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.os }}-py${{ matrix.python_version }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -52,9 +47,7 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
-    if: github.event_name == 'release' && github.event.action == 'published'
-    # or, alternatively, upload to PyPI on every tag starting with 'v' (remove on: release above to use this)
-    # if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
     steps:
       - uses: actions/download-artifact@v4
         with:
