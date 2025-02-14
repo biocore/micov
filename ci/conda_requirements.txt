@@ -1,0 +1,7 @@
+click
+duckdb>=1.2.0
+matplotlib>=3.9.0
+numba
+polars-u64-idx<1.23.0
+pyarrow<16.0.0
+scipy

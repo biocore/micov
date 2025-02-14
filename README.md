@@ -14,8 +14,6 @@ We recommend creating a separate conda environment, and installing
 into that.
 
 ```bash
-$ conda env create -f micov.yml
-$ conda activate micov
 $ pip install micov
 ```
 
@@ -24,7 +22,8 @@ $ pip install micov
 To install the most up-to-date version of micov
 
 ```bash
-$ conda env create -f micov.yml
+$ conda create -n micov python=3.12
+$ conda install -q --yes -n micov -c conda-forge --file ci/conda_requirements.txt
 $ conda activate micov
 $ git clone https://github.com/biocore/micov.git
 $ cd micov
