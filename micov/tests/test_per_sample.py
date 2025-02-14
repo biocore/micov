@@ -1,11 +1,16 @@
 import unittest
+
 import polars as pl
 import polars.testing as plt
+
+from micov._constants import (
+    BED_COV_SAMPLEID_SCHEMA,
+    COLUMN_GENOME_ID,
+    COLUMN_SAMPLE_ID,
+    GENOME_COVERAGE_WITH_SAMPLEID_SCHEMA,
+    GENOME_LENGTH_SCHEMA,
+)
 from micov._per_sample import compress_per_sample
-from micov._constants import (GENOME_LENGTH_SCHEMA,
-                              BED_COV_SAMPLEID_SCHEMA,
-                              COLUMN_GENOME_ID, COLUMN_SAMPLE_ID,
-                              GENOME_COVERAGE_WITH_SAMPLEID_SCHEMA)
 
 
 class Tests(unittest.TestCase):

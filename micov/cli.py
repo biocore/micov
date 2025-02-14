@@ -16,6 +16,7 @@ from ._constants import (
 from ._cov import coverage_percent
 from ._io import (
     _check_and_compress,
+    _first_col_as_set,
     _single_df,
     combine_pos_metadata_length,
     compress_from_stream,
@@ -33,11 +34,6 @@ from ._plot import per_sample_plots, single_sample_position_plot
 from ._quant import make_csv_ready, pos_to_bins
 from ._utils import logger
 from ._view import View
-
-
-def _first_col_as_set(fp):
-    df = pl.read_csv(fp, separator="\t", infer_schema_length=0)
-    return set(df[df.columns[0]])
 
 
 @click.group()
