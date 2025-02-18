@@ -394,7 +394,7 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
 @click.option(
     "--features-to-keep",
     type=click.Path(exists=True),
-    required=False,
+    required=True,
     help="A metadata file with the features to keep",
 )
 @click.option("--output", type=click.Path(exists=False), required=True)
