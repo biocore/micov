@@ -92,7 +92,7 @@ class Tests(unittest.TestCase):
         ).lazy()
         bin_num = 5
 
-        obs_bin_df = pos_to_bins(pos, "variable", bin_num)
+        obs_bin_df = pos_to_bins(pos, "variable", bin_num, 100)
         exp_bin_df = pl.DataFrame(
             [
                 ["G000006605", "A", 1, 3, 1, ["s1"], 0.0, 20.0],
@@ -140,7 +140,7 @@ class Tests(unittest.TestCase):
         ).lazy()
         bin_num = 5
 
-        obs_bin_df = pos_to_bins(pos, "variable", bin_num)
+        obs_bin_df = pos_to_bins(pos, "variable", bin_num, 100)
         exp_bin_df = pl.DataFrame(
             [
                 ["G000006605", "A", 1, 2, 1, ["s1"], 0.0, 20.0],
@@ -187,7 +187,7 @@ class Tests(unittest.TestCase):
             ],
         ).lazy()
         bin_num = 5
-        obs_bin_df = pos_to_bins(pos, "variable", bin_num)
+        obs_bin_df = pos_to_bins(pos, "variable", bin_num, 100)
         exp_bin_df = pl.DataFrame(
             [
                 ["G000006605", "A", 1, 1, 1, ["s1"], 0.0, 20.0],
