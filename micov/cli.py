@@ -10,6 +10,8 @@ import polars as pl
 
 from ._constants import (
     COLUMN_GENOME_ID,
+    COLUMN_LENGTH,
+    COLUMN_SAMPLE_ID,
     COLUMN_START_DTYPE,
     COLUMN_STOP_DTYPE,
 )
@@ -18,7 +20,6 @@ from ._io import (
     _check_and_compress,
     _first_col_as_set,
     _single_df,
-    combine_pos_metadata_length,
     compress_from_stream,
     parse_bed_cov_to_df,
     parse_features_to_keep,
@@ -512,20 +513,41 @@ def binning(
     rank,
 ):
     """Bin genome positions and quantify read and sample hits across bins."""
-    df_pos_md = combine_pos_metadata_length(
-        sample_metadata, length, covered_positions, features_to_keep
+    df_md = (
+        parse_sample_metadata(sample_metadata)
+        .select(COLUMN_SAMPLE_ID, metadata_variable)
+        .lazy()
     )
+    length_map = {
+        gid: glen
+        for gid, glen in parse_genome_lengths(length)[
+            COLUMN_GENOME_ID, COLUMN_LENGTH
+        ].iter_rows()
+    }
+
+    genomes = {
+        r[0]
+        for r in duckdb.sql(
+            f"select distinct genome_id from read_parquet('{covered_positions}')"
+        ).fetchall()
+    }
+
+    if features_to_keep:
+        features_to_keep = _first_col_as_set(features_to_keep)
+        genomes = genomes & features_to_keep
 
     df_bins_list = []
-    genome_ids = (
-        df_pos_md.select(COLUMN_GENOME_ID).unique().collect().to_series().to_list()
-    )
-    for genome_id in genome_ids:
-        pos = df_pos_md.filter(pl.col(COLUMN_GENOME_ID) == genome_id)
-        df_bins = pos_to_bins(pos, metadata_variable, bin_num)
+    for genome_id in genomes:
+        length = length_map[genome_id]
+        df_pos_md = (
+            pl.scan_parquet(covered_positions)
+            .filter(pl.col(COLUMN_GENOME_ID) == genome_id)
+            .join(df_md, on=COLUMN_SAMPLE_ID)
+        )
+        df_bins = pos_to_bins(df_pos_md, metadata_variable, bin_num, length).collect()
         df_bins_list.append(df_bins)
 
-    df_bins = pl.concat(df_bins_list)
+    df_bins = pl.concat(df_bins_list).lazy()
 
     df_bins_by_sample_hits = (
         df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
