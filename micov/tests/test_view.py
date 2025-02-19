@@ -155,17 +155,18 @@ class ViewTests(unittest.TestCase):
         ).filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3"]))
         exp_fmd = pl.DataFrame(
             [
-                ["G1", 0, 100],
-                ["G2", 0, 100],
-                ["G3", 0, 100],
-                ["G4", 0, 100],
-                ["G5", 0, 100],
+                ["G1", 0, 100, 100],
+                ["G2", 0, 100, 100],
+                ["G3", 0, 100, 100],
+                ["G4", 0, 100, 100],
+                ["G5", 0, 100, 100],
             ],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
             ],
         )
 
@@ -200,12 +201,13 @@ class ViewTests(unittest.TestCase):
             f"{self.d}/{self.name}.covered_positions.parquet"
         ).filter(pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5"]))
         exp_fmd = pl.DataFrame(
-            [["G1", 0, 100], ["G5", 0, 100]],
+            [["G1", 0, 100, 100], ["G5", 0, 100, 100]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
             ],
         )
 
@@ -253,12 +255,13 @@ class ViewTests(unittest.TestCase):
 
         # the user is requesting a stop position outside of the size the genome but ok?
         exp_fmd = pl.DataFrame(
-            [["G1", 0, 1000], ["G5", 0, 1000]],
+            [["G1", 0, 1000, 1000], ["G5", 0, 1000, 1000]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
             ],
         )
 
@@ -333,12 +336,13 @@ class ViewTests(unittest.TestCase):
             ],
         )
         exp_fmd = pl.DataFrame(
-            [["G1", 7, 9], ["G5", 0, 20]],
+            [["G1", 7, 9, 2], ["G5", 0, 20, 20]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
             ],
         )
 
@@ -417,12 +421,18 @@ class ViewTests(unittest.TestCase):
         )
 
         exp_fmd = pl.DataFrame(
-            [["G1", 0, 100], ["G2", 40, 60], ["G3", 40, 60], ["G5", 40, 60]],
+            [
+                ["G1", 0, 100, 100],
+                ["G2", 40, 60, 20],
+                ["G3", 40, 60, 20],
+                ["G5", 40, 60, 20],
+            ],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
             ],
         )
 
