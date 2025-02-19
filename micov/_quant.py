@@ -3,7 +3,12 @@ import warnings
 import numpy as np
 import polars as pl
 
-from ._constants import COLUMN_GENOME_ID, COLUMN_SAMPLE_ID
+from ._constants import (
+    COLUMN_GENOME_ID,
+    COLUMN_SAMPLE_ID,
+    COLUMN_START_DTYPE,
+    COLUMN_STOP_DTYPE,
+)
 
 warnings.simplefilter("ignore", category=pl.exceptions.PerformanceWarning)
 
@@ -66,11 +71,11 @@ def pos_to_bins(pos, variable, bin_num, genome_length):
         pos.with_columns(
             pl.col("start")
             .cut(bin_edges, labels=labels, left_closed=True)
-            .cast(pl.Int64)
+            .cast(COLUMN_START_DTYPE)
             .alias("start_bin_idx"),
             pl.col("stop")
             .cut(bin_edges, labels=labels, left_closed=False)
-            .cast(pl.Int64)
+            .cast(COLUMN_STOP_DTYPE)
             .alias("stop_bin_idx")
             + 1,
         )

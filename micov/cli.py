@@ -12,8 +12,6 @@ from ._constants import (
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
     COLUMN_SAMPLE_ID,
-    COLUMN_START_DTYPE,
-    COLUMN_STOP_DTYPE,
 )
 from ._cov import coverage_percent
 from ._io import (
@@ -518,13 +516,12 @@ def binning(
         .select(COLUMN_SAMPLE_ID, metadata_variable)
         .lazy()
     )
-    length_map = {
-        gid: glen
-        for gid, glen in parse_genome_lengths(length)[
-            COLUMN_GENOME_ID, COLUMN_LENGTH
-        ].iter_rows()
-    }
+    length_map = dict(
+        parse_genome_lengths(length)[COLUMN_GENOME_ID, COLUMN_LENGTH].iter_rows()
+    )
 
+    # as of polars 1.22, a comparable action appears to consume considerable
+    # memory. see https://github.com/pola-rs/polars/issues/19411
     genomes = {
         r[0]
         for r in duckdb.sql(
@@ -556,45 +553,16 @@ def binning(
         .sort("sample_hits_std", descending=True)
     )
 
-    df_bins_by_read_hits = (
-        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
-        .agg(pl.col("read_hits").std().alias("read_hits_std"))
-        .fill_null(0)
-        .sort("read_hits_std", descending=True)
-    )
-
-    df_bins = df_bins.with_columns(
-        [
-            pl.col("bin_start").cast(COLUMN_START_DTYPE),
-            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
-        ]
-    )
-    df_bins_by_sample_hits = df_bins_by_sample_hits.with_columns(
-        [
-            pl.col("bin_start").cast(COLUMN_START_DTYPE),
-            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
-        ]
-    )
-    df_bins_by_read_hits = df_bins_by_read_hits.with_columns(
-        [
-            pl.col("bin_start").cast(COLUMN_START_DTYPE),
-            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
-        ]
-    )
-
     os.makedirs(outdir, exist_ok=True)
-    make_csv_ready(df_bins).collect().write_csv(
+    make_csv_ready(df_bins).sink_csv(
         f"{outdir}/stats_bins.tsv",
         separator="\t",
         include_header=True,
     )
+
+    # it's not obvious but this cannot use sink_csv?'
     df_bins_by_sample_hits.collect().write_csv(
         f"{outdir}/stats_by_variance_of_sample_hits.tsv",
-        separator="\t",
-        include_header=True,
-    )
-    df_bins_by_read_hits.collect().write_csv(
-        f"{outdir}/stats_by_variance_of_read_hits.tsv",
         separator="\t",
         include_header=True,
     )
