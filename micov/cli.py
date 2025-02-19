@@ -299,11 +299,6 @@ def qiita_to_parquet(
 @click.option("--threads", type=int, default=4, required=False)
 def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
     """Aggregate BED3 files to parquet."""
-    global THREADS
-    global MEMORY
-    MEMORY = memory
-    THREADS = threads
-
     lengths = parse_genome_lengths(lengths)
 
     columns = "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', 'stop': 'UINTEGER'}"
@@ -350,7 +345,7 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
 
     # n.b. a comparable action can be taken with polars. however, polars does
     # not currently allow limiting memory, and in testing, the use exceeded
-    # 16gb.
+    # 16gb. Running via the streaming engine may work though.
     # (pl.scan_csv(pattern,
     #             separator='\t',
     #             has_header=True,
@@ -431,15 +426,9 @@ def per_sample_group(
     threads,
 ):
     """Generate sample group plots and coverage data."""
-    # TODO: make this "set_resources()" or something
-    global THREADS
-    global MEMORY
-    MEMORY = memory
-    THREADS = threads
-
     metadata_pl = parse_sample_metadata(sample_metadata)
     features_pl = parse_features_to_keep(features_to_keep)
-    view = View(parquet_coverage, metadata_pl, features_pl)
+    view = View(parquet_coverage, metadata_pl, features_pl, threads, memory)
 
     all_covered_positions = view.positions().pl()
     all_coverage = view.coverages().pl()
@@ -462,8 +451,8 @@ def per_sample_group(
 
 @cli.command()
 @click.option(
-    "--covered-positions",
-    type=click.Path(exists=True),
+    "--parquet-coverage",
+    type=str,
     required=True,
     help="Parquet file containing the covered positions data",
 )
@@ -486,9 +475,6 @@ def per_sample_group(
     help="The variable to consider in the sample metadata",
 )
 @click.option(
-    "--length", type=click.Path(exists=True), required=True, help="Genome lengths"
-)
-@click.option(
     "--outdir",
     type=click.Path(exists=False),
     required=True,
@@ -500,52 +486,44 @@ def per_sample_group(
 @click.option(
     "--rank", is_flag=True, default=False, help="Enable ranking (default: False)"
 )
+@click.option("--memory", type=str, default="16gb", required=False)
+@click.option("--threads", type=int, default=4, required=False)
 def binning(
-    covered_positions,
+    parquet_coverage,
     sample_metadata,
     features_to_keep,
     metadata_variable,
-    length,
     outdir,
     bin_num,
     rank,
+    memory,
+    threads,
 ):
     """Bin genome positions and quantify read and sample hits across bins."""
-    df_md = (
-        parse_sample_metadata(sample_metadata)
-        .select(COLUMN_SAMPLE_ID, metadata_variable)
-        .lazy()
-    )
-    length_map = dict(
-        parse_genome_lengths(length)[COLUMN_GENOME_ID, COLUMN_LENGTH].iter_rows()
-    )
+    metadata_pl = parse_sample_metadata(sample_metadata)
+    features_pl = parse_features_to_keep(features_to_keep)
+    view = View(parquet_coverage, metadata_pl, features_pl, threads, memory)
 
-    # as of polars 1.22, a comparable action appears to consume considerable
-    # memory. see https://github.com/pola-rs/polars/issues/19411
-    genomes = {
-        r[0]
-        for r in duckdb.sql(
-            f"select distinct genome_id from read_parquet('{covered_positions}')"
-        ).fetchall()
-    }
+    all_covered_positions = view.positions()
+    metadata = view.metadata().select(COLUMN_SAMPLE_ID, metadata_variable)
+    feature_metadata = view.feature_metadata().select(COLUMN_GENOME_ID, COLUMN_LENGTH)
 
-    if features_to_keep:
-        features_to_keep = _first_col_as_set(features_to_keep)
-        genomes = genomes & features_to_keep
+    length_map = dict(feature_metadata.fetchall())
+    genomes = set(length_map)
 
     df_bins_list = []
     for genome_id in genomes:
         length = length_map[genome_id]
         df_pos_md = (
-            pl.scan_parquet(covered_positions)
-            .filter(pl.col(COLUMN_GENOME_ID) == genome_id)
-            .join(df_md, on=COLUMN_SAMPLE_ID)
+            all_covered_positions.filter(f"{COLUMN_GENOME_ID} = '{genome_id}'")
+            .join(metadata, COLUMN_SAMPLE_ID)
+            .pl()
+            .lazy()
         )
         df_bins = pos_to_bins(df_pos_md, metadata_variable, bin_num, length).collect()
         df_bins_list.append(df_bins)
 
     df_bins = pl.concat(df_bins_list).lazy()
-
     df_bins_by_sample_hits = (
         df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
         .agg(pl.col("sample_hits").std().alias("sample_hits_std"))
