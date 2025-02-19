@@ -31,21 +31,23 @@ def create_bin_list(genome_length, bin_num):
         pl.Series("a", [0, genome_length], strict=False)
         .hist(bin_count=bin_num)
         .lazy()
-        .select(pl.col("breakpoint").alias("bin_stop"))
+        .select(pl.col("breakpoint").round().cast(COLUMN_STOP_DTYPE).alias("bin_stop"))
         .with_row_index("bin_idx", offset=1)
     )
     bin_list_pos_start = (
         pl.Series("a", [0, genome_length], strict=False)
         .hist(bin_count=bin_num)
         .lazy()
-        .select(pl.col("breakpoint").alias("bin_start"))
+        .select(
+            pl.col("breakpoint").round().cast(COLUMN_START_DTYPE).alias("bin_start")
+        )
         .with_row_index("bin_idx", offset=2)
     )
     bin_list = (
         bin_list_pos_start.join(bin_list_pos_stop, on="bin_idx", how="right")
         .fill_null(0)
         .select([pl.col("bin_idx"), pl.col("bin_start"), pl.col("bin_stop")])
-        .with_columns(pl.col("bin_idx").cast(pl.Int64))
+        .with_columns(pl.col("bin_idx").cast(COLUMN_START_DTYPE))
     )
     # setting the bin_stop of the last bin to be exactly the genome length + 1
     bin_list = bin_list.with_columns(
