@@ -448,6 +448,9 @@ def write_qiita_cov(name, paths, lengths):
 
 
 def parse_features_to_keep(path):
+    if path is None:
+        return None
+
     df = pl.read_csv(path, separator="\t")
     return df.rename({df.columns[0]: COLUMN_GENOME_ID})
 
