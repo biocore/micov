@@ -139,7 +139,7 @@ class ViewTests(unittest.TestCase):
 
     def test_view_sample_subset(self):
         md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3", "S5"]))
-        v = View(f"{self.d}/{self.name}", md, self.feat)
+        v = View(f"{self.d}/{self.name}", md, None)
 
         obs_md = v.metadata().pl()
         obs_cov = v.coverages().pl()

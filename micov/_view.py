@@ -40,6 +40,9 @@ class View:
         self.close()
 
     def _feature_filters(self):
+        if self.features_to_keep is None:
+            return
+
         if COLUMN_START in self.features_to_keep.columns:
             if COLUMN_STOP not in self.features_to_keep.columns:
                 raise KeyError(f"'{COLUMN_START}' found but missing '{COLUMN_STOP}'")
@@ -78,8 +81,15 @@ class View:
                              SEMI JOIN '{coverage}' cov
                                  ON md.{COLUMN_SAMPLE_ID}=cov.{COLUMN_SAMPLE_ID}""")
 
-        feat_df = self.features_to_keep  # noqa: F841
-        self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
+        feat_df = self.features_to_keep
+        if feat_df is None:
+            self.con.sql(f"""CREATE TABLE feature_constraint AS
+                             SELECT DISTINCT {COLUMN_GENOME_ID},
+                                    NULL AS {COLUMN_START},
+                                    NULL AS {COLUMN_STOP}
+                             FROM '{coverage}'""")
+        else:
+            self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
 
         if self.constrain_positions:
             # limit the samples considered
@@ -176,12 +186,12 @@ class View:
             # limit the samples considered
             self.con.sql(f"""CREATE VIEW coverage AS
                              SELECT cov.*
-                             FROM '{coverage}'
+                             FROM '{coverage}' cov
                                  JOIN metadata md
                                      ON cov.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
             self.con.sql(f"""CREATE VIEW positions AS
                              SELECT pos.*
-                             FROM '{positions}'
+                             FROM '{positions}' pos
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
 
