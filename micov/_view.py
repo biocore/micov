@@ -267,3 +267,12 @@ class View:
             sql = "SELECT DISTINCT genome_id FROM coverage"
             target_names = {k[0]: k[0] for k in self.con.sql(sql).fetchall()}
         return target_names
+
+    def sample_presence_absence(self):
+        if not self.constrain_positions:
+            raise ValueError("Cannot calculate presence/absence without positions.")
+
+        # self.con.sql(f"""
+        #    SELECT {COLUMN_SAMPLE_ID},
+        #
+        #   """)

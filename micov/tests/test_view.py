@@ -439,6 +439,52 @@ class ViewTests(unittest.TestCase):
             obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
         )
 
+    def test_sample_presence_absence_no_regions(self):
+        v = View(f"{self.d}/{self.name}", self.md, self.feat)
+        with self.assertRaisesRegex(ValueError, "No region constraints"):
+            v.sample_presence_absence()
+
+    def test_sample_presence_absence_single_region(self):
+        feat = pl.DataFrame(
+            [
+                ["G1", 0, 100],
+                ["G2", 40, 60],
+                ["G3", 40, 60],
+                ["G4", 90, 100],
+                ["G5", 40, 60],
+            ],
+            orient="row",
+            schema=[
+                (COLUMN_GENOME_ID, str),
+                (COLUMN_START, COLUMN_START_DTYPE),
+                (COLUMN_STOP, COLUMN_STOP_DTYPE),
+            ],
+        )
+        v = View(f"{self.d}/{self.name}", self.md, feat)
+
+        PRESENT = 'present'
+        ABSENT = 'absent'
+
+        obs = v.sample_presence_absence().pl()
+        exp = pl.DataFrame(
+            [['S1', PRESENT, PRESENT, ABSENT, ABSENT, ABSENT],
+             ['S2', ABSENT, ABSENT, ABSENT, ABSENT, ABSENT],
+             ['S3', ABSENT, PRESENT, PRESENT, ABSENT, PRESENT],
+            orient="row",
+            schema=[
+                (COLUMN_SAMPLE_ID, str),
+                ("micov_G1_0_100", str),
+                ("micov_G2_40_60", str),
+                ("micov_G3_40_60", str),
+                ("micov_G4_90_100", str),
+                ("micov_G5_40_60", str),
+            ],
+        )
+
+        plt.assert_frame_equal(
+            obs, exp, check_column_order=False, check_row_order=False
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
