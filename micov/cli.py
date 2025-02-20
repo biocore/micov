@@ -10,15 +10,14 @@ import polars as pl
 
 from ._constants import (
     COLUMN_GENOME_ID,
-    COLUMN_START_DTYPE,
-    COLUMN_STOP_DTYPE,
+    COLUMN_LENGTH,
+    COLUMN_SAMPLE_ID,
 )
 from ._cov import coverage_percent
 from ._io import (
     _check_and_compress,
     _first_col_as_set,
     _single_df,
-    combine_pos_metadata_length,
     compress_from_stream,
     parse_bed_cov_to_df,
     parse_features_to_keep,
@@ -300,11 +299,6 @@ def qiita_to_parquet(
 @click.option("--threads", type=int, default=4, required=False)
 def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
     """Aggregate BED3 files to parquet."""
-    global THREADS
-    global MEMORY
-    MEMORY = memory
-    THREADS = threads
-
     lengths = parse_genome_lengths(lengths)
 
     columns = "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', 'stop': 'UINTEGER'}"
@@ -351,7 +345,7 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
 
     # n.b. a comparable action can be taken with polars. however, polars does
     # not currently allow limiting memory, and in testing, the use exceeded
-    # 16gb.
+    # 16gb. Running via the streaming engine may work though.
     # (pl.scan_csv(pattern,
     #             separator='\t',
     #             has_header=True,
@@ -394,7 +388,7 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
 @click.option(
     "--features-to-keep",
     type=click.Path(exists=True),
-    required=False,
+    required=True,
     help="A metadata file with the features to keep",
 )
 @click.option("--output", type=click.Path(exists=False), required=True)
@@ -432,15 +426,9 @@ def per_sample_group(
     threads,
 ):
     """Generate sample group plots and coverage data."""
-    # TODO: make this "set_resources()" or something
-    global THREADS
-    global MEMORY
-    MEMORY = memory
-    THREADS = threads
-
     metadata_pl = parse_sample_metadata(sample_metadata)
     features_pl = parse_features_to_keep(features_to_keep)
-    view = View(parquet_coverage, metadata_pl, features_pl)
+    view = View(parquet_coverage, metadata_pl, features_pl, threads, memory)
 
     all_covered_positions = view.positions().pl()
     all_coverage = view.coverages().pl()
@@ -463,8 +451,8 @@ def per_sample_group(
 
 @cli.command()
 @click.option(
-    "--covered-positions",
-    type=click.Path(exists=True),
+    "--parquet-coverage",
+    type=str,
     required=True,
     help="Parquet file containing the covered positions data",
 )
@@ -487,9 +475,6 @@ def per_sample_group(
     help="The variable to consider in the sample metadata",
 )
 @click.option(
-    "--length", type=click.Path(exists=True), required=True, help="Genome lengths"
-)
-@click.option(
     "--outdir",
     type=click.Path(exists=False),
     required=True,
@@ -501,32 +486,44 @@ def per_sample_group(
 @click.option(
     "--rank", is_flag=True, default=False, help="Enable ranking (default: False)"
 )
+@click.option("--memory", type=str, default="16gb", required=False)
+@click.option("--threads", type=int, default=4, required=False)
 def binning(
-    covered_positions,
+    parquet_coverage,
     sample_metadata,
     features_to_keep,
     metadata_variable,
-    length,
     outdir,
     bin_num,
     rank,
+    memory,
+    threads,
 ):
     """Bin genome positions and quantify read and sample hits across bins."""
-    df_pos_md = combine_pos_metadata_length(
-        sample_metadata, length, covered_positions, features_to_keep
-    )
+    metadata_pl = parse_sample_metadata(sample_metadata)
+    features_pl = parse_features_to_keep(features_to_keep)
+    view = View(parquet_coverage, metadata_pl, features_pl, threads, memory)
+
+    all_covered_positions = view.positions()
+    metadata = view.metadata().select(COLUMN_SAMPLE_ID, metadata_variable)
+    feature_metadata = view.feature_metadata().select(COLUMN_GENOME_ID, COLUMN_LENGTH)
+
+    length_map = dict(feature_metadata.fetchall())
+    genomes = set(length_map)
 
     df_bins_list = []
-    genome_ids = (
-        df_pos_md.select(COLUMN_GENOME_ID).unique().collect().to_series().to_list()
-    )
-    for genome_id in genome_ids:
-        pos = df_pos_md.filter(pl.col(COLUMN_GENOME_ID) == genome_id)
-        df_bins = pos_to_bins(pos, metadata_variable, bin_num)
+    for genome_id in genomes:
+        length = length_map[genome_id]
+        df_pos_md = (
+            all_covered_positions.filter(f"{COLUMN_GENOME_ID} = '{genome_id}'")
+            .join(metadata, COLUMN_SAMPLE_ID)
+            .pl()
+            .lazy()
+        )
+        df_bins = pos_to_bins(df_pos_md, metadata_variable, bin_num, length).collect()
         df_bins_list.append(df_bins)
 
-    df_bins = pl.concat(df_bins_list)
-
+    df_bins = pl.concat(df_bins_list).lazy()
     df_bins_by_sample_hits = (
         df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
         .agg(pl.col("sample_hits").std().alias("sample_hits_std"))
@@ -534,45 +531,16 @@ def binning(
         .sort("sample_hits_std", descending=True)
     )
 
-    df_bins_by_read_hits = (
-        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
-        .agg(pl.col("read_hits").std().alias("read_hits_std"))
-        .fill_null(0)
-        .sort("read_hits_std", descending=True)
-    )
-
-    df_bins = df_bins.with_columns(
-        [
-            pl.col("bin_start").cast(COLUMN_START_DTYPE),
-            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
-        ]
-    )
-    df_bins_by_sample_hits = df_bins_by_sample_hits.with_columns(
-        [
-            pl.col("bin_start").cast(COLUMN_START_DTYPE),
-            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
-        ]
-    )
-    df_bins_by_read_hits = df_bins_by_read_hits.with_columns(
-        [
-            pl.col("bin_start").cast(COLUMN_START_DTYPE),
-            pl.col("bin_stop").cast(COLUMN_STOP_DTYPE),
-        ]
-    )
-
     os.makedirs(outdir, exist_ok=True)
-    make_csv_ready(df_bins).collect().write_csv(
+    make_csv_ready(df_bins).sink_csv(
         f"{outdir}/stats_bins.tsv",
         separator="\t",
         include_header=True,
     )
+
+    # it's not obvious but this cannot use sink_csv?'
     df_bins_by_sample_hits.collect().write_csv(
         f"{outdir}/stats_by_variance_of_sample_hits.tsv",
-        separator="\t",
-        include_header=True,
-    )
-    df_bins_by_read_hits.collect().write_csv(
-        f"{outdir}/stats_by_variance_of_read_hits.tsv",
         separator="\t",
         include_header=True,
     )
