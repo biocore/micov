@@ -22,15 +22,11 @@ from ._cov import (
 
 
 def per_sample_plots(
-    all_coverage,
-    all_covered_positions,
-    metadata,
-    feature_metadata,
+    view,
     sample_metadata_column,
     output,
     monte,
     monte_iters,
-    target_lookup,
 ):
     """Construct plots for all genomes.
 
@@ -39,14 +35,8 @@ def per_sample_plots(
 
     Parameters
     ----------
-    all_coverage : pl.DataFrame
-        The total coverage per sample per genome
-    all_covered_positions : pl.DataFrame
-        The exact covered regions per sample per genome
-    metadata : pl.DataFrame
-        The sample metadata
-    feature_metadata : pl.DataFrame
-        The feature metadata
+    view : View
+        The current View of the coverage data
     sample_metadata_column : str
         The specific column to stratify when plotting. Note it is assumed
         this column is categorical.
@@ -57,12 +47,24 @@ def per_sample_plots(
         One of (None, 'focused', 'unfocused'). See "add_monte" for more detail.
     monte_iters : int
         The number of Monte Carlo iterations to perform.
-    target_lookup : dict
-        A mapping of a genome ID to a name
-
     """
+    all_covered_positions = view.positions().pl()
+    all_coverage = view.coverages().pl()
+    metadata = view.metadata().pl()
+    feature_metadata = view.feature_metadata().pl()
+    feature_names = view.feature_names().pl()
+    target_lookup = dict(feature_names.iter_rows())
+
+    if view.constrain_positions:
+        n_genomes = len(feature_metadata[COLUMN_GENOME_ID].unique())
+        n_regions = len(feature_metadata)
+
+        if n_genomes != n_regions:
+            raise ValueError(
+                "Plotting does not yet support desribing multiple regions."
+            )
+
     for genome in all_coverage[COLUMN_GENOME_ID].unique():
-        # TODO: move this into feaure_metadata
         target_name = target_lookup[genome]
         ymin, ymax = (
             feature_metadata.filter(pl.col(COLUMN_GENOME_ID) == genome)

@@ -4,13 +4,18 @@ import duckdb
 import polars as pl
 
 from micov._constants import (
+    ABSENT,
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
     COLUMN_LENGTH_DTYPE,
+    COLUMN_NAME,
+    COLUMN_REGION_ID,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
     COLUMN_STOP,
+    NOT_APPLICABLE,
+    PRESENT,
 )
 from micov._cov import compress_per_sample, coverage_percent_per_sample
 
@@ -19,11 +24,18 @@ class View:
     """View subsets of coverage data."""
 
     def __init__(
-        self, dbbase, sample_metadata, features_to_keep, threads=1, memory="8gb"
+        self,
+        dbbase,
+        sample_metadata,
+        features_to_keep,
+        feature_names=None,
+        threads=1,
+        memory="8gb",
     ):
         self.dbbase = dbbase
         self.sample_metadata = sample_metadata
         self.features_to_keep = features_to_keep
+        self.feature_names_df = feature_names
 
         self.constrain_positions = False
         self.constrain_features = False
@@ -91,6 +103,10 @@ class View:
         else:
             self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
 
+        # views are "free". Let's establish a common reference point for unmodified
+        # position data'
+        self.con.sql(f"CREATE VIEW unconstrained_positions AS FROM '{positions}'")
+
         if self.constrain_positions:
             # limit the samples considered
             # limit the set of features considered
@@ -104,7 +120,7 @@ class View:
                                           fc.{COLUMN_STOP}) AS {COLUMN_STOP},
                                     GREATEST(pos.{COLUMN_START},
                                              fc.{COLUMN_START}) AS {COLUMN_START}
-                             FROM '{positions}' pos
+                             FROM unconstrained_positions pos
                                  JOIN feature_constraint fc
                                      ON pos.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
                                          AND pos.{COLUMN_START} <= fc.{COLUMN_STOP}
@@ -146,7 +162,12 @@ class View:
                             SELECT * FROM recomputed_coverage""")
 
             self.con.sql(f"""CREATE TABLE feature_metadata AS
-                             SELECT *, {COLUMN_STOP} - {COLUMN_START} AS {COLUMN_LENGTH}
+                             SELECT *,
+                                {COLUMN_STOP} - {COLUMN_START} AS {COLUMN_LENGTH},
+                                CONCAT_WS('_',
+                                          {COLUMN_GENOME_ID},
+                                          {COLUMN_START},
+                                          {COLUMN_STOP}) AS {COLUMN_REGION_ID}
                              FROM feature_constraint fc
                                  SEMI JOIN coverage cov USING ({COLUMN_GENOME_ID})""")
 
@@ -169,19 +190,24 @@ class View:
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
             self.con.sql(f"""CREATE VIEW genome_lengths AS
-                                    SELECT {COLUMN_GENOME_ID},
-                                        FIRST({COLUMN_LENGTH}) AS {COLUMN_LENGTH}
-                                    FROM coverage
-                                    GROUP BY {COLUMN_GENOME_ID};
-                                CREATE TABLE feature_metadata AS
-                                    SELECT f.{COLUMN_GENOME_ID},
-                                        0::UINTEGER AS {COLUMN_START},
-                                        g.{COLUMN_LENGTH} AS {COLUMN_STOP},
-                                        g.{COLUMN_LENGTH}
-                                    FROM feature_constraint f
-                                        JOIN genome_lengths g
-                                            ON f.{COLUMN_GENOME_ID}=g.{COLUMN_GENOME_ID}
-                        """)
+                             SELECT {COLUMN_GENOME_ID},
+                                 FIRST({COLUMN_LENGTH}) AS {COLUMN_LENGTH}
+                             FROM coverage
+                             GROUP BY {COLUMN_GENOME_ID};
+
+                             CREATE TABLE feature_metadata AS
+                             SELECT fc.{COLUMN_GENOME_ID},
+                                 0::UINTEGER AS {COLUMN_START},
+                                 gl.{COLUMN_LENGTH} AS {COLUMN_STOP},
+                                 gl.{COLUMN_LENGTH},
+                                 CONCAT_WS('_',
+                                           fc.{COLUMN_GENOME_ID},
+                                           0,
+                                           {COLUMN_LENGTH}) AS {COLUMN_REGION_ID}
+                             FROM feature_constraint fc
+                                 JOIN genome_lengths gl
+                                     ON fc.{COLUMN_GENOME_ID}=gl.{COLUMN_GENOME_ID}
+                    """)
         else:
             # limit the samples considered
             self.con.sql(f"""CREATE VIEW coverage AS
@@ -208,14 +234,32 @@ class View:
                                     FROM coverage
                                     GROUP BY {COLUMN_GENOME_ID};
                                 CREATE TABLE feature_metadata AS
-                                    SELECT f.{COLUMN_GENOME_ID},
+                                    SELECT fc.{COLUMN_GENOME_ID},
                                         0::UINTEGER AS {COLUMN_START},
-                                        g.{COLUMN_LENGTH} AS {COLUMN_STOP},
-                                        g.{COLUMN_LENGTH}
-                                    FROM feature_constraint f
-                                        JOIN genome_lengths g
-                                            ON f.{COLUMN_GENOME_ID}=g.{COLUMN_GENOME_ID}
+                                        gl.{COLUMN_LENGTH} AS {COLUMN_STOP},
+                                        gl.{COLUMN_LENGTH},
+                                        CONCAT_WS('_',
+                                                  fc.{COLUMN_GENOME_ID},
+                                                  0,
+                                                  {COLUMN_LENGTH}) AS {COLUMN_REGION_ID}
+                                 FROM feature_constraint fc
+                                     JOIN genome_lengths gl
+                                         ON fc.{COLUMN_GENOME_ID}=gl.{COLUMN_GENOME_ID}
                     """)
+        self._integrity_checks()
+
+    def _integrity_checks(self):
+        region_id_uniqueness = self.con.sql(f"""
+            SELECT
+                CASE
+                    WHEN COUNT(DISTINCT {COLUMN_REGION_ID}) == COUNT({COLUMN_REGION_ID})
+                    THEN 'OK'
+                    ELSE 'FAIL'
+                END AS region_id_uniqueness
+            FROM feature_metadata
+        """).fetchone()[0]
+        if region_id_uniqueness == "FAIL":
+            raise ValueError("Region IDs are not unique.")
 
     def metadata(self):
         return self.con.sql("SELECT * FROM metadata")
@@ -255,28 +299,119 @@ class View:
         else:
             return self.con.sql("SELECT * from positions")
 
-    def target_names(self, target_names):
-        # TODO: integrate into feature_metadata()
-        if target_names is not None:
-            target_names = dict(
-                pl.scan_csv(
-                    target_names,
-                    separator="\t",
-                    new_columns=["feature-id", "lineage"],
-                    has_header=False,
-                )
-                .with_columns(
-                    pl.col("lineage")
-                    .str.split(";")
-                    .list.get(-1)
-                    .str.replace_all(r" |\[|\]", "_")
-                    .alias("species")
-                )
-                .select("feature-id", "species")
-                .collect()
-                .iter_rows()
-            )
+    def feature_names(self):
+        if self.feature_names_df is None:
+            return self.con.sql(f"""
+                SELECT DISTINCT {COLUMN_GENOME_ID}, {COLUMN_GENOME_ID} AS {COLUMN_NAME}
+                FROM feature_metadata
+            """)
         else:
-            sql = "SELECT DISTINCT genome_id FROM coverage"
-            target_names = {k[0]: k[0] for k in self.con.sql(sql).fetchall()}
-        return target_names
+            feature_names = self.feature_names_df  # noqa
+            return self.con.sql(f"""
+                SELECT DISTINCT
+                    fm.{COLUMN_GENOME_ID},
+                    COALESCE(fn.{COLUMN_NAME}, fm.{COLUMN_GENOME_ID}) AS {COLUMN_NAME}
+                FROM feature_metadata fm
+                LEFT JOIN feature_names fn
+                    USING ({COLUMN_GENOME_ID})""")
+
+    def sample_presence_absence(self):
+        if not self.constrain_positions:
+            raise ValueError("Cannot calculate presence/absence without positions.")
+
+        self.con.sql(f"""
+            -- define a view which describes whether a sample is present in a particular
+            -- region.
+            CREATE OR REPLACE VIEW has_region AS (
+                SELECT
+                    pos.{COLUMN_SAMPLE_ID},
+                    fm.{COLUMN_REGION_ID},
+                    CASE
+                        WHEN pos.{COLUMN_START} <= fm.{COLUMN_STOP}
+                            AND pos.{COLUMN_STOP} > fm.{COLUMN_START}
+                        THEN '{PRESENT}'
+                        ELSE '{ABSENT}'
+                    END AS painfo
+                FROM unconstrained_positions pos
+                    LEFT JOIN feature_metadata fm
+                        ON pos.{COLUMN_GENOME_ID}=fm.{COLUMN_GENOME_ID}
+            );
+        """)
+
+        self.con.sql(f"""
+            -- extract the samples which are "present" and "absent" and the
+            -- regions they are present -- in. Note that a sample is present in a
+            -- region if it has coverage in that -- region. It is considered absent
+            -- if it nas nonzero coverage for the genome -- AND lacks coverage
+            -- within the focus region.
+
+            -- n.b. we have to materialize as pivot elements cannot be used in views
+            -- without explicilty naming the columns. Since we do not know the regions
+            -- in advance, we cannot readily define the columns. As far as I know,
+            -- the only way would be a clunky dynamic SQL query.
+            CREATE OR REPLACE TABLE present AS (
+                SELECT
+                    {COLUMN_SAMPLE_ID},
+                    CASE
+                        WHEN COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}) > 0
+                        THEN '{PRESENT}'
+                        ELSE NULL
+                    END
+                FROM (PIVOT (SELECT * EXCLUDE (painfo)
+                             FROM has_region
+                             WHERE painfo='{PRESENT}')
+                      ON {COLUMN_REGION_ID})
+            );
+            CREATE OR REPLACE TABLE absent AS (
+                SELECT
+                    {COLUMN_SAMPLE_ID},
+                    CASE
+                        WHEN COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}) > 0
+                        THEN '{ABSENT}'
+                        ELSE NULL
+                    END
+                FROM (PIVOT (SELECT * EXCLUDE (painfo)
+                             FROM has_region
+                             WHERE painfo='{ABSENT}')
+                      ON {COLUMN_REGION_ID})
+            );
+            """)
+
+        # Joining, coalescing, and filling nulls as far as I could tell requires
+        # clunky dynamic SQL in order to determine the set of columns to
+        # coalesce. It's easy to do within Polars.'
+        present = self.con.sql("SELECT * FROM present").pl()
+        absent = self.con.sql("SELECT * FROM absent").pl()
+
+        # columns in common are ones where there is a mix of samples which are present
+        # and absent
+        common = (set(present.columns) & set(absent.columns)) - {
+            COLUMN_SAMPLE_ID,
+        }
+
+        # when there are duplicates, the left column receives the original name
+        # and the right column is suffixed. The default suffix is "_right".
+        exprs = [pl.coalesce([c, c + "_right"]).alias(c) for c in common]
+
+        # after we coalesce, the right columns are unnecessary
+        drops = [c + "_right" for c in common]
+
+        joined = (  # noqa
+            present.lazy()
+            .join(absent.lazy(), on={COLUMN_SAMPLE_ID}, how="full", coalesce=True)
+            .with_columns(exprs)
+            .drop(drops)
+            .fill_null(pl.lit(NOT_APPLICABLE))
+            .collect()
+        )
+
+        # clean up, and createa an object which can be pulled like the other access
+        # methods of this class.
+        self.con.sql("""
+            DROP VIEW has_region;
+            DROP TABLE present;
+            DROP TABLE absent;
+            CREATE OR REPLACE TABLE sample_presence_absence AS FROM joined;
+            """)
+
+        return self.con.sql("SELECT * FROM sample_presence_absence")

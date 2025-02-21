@@ -12,6 +12,7 @@ from micov._constants import (
     BED_COV_SCHEMA,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
+    COLUMN_NAME,
     COLUMN_START,
     COLUMN_TAXONOMY,
     GENOME_COVERAGE_SCHEMA,
@@ -20,6 +21,7 @@ from micov._constants import (
 )
 from micov._io import (
     compress_from_stream,
+    parse_feature_names,
     parse_genome_lengths,
     parse_qiita_coverages,
     parse_sam_to_df,
@@ -378,6 +380,23 @@ class IOTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Lengths of zero or less"):
             parse_genome_lengths(self.name)
+
+    def test_parse_feature_names(self):
+        data = (
+            "some_id\tsomecolumn\tanothercolumn\n"
+            "abc\tthings and stuff\temtpy\n"
+            "x\tfoo; bar; baz thing\tdsf\n"
+        )
+        with open(self.name, "w") as fp:
+            fp.write(data)
+
+        exp = pl.DataFrame(
+            [["abc", "things_and_stuff"], ["x", "baz_thing"]],
+            orient="row",
+            schema=[COLUMN_GENOME_ID, COLUMN_NAME],
+        )
+        obs = parse_feature_names(self.name)
+        plt.assert_frame_equal(obs, exp)
 
     def test_parse_taxonomy_good(self):
         data = (

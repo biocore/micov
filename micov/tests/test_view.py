@@ -6,18 +6,23 @@ import polars as pl
 import polars.testing as plt
 
 from micov._constants import (
+    ABSENT,
     COLUMN_COVERED,
     COLUMN_COVERED_DTYPE,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
     COLUMN_LENGTH_DTYPE,
+    COLUMN_NAME,
     COLUMN_PERCENT_COVERED,
     COLUMN_PERCENT_COVERED_DTYPE,
+    COLUMN_REGION_ID,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
     COLUMN_START_DTYPE,
     COLUMN_STOP,
     COLUMN_STOP_DTYPE,
+    NOT_APPLICABLE,
+    PRESENT,
 )
 from micov._view import View
 
@@ -145,6 +150,7 @@ class ViewTests(unittest.TestCase):
         obs_cov = v.coverages().pl()
         obs_pos = v.positions().pl()
         obs_fmd = v.feature_metadata().pl()
+        obs_fn = v.feature_names().pl()
 
         exp_md = md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3"]))
         exp_cov = pl.read_parquet(f"{self.d}/{self.name}.coverage.parquet").filter(
@@ -155,11 +161,11 @@ class ViewTests(unittest.TestCase):
         ).filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3"]))
         exp_fmd = pl.DataFrame(
             [
-                ["G1", 0, 100, 100],
-                ["G2", 0, 100, 100],
-                ["G3", 0, 100, 100],
-                ["G4", 0, 100, 100],
-                ["G5", 0, 100, 100],
+                ["G1", 0, 100, 100, "G1_0_100"],
+                ["G2", 0, 100, 100, "G2_0_100"],
+                ["G3", 0, 100, 100, "G3_0_100"],
+                ["G4", 0, 100, 100, "G4_0_100"],
+                ["G5", 0, 100, 100, "G5_0_100"],
             ],
             orient="row",
             schema=[
@@ -167,7 +173,19 @@ class ViewTests(unittest.TestCase):
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
                 (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
+        )
+        exp_fn = pl.DataFrame(
+            [
+                ["G1", "G1"],
+                ["G2", "G2"],
+                ["G3", "G3"],
+                ["G4", "G4"],
+                ["G5", "G5"],
+            ],
+            orient="row",
+            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
         )
 
         plt.assert_frame_equal(
@@ -181,6 +199,9 @@ class ViewTests(unittest.TestCase):
         )
         plt.assert_frame_equal(
             obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
+        )
+        plt.assert_frame_equal(
+            obs_fn, exp_fn, check_column_order=False, check_row_order=False
         )
 
     def test_view_constrain_features(self):
@@ -201,13 +222,14 @@ class ViewTests(unittest.TestCase):
             f"{self.d}/{self.name}.covered_positions.parquet"
         ).filter(pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5"]))
         exp_fmd = pl.DataFrame(
-            [["G1", 0, 100, 100], ["G5", 0, 100, 100]],
+            [["G1", 0, 100, 100, "G1_0_100"], ["G5", 0, 100, 100, "G5_0_100"]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
                 (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -255,13 +277,14 @@ class ViewTests(unittest.TestCase):
 
         # the user is requesting a stop position outside of the size the genome but ok?
         exp_fmd = pl.DataFrame(
-            [["G1", 0, 1000, 1000], ["G5", 0, 1000, 1000]],
+            [["G1", 0, 1000, 1000, "G1_0_1000"], ["G5", 0, 1000, 1000, "G5_0_1000"]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
                 (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -336,13 +359,14 @@ class ViewTests(unittest.TestCase):
             ],
         )
         exp_fmd = pl.DataFrame(
-            [["G1", 7, 9, 2], ["G5", 0, 20, 20]],
+            [["G1", 7, 9, 2, "G1_7_9"], ["G5", 0, 20, 20, "G5_0_20"]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
                 (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -422,10 +446,10 @@ class ViewTests(unittest.TestCase):
 
         exp_fmd = pl.DataFrame(
             [
-                ["G1", 0, 100, 100],
-                ["G2", 40, 60, 20],
-                ["G3", 40, 60, 20],
-                ["G5", 40, 60, 20],
+                ["G1", 0, 100, 100, "G1_0_100"],
+                ["G2", 40, 60, 20, "G2_40_60"],
+                ["G3", 40, 60, 20, "G3_40_60"],
+                ["G5", 40, 60, 20, "G5_40_60"],
             ],
             orient="row",
             schema=[
@@ -433,6 +457,7 @@ class ViewTests(unittest.TestCase):
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
                 (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -447,6 +472,88 @@ class ViewTests(unittest.TestCase):
         )
         plt.assert_frame_equal(
             obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
+        )
+
+    def test_sample_presence_absence_no_regions(self):
+        v = View(f"{self.d}/{self.name}", self.md, self.feat)
+        with self.assertRaisesRegex(ValueError, r"^Cannot calculate"):
+            v.sample_presence_absence()
+
+    def test_sample_presence_absence_single_region(self):
+        feat = pl.DataFrame(
+            [
+                ["G1", 0, 100],
+                ["G2", 40, 60],
+                ["G3", 40, 60],
+                ["G4", 90, 100],
+                ["G5", 40, 60],
+            ],
+            orient="row",
+            schema=[
+                (COLUMN_GENOME_ID, str),
+                (COLUMN_START, COLUMN_START_DTYPE),
+                (COLUMN_STOP, COLUMN_STOP_DTYPE),
+            ],
+        )
+        v = View(f"{self.d}/{self.name}", self.md, feat)
+
+        obs = v.sample_presence_absence().pl()
+        exp = pl.DataFrame(
+            [
+                ["S1", PRESENT, PRESENT, ABSENT, NOT_APPLICABLE],
+                ["S2", NOT_APPLICABLE, NOT_APPLICABLE, ABSENT, NOT_APPLICABLE],
+                ["S3", NOT_APPLICABLE, PRESENT, PRESENT, PRESENT],
+            ],
+            orient="row",
+            schema=[
+                (COLUMN_SAMPLE_ID, str),
+                ("G1_0_100", str),
+                ("G2_40_60", str),
+                ("G3_40_60", str),
+                ("G5_40_60", str),
+            ],
+        )
+        plt.assert_frame_equal(
+            obs, exp, check_column_order=False, check_row_order=False
+        )
+
+    def test_integrity_checks(self):
+        feat = pl.DataFrame(
+            [
+                ["G1", 0, 100],
+                ["G2", 40, 60],
+                ["G3", 40, 60],
+                ["G3", 40, 60],
+                ["G4", 90, 100],
+                ["G5", 40, 60],
+            ],
+            orient="row",
+            schema=[
+                (COLUMN_GENOME_ID, str),
+                (COLUMN_START, COLUMN_START_DTYPE),
+                (COLUMN_STOP, COLUMN_STOP_DTYPE),
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "Region IDs are not unique"):
+            View(f"{self.d}/{self.name}", self.md, feat)
+
+    def test_feature_names(self):
+        names = pl.DataFrame(
+            [["G1", "foo"], ["G2", "bar"]],
+            orient="row",
+            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
+        )
+
+        v = View(f"{self.d}/{self.name}", self.md, self.feat, names)
+        exp = pl.DataFrame(
+            [["G1", "foo"], ["G2", "bar"], ["G3", "G3"], ["G4", "G4"], ["G5", "G5"]],
+            orient="row",
+            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
+        )
+
+        obs = v.feature_names().pl()
+        plt.assert_frame_equal(
+            obs, exp, check_column_order=False, check_row_order=False
         )
 
 
