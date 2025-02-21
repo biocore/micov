@@ -6,6 +6,7 @@ import polars as pl
 import polars.testing as plt
 
 from micov._constants import (
+    ABSENT,
     COLUMN_COVERED,
     COLUMN_COVERED_DTYPE,
     COLUMN_GENOME_ID,
@@ -13,11 +14,14 @@ from micov._constants import (
     COLUMN_LENGTH_DTYPE,
     COLUMN_PERCENT_COVERED,
     COLUMN_PERCENT_COVERED_DTYPE,
+    COLUMN_REGION_ID,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
     COLUMN_START_DTYPE,
     COLUMN_STOP,
     COLUMN_STOP_DTYPE,
+    NOT_APPLICABLE,
+    PRESENT,
 )
 from micov._view import View
 
@@ -155,17 +159,18 @@ class ViewTests(unittest.TestCase):
         ).filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3"]))
         exp_fmd = pl.DataFrame(
             [
-                ["G1", 0, 100],
-                ["G2", 0, 100],
-                ["G3", 0, 100],
-                ["G4", 0, 100],
-                ["G5", 0, 100],
+                ["G1", 0, 100, "G1_0_100"],
+                ["G2", 0, 100, "G2_0_100"],
+                ["G3", 0, 100, "G3_0_100"],
+                ["G4", 0, 100, "G4_0_100"],
+                ["G5", 0, 100, "G5_0_100"],
             ],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -200,12 +205,13 @@ class ViewTests(unittest.TestCase):
             f"{self.d}/{self.name}.covered_positions.parquet"
         ).filter(pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5"]))
         exp_fmd = pl.DataFrame(
-            [["G1", 0, 100], ["G5", 0, 100]],
+            [["G1", 0, 100, "G1_0_100"], ["G5", 0, 100, "G5_0_100"]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -253,12 +259,13 @@ class ViewTests(unittest.TestCase):
 
         # the user is requesting a stop position outside of the size the genome but ok?
         exp_fmd = pl.DataFrame(
-            [["G1", 0, 1000], ["G5", 0, 1000]],
+            [["G1", 0, 1000, "G1_0_1000"], ["G5", 0, 1000, "G5_0_1000"]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -333,12 +340,13 @@ class ViewTests(unittest.TestCase):
             ],
         )
         exp_fmd = pl.DataFrame(
-            [["G1", 7, 9], ["G5", 0, 20]],
+            [["G1", 7, 9, "G1_7_9"], ["G5", 0, 20, "G5_0_20"]],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -417,12 +425,18 @@ class ViewTests(unittest.TestCase):
         )
 
         exp_fmd = pl.DataFrame(
-            [["G1", 0, 100], ["G2", 40, 60], ["G3", 40, 60], ["G5", 40, 60]],
+            [
+                ["G1", 0, 100, "G1_0_100"],
+                ["G2", 40, 60, "G2_40_60"],
+                ["G3", 40, 60, "G3_40_60"],
+                ["G5", 40, 60, "G5_40_60"],
+            ],
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
                 (COLUMN_START, COLUMN_START_DTYPE),
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                (COLUMN_REGION_ID, str),
             ],
         )
 
@@ -441,7 +455,7 @@ class ViewTests(unittest.TestCase):
 
     def test_sample_presence_absence_no_regions(self):
         v = View(f"{self.d}/{self.name}", self.md, self.feat)
-        with self.assertRaisesRegex(ValueError, "No region constraints"):
+        with self.assertRaisesRegex(ValueError, r"^Cannot calculate"):
             v.sample_presence_absence()
 
     def test_sample_presence_absence_single_region(self):
@@ -462,25 +476,23 @@ class ViewTests(unittest.TestCase):
         )
         v = View(f"{self.d}/{self.name}", self.md, feat)
 
-        PRESENT = 'present'
-        ABSENT = 'absent'
-
         obs = v.sample_presence_absence().pl()
         exp = pl.DataFrame(
-            [['S1', PRESENT, PRESENT, ABSENT, ABSENT, ABSENT],
-             ['S2', ABSENT, ABSENT, ABSENT, ABSENT, ABSENT],
-             ['S3', ABSENT, PRESENT, PRESENT, ABSENT, PRESENT],
+            [
+                ["S1", PRESENT, PRESENT, ABSENT, NOT_APPLICABLE],
+                ["S2", NOT_APPLICABLE, NOT_APPLICABLE, ABSENT, NOT_APPLICABLE],
+                ["S3", NOT_APPLICABLE, PRESENT, PRESENT, PRESENT],
+            ],
             orient="row",
             schema=[
                 (COLUMN_SAMPLE_ID, str),
-                ("micov_G1_0_100", str),
-                ("micov_G2_40_60", str),
-                ("micov_G3_40_60", str),
-                ("micov_G4_90_100", str),
-                ("micov_G5_40_60", str),
+                ("G1_0_100", str),
+                ("G2_40_60", str),
+                ("G3_40_60", str),
+                ("G5_40_60", str),
             ],
         )
-
+        print(obs)
         plt.assert_frame_equal(
             obs, exp, check_column_order=False, check_row_order=False
         )

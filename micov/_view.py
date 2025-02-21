@@ -5,13 +5,17 @@ import polars as pl
 
 from micov import MEMORY, THREADS
 from micov._constants import (
+    ABSENT,
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
     COLUMN_LENGTH_DTYPE,
+    COLUMN_REGION_ID,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
     COLUMN_STOP,
+    NOT_APPLICABLE,
+    PRESENT,
 )
 from micov._cov import compress_per_sample, coverage_percent_per_sample
 
@@ -80,6 +84,10 @@ class View:
         feat_df = self.features_to_keep  # noqa: F841
         self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
 
+        # views are "free". Let's establish a common reference point for unmodified
+        # position data'
+        self.con.sql(f"CREATE VIEW unconstrained_positions AS FROM '{positions}'")
+
         if self.constrain_positions:
             # limit the samples considered
             # limit the set of features considered
@@ -93,7 +101,7 @@ class View:
                                           fc.{COLUMN_STOP}) AS {COLUMN_STOP},
                                     GREATEST(pos.{COLUMN_START},
                                              fc.{COLUMN_START}) AS {COLUMN_START}
-                             FROM '{positions}' pos
+                             FROM unconstrained_positions pos
                                  JOIN feature_constraint fc
                                      ON pos.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
                                          AND pos.{COLUMN_START} <= fc.{COLUMN_STOP}
@@ -135,7 +143,11 @@ class View:
                             SELECT * FROM recomputed_coverage""")
 
             self.con.sql(f"""CREATE TABLE feature_metadata AS
-                             SELECT *
+                             SELECT *,
+                                CONCAT_WS('_',
+                                          {COLUMN_GENOME_ID},
+                                          {COLUMN_START},
+                                          {COLUMN_STOP}) AS {COLUMN_REGION_ID}
                              FROM feature_constraint fc
                                  SEMI JOIN coverage cov USING ({COLUMN_GENOME_ID})""")
 
@@ -165,7 +177,11 @@ class View:
                              CREATE TABLE feature_metadata AS
                                  SELECT fc.{COLUMN_GENOME_ID},
                                         0::UINTEGER AS {COLUMN_START},
-                                        gl.{COLUMN_STOP}
+                                        gl.{COLUMN_STOP},
+                                        CONCAT_WS('_',
+                                                  fc.{COLUMN_GENOME_ID},
+                                                  0,
+                                                  gl.{COLUMN_STOP}) AS {COLUMN_REGION_ID}
                                  FROM feature_constraint fc
                                      JOIN genome_lengths gl
                                          ON fc.{COLUMN_GENOME_ID}=gl.{COLUMN_GENOME_ID}
@@ -198,7 +214,11 @@ class View:
                              CREATE TABLE feature_metadata AS
                                  SELECT fc.{COLUMN_GENOME_ID},
                                         0::UINTEGER AS {COLUMN_START},
-                                        gl.{COLUMN_STOP}
+                                        gl.{COLUMN_STOP},
+                                        CONCAT_WS('_',
+                                                  fc.{COLUMN_GENOME_ID},
+                                                  0,
+                                                  {COLUMN_STOP}) AS {COLUMN_REGION_ID}
                                  FROM feature_constraint fc
                                      JOIN genome_lengths gl
                                          ON fc.{COLUMN_GENOME_ID}=gl.{COLUMN_GENOME_ID}
@@ -272,7 +292,98 @@ class View:
         if not self.constrain_positions:
             raise ValueError("Cannot calculate presence/absence without positions.")
 
-        # self.con.sql(f"""
-        #    SELECT {COLUMN_SAMPLE_ID},
-        #
-        #   """)
+        self.con.sql(f"""
+            -- define a view which describes whether a sample is present in a particular
+            -- region.
+            CREATE OR REPLACE VIEW has_region AS (
+                SELECT
+                    pos.{COLUMN_SAMPLE_ID},
+                    fm.{COLUMN_REGION_ID},
+                    CASE
+                        WHEN pos.{COLUMN_START} <= fm.{COLUMN_STOP}
+                            AND pos.{COLUMN_STOP} > fm.{COLUMN_START}
+                        THEN '{PRESENT}'
+                        ELSE '{ABSENT}'
+                    END AS painfo
+                FROM unconstrained_positions pos
+                    LEFT JOIN feature_metadata fm
+                        ON pos.{COLUMN_GENOME_ID}=fm.{COLUMN_GENOME_ID}
+                ORDER BY pos.{COLUMN_SAMPLE_ID}, pos.{COLUMN_GENOME_ID}
+            );
+
+            -- extract the samples which are "present" and "absent" and the
+            -- regions they are present -- in. Note that a sample is present in a
+            -- region if it has coverage in that -- region. It is considered absent
+            -- if it nas nonzero coverage for the genome -- AND lacks coverage
+            -- within the focus region.
+
+            -- n.b. we have to materialize as pivot elements cannot be used in views
+            -- without explicilty naming the columns. Since we do not know the regions
+            -- in advance, we cannot readily define the columns. As far as I know,
+            -- the only way would be a clunky dynamic SQL query.
+            CREATE OR REPLACE TABLE present AS (
+                SELECT
+                    {COLUMN_SAMPLE_ID},
+                    CASE
+                        WHEN COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}) > 0
+                        THEN '{PRESENT}'
+                        ELSE NULL
+                    END
+                FROM (PIVOT (SELECT * EXCLUDE (painfo)
+                             FROM has_region
+                             WHERE painfo='{PRESENT}')
+                      ON {COLUMN_REGION_ID})
+            );
+            CREATE OR REPLACE TABLE absent AS (
+                SELECT
+                    {COLUMN_SAMPLE_ID},
+                    CASE
+                        WHEN COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}) > 0
+                        THEN '{ABSENT}'
+                        ELSE NULL
+                    END
+                FROM (PIVOT (SELECT * EXCLUDE (painfo)
+                             FROM has_region
+                             WHERE painfo='{ABSENT}')
+                      ON {COLUMN_REGION_ID})
+            );
+            """)
+
+        # Joining, coalescing, and filling nulls as far as I could tell requires
+        # clunky dynamic SQL in order to determine the set of columns to
+        # coalesce. It's easy to do within Polars.'
+        present = self.con.sql("SELECT * FROM present").pl()
+        absent = self.con.sql("SELECT * FROM absent").pl()
+
+        # columns in common are ones where there is a mix of samples which are present
+        # and absent
+        common = (set(present.columns) & set(absent.columns)) - {
+            COLUMN_SAMPLE_ID,
+        }
+
+        # when there are duplicates, the left column receives the original name
+        # and the right column is suffixed. The default suffix is "_right".
+        exprs = [pl.coalesce([c, c + "_right"]).alias(c) for c in common]
+
+        # after we coalesce, the right columns are unnecessary
+        drops = [c + "_right" for c in common]
+
+        joined = (  # noqa
+            present.lazy()
+            .join(absent.lazy(), on={COLUMN_SAMPLE_ID}, how="full", coalesce=True)
+            .with_columns(exprs)
+            .drop(drops)
+            .fill_null(pl.lit(NOT_APPLICABLE))
+            .collect()
+        )
+
+        # clean up, and createa an object which can be pulled like the other access
+        # methods of this class.
+        self.con.sql("""
+            DROP VIEW has_region;
+            DROP TABLE present;
+            DROP TABLE absent;
+            CREATE OR REPLACE TABLE sample_presence_absence AS FROM joined;
+            """)
+
+        return self.con.sql("SELECT * FROM sample_presence_absence")
