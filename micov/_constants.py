@@ -22,6 +22,7 @@ COLUMN_COVERED = "covered"
 COLUMN_COVERED_DTYPE = pl.UInt32
 COLUMN_PERCENT_COVERED = "percent_covered"
 COLUMN_PERCENT_COVERED_DTYPE = float
+COLUMN_NAME = "name"
 PRESENT = "present"
 ABSENT = "absent"
 NOT_APPLICABLE = "not applicable"
