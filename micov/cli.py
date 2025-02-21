@@ -578,5 +578,50 @@ def binning(
     )
 
 
+@cli.command()
+@click.option(
+    "--parquet-coverage",
+    type=click.Path(exists=False),
+    required=True,
+    help=(
+        "Pre-computed coverage data as parquet. "
+        "This should be the basename used, i.e. "
+        'for "foo.coverage.parquet", please use '
+        '"foo"'
+    ),
+)
+@click.option(
+    "--sample-metadata",
+    type=click.Path(exists=True),
+    required=True,
+    help="A metadata file with the sample metadata",
+)
+@click.option(
+    "--features-to-keep",
+    type=click.Path(exists=True),
+    required=False,
+    help="A metadata file with the features to keep",
+)
+@click.option("--output", type=click.Path(exists=False), required=True)
+@click.option("--memory", type=str, default="16gb", required=False)
+@click.option("--threads", type=int, default=4, required=False)
+def extract_sample_presence(
+    parquet_coverage,
+    sample_metadata,
+    features_to_keep,
+    output,
+    memory,
+    threads,
+):
+    """Extract variables for each described feature to keep region."""
+    metadata_pl = parse_sample_metadata(sample_metadata)
+    features_pl = parse_features_to_keep(features_to_keep)
+    view = View(parquet_coverage, metadata_pl, features_pl)
+
+    view.sample_presence_absence().pl().write_csv(
+        output, separator="\t", include_header=True
+    )
+
+
 if __name__ == "__main__":
     cli()
