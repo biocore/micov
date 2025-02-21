@@ -584,7 +584,7 @@ def extract_sample_presence(
     """Extract variables for each described feature to keep region."""
     metadata_pl = parse_sample_metadata(sample_metadata)
     features_pl = parse_features_to_keep(features_to_keep)
-    view = View(parquet_coverage, metadata_pl, features_pl)
+    view = View(parquet_coverage, metadata_pl, features_pl, threads, memory)
 
     view.sample_presence_absence().pl().write_csv(
         output, separator="\t", include_header=True
