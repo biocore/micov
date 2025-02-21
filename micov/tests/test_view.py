@@ -492,10 +492,29 @@ class ViewTests(unittest.TestCase):
                 ("G5_40_60", str),
             ],
         )
-        print(obs)
         plt.assert_frame_equal(
             obs, exp, check_column_order=False, check_row_order=False
         )
+
+    def test_integrity_checks(self):
+        feat = pl.DataFrame(
+            [
+                ["G1", 0, 100],
+                ["G2", 40, 60],
+                ["G3", 40, 60],
+                ["G3", 40, 60],
+                ["G4", 90, 100],
+                ["G5", 40, 60],
+            ],
+            orient="row",
+            schema=[
+                (COLUMN_GENOME_ID, str),
+                (COLUMN_START, COLUMN_START_DTYPE),
+                (COLUMN_STOP, COLUMN_STOP_DTYPE),
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "Region IDs are not unique"):
+            View(f"{self.d}/{self.name}", self.md, feat)
 
 
 if __name__ == "__main__":

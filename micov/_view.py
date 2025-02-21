@@ -223,6 +223,20 @@ class View:
                                      JOIN genome_lengths gl
                                          ON fc.{COLUMN_GENOME_ID}=gl.{COLUMN_GENOME_ID}
                     """)
+        self._integrity_checks()
+
+    def _integrity_checks(self):
+        region_id_uniqueness = self.con.sql(f"""
+            SELECT
+                CASE
+                    WHEN COUNT(DISTINCT {COLUMN_REGION_ID}) == COUNT({COLUMN_REGION_ID})
+                    THEN 'OK'
+                    ELSE 'FAIL'
+                END AS region_id_uniqueness
+            FROM feature_metadata
+        """).fetchone()[0]
+        if region_id_uniqueness == "FAIL":
+            raise ValueError("Region IDs are not unique.")
 
     def metadata(self):
         return self.con.sql("SELECT * FROM metadata")
