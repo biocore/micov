@@ -3,7 +3,6 @@ import os
 import duckdb
 import polars as pl
 
-from micov import MEMORY, THREADS
 from micov._constants import (
     ABSENT,
     COLUMN_COVERED,
@@ -23,7 +22,9 @@ from micov._cov import compress_per_sample, coverage_percent_per_sample
 class View:
     """View subsets of coverage data."""
 
-    def __init__(self, dbbase, sample_metadata, features_to_keep):
+    def __init__(
+        self, dbbase, sample_metadata, features_to_keep, threads=1, memory="8gb"
+    ):
         self.dbbase = dbbase
         self.sample_metadata = sample_metadata
         self.features_to_keep = features_to_keep
@@ -32,7 +33,7 @@ class View:
         self.constrain_features = False
 
         self.con = duckdb.connect(
-            ":memory:", config={"threads": THREADS, "memory_limit": f"{MEMORY}gb"}
+            ":memory:", config={"threads": threads, "memory_limit": f"{memory}"}
         )
         self._init()
 
@@ -43,6 +44,9 @@ class View:
         self.close()
 
     def _feature_filters(self):
+        if self.features_to_keep is None:
+            return
+
         if COLUMN_START in self.features_to_keep.columns:
             if COLUMN_STOP not in self.features_to_keep.columns:
                 raise KeyError(f"'{COLUMN_START}' found but missing '{COLUMN_STOP}'")
@@ -81,8 +85,15 @@ class View:
                              SEMI JOIN '{coverage}' cov
                                  ON md.{COLUMN_SAMPLE_ID}=cov.{COLUMN_SAMPLE_ID}""")
 
-        feat_df = self.features_to_keep  # noqa: F841
-        self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
+        feat_df = self.features_to_keep
+        if feat_df is None:
+            self.con.sql(f"""CREATE TABLE feature_constraint AS
+                             SELECT DISTINCT {COLUMN_GENOME_ID},
+                                    NULL AS {COLUMN_START},
+                                    NULL AS {COLUMN_STOP}
+                             FROM '{coverage}'""")
+        else:
+            self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
 
         # views are "free". Let's establish a common reference point for unmodified
         # position data'
@@ -114,9 +125,9 @@ class View:
             # TODO: replace with duckdb native per sample compression
             #   Do we stream to parquet? this could be large
             positions_df = self.con.sql(f"""SELECT * FROM positions
-                                         ORDER BY {COLUMN_SAMPLE_ID},
-                                                  {COLUMN_GENOME_ID},
-                                                  {COLUMN_START}""").pl()
+                                            ORDER BY {COLUMN_SAMPLE_ID},
+                                                     {COLUMN_GENOME_ID},
+                                                     {COLUMN_START}""").pl()
 
             if len(positions_df) == 0:
                 msg = "No positions left after filtering."
@@ -144,6 +155,7 @@ class View:
 
             self.con.sql(f"""CREATE TABLE feature_metadata AS
                              SELECT *,
+                                {COLUMN_STOP} - {COLUMN_START} AS {COLUMN_LENGTH},
                                 CONCAT_WS('_',
                                           {COLUMN_GENOME_ID},
                                           {COLUMN_START},
@@ -170,32 +182,34 @@ class View:
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
             self.con.sql(f"""CREATE VIEW genome_lengths AS
-                                 SELECT {COLUMN_GENOME_ID},
-                                        FIRST({COLUMN_LENGTH}) AS {COLUMN_STOP}
-                                 FROM coverage
-                                 GROUP BY {COLUMN_GENOME_ID};
+                             SELECT {COLUMN_GENOME_ID},
+                                 FIRST({COLUMN_LENGTH}) AS {COLUMN_LENGTH}
+                             FROM coverage
+                             GROUP BY {COLUMN_GENOME_ID};
+
                              CREATE TABLE feature_metadata AS
-                                 SELECT fc.{COLUMN_GENOME_ID},
-                                        0::UINTEGER AS {COLUMN_START},
-                                        gl.{COLUMN_STOP},
-                                        CONCAT_WS('_',
-                                                  fc.{COLUMN_GENOME_ID},
-                                                  0,
-                                                  gl.{COLUMN_STOP}) AS {COLUMN_REGION_ID}
-                                 FROM feature_constraint fc
-                                     JOIN genome_lengths gl
-                                         ON fc.{COLUMN_GENOME_ID}=gl.{COLUMN_GENOME_ID}
+                             SELECT fc.{COLUMN_GENOME_ID},
+                                 0::UINTEGER AS {COLUMN_START},
+                                 gl.{COLUMN_LENGTH} AS {COLUMN_STOP},
+                                 gl.{COLUMN_LENGTH},
+                                 CONCAT_WS('_',
+                                           fc.{COLUMN_GENOME_ID},
+                                           0,
+                                           {COLUMN_LENGTH}) AS {COLUMN_REGION_ID}
+                             FROM feature_constraint fc
+                                 JOIN genome_lengths gl
+                                     ON fc.{COLUMN_GENOME_ID}=gl.{COLUMN_GENOME_ID}
                     """)
         else:
             # limit the samples considered
             self.con.sql(f"""CREATE VIEW coverage AS
                              SELECT cov.*
-                             FROM '{coverage}'
+                             FROM '{coverage}' cov
                                  JOIN metadata md
                                      ON cov.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
             self.con.sql(f"""CREATE VIEW positions AS
                              SELECT pos.*
-                             FROM '{positions}'
+                             FROM '{positions}' pos
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
 
@@ -207,18 +221,19 @@ class View:
             # use the existing length data from coverage to set the start/stop
             # positions in feature_metadata
             self.con.sql(f"""CREATE VIEW genome_lengths AS
-                                 SELECT {COLUMN_GENOME_ID},
-                                        FIRST({COLUMN_LENGTH}) AS {COLUMN_STOP}
-                                 FROM coverage
-                                 GROUP BY {COLUMN_GENOME_ID};
-                             CREATE TABLE feature_metadata AS
-                                 SELECT fc.{COLUMN_GENOME_ID},
+                                    SELECT {COLUMN_GENOME_ID},
+                                        FIRST({COLUMN_LENGTH}) AS {COLUMN_LENGTH}
+                                    FROM coverage
+                                    GROUP BY {COLUMN_GENOME_ID};
+                                CREATE TABLE feature_metadata AS
+                                    SELECT fc.{COLUMN_GENOME_ID},
                                         0::UINTEGER AS {COLUMN_START},
-                                        gl.{COLUMN_STOP},
+                                        gl.{COLUMN_LENGTH} AS {COLUMN_STOP},
+                                        gl.{COLUMN_LENGTH},
                                         CONCAT_WS('_',
                                                   fc.{COLUMN_GENOME_ID},
                                                   0,
-                                                  {COLUMN_STOP}) AS {COLUMN_REGION_ID}
+                                                  {COLUMN_LENGTH}) AS {COLUMN_REGION_ID}
                                  FROM feature_constraint fc
                                      JOIN genome_lengths gl
                                          ON fc.{COLUMN_GENOME_ID}=gl.{COLUMN_GENOME_ID}

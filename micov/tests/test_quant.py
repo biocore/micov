@@ -38,9 +38,9 @@ class Tests(unittest.TestCase):
             ],
             orient="row",
             schema=[
-                ("bin_idx", int),
-                ("bin_start", float),
-                ("bin_stop", float),
+                ("bin_idx", COLUMN_START_DTYPE),
+                ("bin_start", COLUMN_START_DTYPE),
+                ("bin_stop", COLUMN_STOP_DTYPE),
             ],
         ).lazy()
         plt.assert_frame_equal(obs, exp)
@@ -53,18 +53,18 @@ class Tests(unittest.TestCase):
         obs = create_bin_list(genome_length, bin_num)
         exp = pl.DataFrame(
             [
-                [1, 0.0, 16.666667],
-                [2, 16.666667, 33.333333],
-                [3, 33.333333, 50.0],
-                [4, 50.0, 66.666667],
-                [5, 66.666667, 83.333333],
-                [6, 83.333333, 101.0],
+                [1, 0, 17],
+                [2, 17, 33],
+                [3, 33, 50],
+                [4, 50, 67],
+                [5, 67, 83],
+                [6, 83, 101],
             ],
             orient="row",
             schema=[
-                ("bin_idx", int),
-                ("bin_start", float),
-                ("bin_stop", float),
+                ("bin_idx", COLUMN_START_DTYPE),
+                ("bin_start", COLUMN_START_DTYPE),
+                ("bin_stop", COLUMN_STOP_DTYPE),
             ],
         ).lazy()
         plt.assert_frame_equal(obs, exp)
@@ -92,7 +92,7 @@ class Tests(unittest.TestCase):
         ).lazy()
         bin_num = 5
 
-        obs_bin_df = pos_to_bins(pos, "variable", bin_num)
+        obs_bin_df = pos_to_bins(pos, "variable", bin_num, 100)
         exp_bin_df = pl.DataFrame(
             [
                 ["G000006605", "A", 1, 3, 1, ["s1"], 0.0, 20.0],
@@ -108,8 +108,8 @@ class Tests(unittest.TestCase):
                 ("read_hits", int),
                 ("sample_hits", int),
                 ("samples", pl.List(pl.Utf8)),
-                ("bin_start", pl.Float64),
-                ("bin_stop", pl.Float64),
+                ("bin_start", COLUMN_START_DTYPE),
+                ("bin_stop", COLUMN_STOP_DTYPE),
             ],
         ).lazy()
 
@@ -140,7 +140,7 @@ class Tests(unittest.TestCase):
         ).lazy()
         bin_num = 5
 
-        obs_bin_df = pos_to_bins(pos, "variable", bin_num)
+        obs_bin_df = pos_to_bins(pos, "variable", bin_num, 100)
         exp_bin_df = pl.DataFrame(
             [
                 ["G000006605", "A", 1, 2, 1, ["s1"], 0.0, 20.0],
@@ -158,8 +158,8 @@ class Tests(unittest.TestCase):
                 ("read_hits", int),
                 ("sample_hits", int),
                 ("samples", pl.List(pl.Utf8)),
-                ("bin_start", pl.Float64),
-                ("bin_stop", pl.Float64),
+                ("bin_start", COLUMN_START_DTYPE),
+                ("bin_stop", COLUMN_STOP_DTYPE),
             ],
         ).lazy()
 
@@ -187,7 +187,7 @@ class Tests(unittest.TestCase):
             ],
         ).lazy()
         bin_num = 5
-        obs_bin_df = pos_to_bins(pos, "variable", bin_num)
+        obs_bin_df = pos_to_bins(pos, "variable", bin_num, 100)
         exp_bin_df = pl.DataFrame(
             [
                 ["G000006605", "A", 1, 1, 1, ["s1"], 0.0, 20.0],
@@ -203,8 +203,8 @@ class Tests(unittest.TestCase):
                 ("read_hits", int),
                 ("sample_hits", int),
                 ("samples", pl.List(pl.Utf8)),
-                ("bin_start", pl.Float64),
-                ("bin_stop", pl.Float64),
+                ("bin_start", COLUMN_START_DTYPE),
+                ("bin_stop", COLUMN_STOP_DTYPE),
             ],
         ).lazy()
 

@@ -3,7 +3,12 @@ import warnings
 import numpy as np
 import polars as pl
 
-from ._constants import COLUMN_GENOME_ID, COLUMN_SAMPLE_ID
+from ._constants import (
+    COLUMN_GENOME_ID,
+    COLUMN_SAMPLE_ID,
+    COLUMN_START_DTYPE,
+    COLUMN_STOP_DTYPE,
+)
 
 warnings.simplefilter("ignore", category=pl.exceptions.PerformanceWarning)
 
@@ -26,21 +31,23 @@ def create_bin_list(genome_length, bin_num):
         pl.Series("a", [0, genome_length], strict=False)
         .hist(bin_count=bin_num)
         .lazy()
-        .select(pl.col("breakpoint").alias("bin_stop"))
+        .select(pl.col("breakpoint").round().cast(COLUMN_STOP_DTYPE).alias("bin_stop"))
         .with_row_index("bin_idx", offset=1)
     )
     bin_list_pos_start = (
         pl.Series("a", [0, genome_length], strict=False)
         .hist(bin_count=bin_num)
         .lazy()
-        .select(pl.col("breakpoint").alias("bin_start"))
+        .select(
+            pl.col("breakpoint").round().cast(COLUMN_START_DTYPE).alias("bin_start")
+        )
         .with_row_index("bin_idx", offset=2)
     )
     bin_list = (
         bin_list_pos_start.join(bin_list_pos_stop, on="bin_idx", how="right")
         .fill_null(0)
         .select([pl.col("bin_idx"), pl.col("bin_start"), pl.col("bin_stop")])
-        .with_columns(pl.col("bin_idx").cast(pl.Int64))
+        .with_columns(pl.col("bin_idx").cast(COLUMN_START_DTYPE))
     )
     # setting the bin_stop of the last bin to be exactly the genome length + 1
     bin_list = bin_list.with_columns(
@@ -52,51 +59,30 @@ def create_bin_list(genome_length, bin_num):
     return bin_list
 
 
-def pos_to_bins(pos, variable, bin_num):
-    genome_length = pos.select("length").limit(1).collect().item()
+def pos_to_bins(pos, variable, bin_num, genome_length):
+    # genome_length = pos.select("length").limit(1).collect().item()
     bin_list = create_bin_list(genome_length, bin_num)
 
     # get start_bin_idx and stop_bin_idx
     bin_edges = [0.0] + bin_list.select(  # noqa: RUF005
         pl.col("bin_stop")
     ).collect().to_series().to_list()
-    cut_start = (
-        pos.select(pl.col("start"))
-        .collect()
-        .to_series()
-        .cut(
-            bin_edges,
-            labels=np.arange(len(bin_edges) + 1).astype(str),
-            left_closed=True,
+    labels = np.arange(len(bin_edges) + 1).astype(str)
+
+    return (
+        pos.with_columns(
+            pl.col("start")
+            .cut(bin_edges, labels=labels, left_closed=True)
+            .cast(COLUMN_START_DTYPE)
+            .alias("start_bin_idx"),
+            pl.col("stop")
+            .cut(bin_edges, labels=labels, left_closed=False)
+            .cast(COLUMN_STOP_DTYPE)
+            .alias("stop_bin_idx")
+            + 1,
         )
-        .cast(pl.Int64)
-        .alias("start_bin_idx")
-    )
-    cut_stop = (
-        pos.select(pl.col("stop"))
-        .collect()
-        .to_series()
-        .cut(
-            bin_edges,
-            labels=np.arange(len(bin_edges) + 1).astype(str),
-            left_closed=False,
-        )
-        .cast(pl.Int64)
-        .alias("stop_bin_idx")
-    )
-    pos = pos.with_columns([cut_start, cut_stop])
-
-    # update stop_bin_idx +1 for pl.arange and generate range of bins
-    pos = pos.with_columns((pl.col("stop_bin_idx") + 1).alias("stop_bin_idx_add1"))
-
-    # generate range of bins covered
-    pos = pos.with_columns(
-        pl.int_ranges("start_bin_idx", "stop_bin_idx_add1").alias("bin_idx")
-    ).drop("stop_bin_idx_add1")
-
-    # generate bin_df
-    df_bins = (
-        pos.explode("bin_idx")
+        .with_columns(pl.int_ranges("start_bin_idx", "stop_bin_idx").alias("bin_idx"))
+        .explode("bin_idx")
         .group_by(COLUMN_GENOME_ID, variable, "bin_idx")
         .agg(
             pl.col("start").len().alias("read_hits"),
@@ -106,4 +92,3 @@ def pos_to_bins(pos, variable, bin_num):
         .sort(by=["bin_idx", variable])
         .join(bin_list, how="left", on="bin_idx")
     )
-    return df_bins
