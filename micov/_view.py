@@ -337,9 +337,10 @@ class View:
                 FROM unconstrained_positions pos
                     LEFT JOIN feature_metadata fm
                         ON pos.{COLUMN_GENOME_ID}=fm.{COLUMN_GENOME_ID}
-                ORDER BY pos.{COLUMN_SAMPLE_ID}, pos.{COLUMN_GENOME_ID}
             );
+        """)
 
+        self.con.sql(f"""
             -- extract the samples which are "present" and "absent" and the
             -- regions they are present -- in. Note that a sample is present in a
             -- region if it has coverage in that -- region. It is considered absent
