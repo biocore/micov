@@ -9,6 +9,7 @@ from micov._constants import (
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
     COLUMN_LENGTH_DTYPE,
+    COLUMN_NAME,
     COLUMN_REGION_ID,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
@@ -23,11 +24,18 @@ class View:
     """View subsets of coverage data."""
 
     def __init__(
-        self, dbbase, sample_metadata, features_to_keep, threads=1, memory="8gb"
+        self,
+        dbbase,
+        sample_metadata,
+        features_to_keep,
+        feature_names=None,
+        threads=1,
+        memory="8gb",
     ):
         self.dbbase = dbbase
         self.sample_metadata = sample_metadata
         self.features_to_keep = features_to_keep
+        self.feature_names_df = feature_names
 
         self.constrain_positions = False
         self.constrain_features = False
@@ -291,31 +299,19 @@ class View:
         else:
             return self.con.sql("SELECT * from positions")
 
-    def target_names(self, target_names):
-        # TODO: integrate into feature_metadata()
-        if target_names is not None:
-            target_names = dict(
-                pl.scan_csv(
-                    target_names,
-                    separator="\t",
-                    new_columns=["feature-id", "lineage"],
-                    has_header=False,
-                )
-                .with_columns(
-                    pl.col("lineage")
-                    .str.split(";")
-                    .list.get(-1)
-                    .str.replace_all(r" |\[|\]", "_")
-                    .alias("species")
-                )
-                .select("feature-id", "species")
-                .collect()
-                .iter_rows()
-            )
+    def feature_names(self):
+        if self.feature_names_df is None:
+            return self.con.sql(f"""
+                SELECT DISTINCT {COLUMN_GENOME_ID}, {COLUMN_GENOME_ID}
+                FROM feature_metadata
+            """)
         else:
-            sql = "SELECT DISTINCT genome_id FROM coverage"
-            target_names = {k[0]: k[0] for k in self.con.sql(sql).fetchall()}
-        return target_names
+            feature_names = self.feature_names_df  # noqa
+            return self.con.sql(f"""
+                SELECT DISTINCT fm.{COLUMN_GENOME_ID}, fn.{COLUMN_NAME}
+                FROM feature_names fn
+                JOIN feature_metadata fm
+                    USING ({COLUMN_GENOME_ID})""")
 
     def sample_presence_absence(self):
         if not self.constrain_positions:

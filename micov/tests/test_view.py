@@ -12,6 +12,7 @@ from micov._constants import (
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
     COLUMN_LENGTH_DTYPE,
+    COLUMN_NAME,
     COLUMN_PERCENT_COVERED,
     COLUMN_PERCENT_COVERED_DTYPE,
     COLUMN_REGION_ID,
@@ -149,6 +150,7 @@ class ViewTests(unittest.TestCase):
         obs_cov = v.coverages().pl()
         obs_pos = v.positions().pl()
         obs_fmd = v.feature_metadata().pl()
+        obs_fn = v.feature_names().pl()
 
         exp_md = md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3"]))
         exp_cov = pl.read_parquet(f"{self.d}/{self.name}.coverage.parquet").filter(
@@ -174,6 +176,17 @@ class ViewTests(unittest.TestCase):
                 (COLUMN_REGION_ID, str),
             ],
         )
+        exp_fn = pl.DataFrame(
+            [
+                ["G1", "G1"],
+                ["G2", "G2"],
+                ["G3", "G3"],
+                ["G4", "G4"],
+                ["G5", "G5"],
+            ],
+            orient="row",
+            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
+        )
 
         plt.assert_frame_equal(
             obs_md, exp_md, check_column_order=False, check_row_order=False
@@ -186,6 +199,9 @@ class ViewTests(unittest.TestCase):
         )
         plt.assert_frame_equal(
             obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
+        )
+        plt.assert_frame_equal(
+            obs_fn, exp_fn, check_column_order=False, check_row_order=False
         )
 
     def test_view_constrain_features(self):
@@ -520,6 +536,25 @@ class ViewTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Region IDs are not unique"):
             View(f"{self.d}/{self.name}", self.md, feat)
+
+    def test_feature_names(self):
+        names = pl.DataFrame(
+            [["G1", "foo"], ["G2", "bar"]],
+            orient="row",
+            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
+        )
+
+        v = View(f"{self.d}/{self.name}", self.md, self.feat, names)
+        exp = pl.DataFrame(
+            [["G1", "foo"], ["G2", "bar"], ["G3", "G3"], ["G4", "G4"], ["G5", "G5"]],
+            orient="row",
+            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
+        )
+
+        obs = v.feature_names().pl()
+        plt.assert_frame_equal(
+            obs, exp, check_column_order=False, check_row_order=False
+        )
 
 
 if __name__ == "__main__":
