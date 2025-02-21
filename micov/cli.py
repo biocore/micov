@@ -20,6 +20,7 @@ from ._io import (
     _single_df,
     compress_from_stream,
     parse_bed_cov_to_df,
+    parse_feature_names,
     parse_features_to_keep,
     parse_genome_lengths,
     parse_qiita_coverages,
@@ -428,24 +429,22 @@ def per_sample_group(
     """Generate sample group plots and coverage data."""
     metadata_pl = parse_sample_metadata(sample_metadata)
     features_pl = parse_features_to_keep(features_to_keep)
-    view = View(parquet_coverage, metadata_pl, features_pl, threads, memory)
-
-    all_covered_positions = view.positions().pl()
-    all_coverage = view.coverages().pl()
-    metadata_pl = view.metadata().pl()
-    feature_metadata_pl = view.feature_metadata().pl()
-    target_names = view.target_names(target_names)
+    names_pl = parse_feature_names(target_names)
+    view = View(
+        parquet_coverage,
+        metadata_pl,
+        features_pl,
+        names_pl,
+        threads=threads,
+        memory=memory,
+    )
 
     per_sample_plots(
-        all_coverage,
-        all_covered_positions,
-        metadata_pl,
-        feature_metadata_pl,
+        view,
         sample_metadata_column,
         output,
         monte,
         monte_iters,
-        target_names,
     )
 
 
@@ -502,7 +501,9 @@ def binning(
     """Bin genome positions and quantify read and sample hits across bins."""
     metadata_pl = parse_sample_metadata(sample_metadata)
     features_pl = parse_features_to_keep(features_to_keep)
-    view = View(parquet_coverage, metadata_pl, features_pl, threads, memory)
+    view = View(
+        parquet_coverage, metadata_pl, features_pl, threads=threads, memory=memory
+    )
 
     all_covered_positions = view.positions()
     metadata = view.metadata().select(COLUMN_SAMPLE_ID, metadata_variable)
@@ -584,7 +585,9 @@ def extract_sample_presence(
     """Extract variables for each described feature to keep region."""
     metadata_pl = parse_sample_metadata(sample_metadata)
     features_pl = parse_features_to_keep(features_to_keep)
-    view = View(parquet_coverage, metadata_pl, features_pl, threads, memory)
+    view = View(
+        parquet_coverage, metadata_pl, features_pl, threads=threads, memory=memory
+    )
 
     view.sample_presence_absence().pl().write_csv(
         output, separator="\t", include_header=True
