@@ -302,15 +302,17 @@ class View:
     def feature_names(self):
         if self.feature_names_df is None:
             return self.con.sql(f"""
-                SELECT DISTINCT {COLUMN_GENOME_ID}, {COLUMN_GENOME_ID}
+                SELECT DISTINCT {COLUMN_GENOME_ID}, {COLUMN_GENOME_ID} AS {COLUMN_NAME}
                 FROM feature_metadata
             """)
         else:
             feature_names = self.feature_names_df  # noqa
             return self.con.sql(f"""
-                SELECT DISTINCT fm.{COLUMN_GENOME_ID}, fn.{COLUMN_NAME}
-                FROM feature_names fn
-                JOIN feature_metadata fm
+                SELECT DISTINCT
+                    fm.{COLUMN_GENOME_ID},
+                    COALESCE(fn.{COLUMN_NAME}, fm.{COLUMN_GENOME_ID}) AS {COLUMN_NAME}
+                FROM feature_metadata fm
+                LEFT JOIN feature_names fn
                     USING ({COLUMN_GENOME_ID})""")
 
     def sample_presence_absence(self):
