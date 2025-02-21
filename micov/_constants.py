@@ -22,6 +22,10 @@ COLUMN_COVERED = "covered"
 COLUMN_COVERED_DTYPE = pl.UInt32
 COLUMN_PERCENT_COVERED = "percent_covered"
 COLUMN_PERCENT_COVERED_DTYPE = float
+PRESENT = "present"
+ABSENT = "absent"
+NOT_APPLICABLE = "not applicable"
+COLUMN_REGION_ID = "region_id"
 
 ### should really probably just use a dataclass, and type annotations?
 
