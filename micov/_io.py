@@ -15,6 +15,7 @@ from ._constants import (
     COLUMN_CIGAR,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
+    COLUMN_NAME,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
     COLUMN_START_DTYPE,
@@ -453,6 +454,35 @@ def parse_features_to_keep(path):
 
     df = pl.read_csv(path, separator="\t")
     return df.rename({df.columns[0]: COLUMN_GENOME_ID})
+
+
+def parse_feature_names(path):
+    """Parse a TSV of feature names.
+
+    We assume the file has a header, and has two columns. The first is the
+    feature ID and second is the name for the feature.
+
+    If the feature name appears to be a lineage, in that it contains "; ",
+    the lineage will be split and the last name retained.
+    """
+    if path is None:
+        return None
+
+    df = pl.read_csv(path, separator="\t")
+
+    return (
+        df.lazy()
+        .rename({df.columns[0]: COLUMN_GENOME_ID, df.columns[1]: COLUMN_NAME})
+        .with_columns(
+            pl.when(pl.col(COLUMN_NAME).str.contains("; "))
+            .then(pl.col(COLUMN_NAME).str.split("; ").list.get(-1))
+            .otherwise(pl.col(COLUMN_NAME))
+            .alias(COLUMN_NAME)
+        )
+        .with_columns(pl.col(COLUMN_NAME).str.replace_all(r" |\[|\]", "_"))
+        .select([COLUMN_GENOME_ID, COLUMN_NAME])
+        .collect()
+    )
 
 
 def parse_sample_metadata(path):
