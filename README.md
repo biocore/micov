@@ -22,11 +22,11 @@ $ pip install micov
 To install the most up-to-date version of micov
 
 ```bash
+$ git clone https://github.com/biocore/micov.git
+$ cd micov
 $ conda create -n micov python=3.12
 $ conda install -q --yes -n micov -c conda-forge --file ci/conda_requirements.txt
 $ conda activate micov
-$ git clone https://github.com/biocore/micov.git
-$ cd micov
 $ pip install -e .
 ```
 
