@@ -154,7 +154,7 @@ micov per-sample-group \
  --plot
 ```
 
-### 6. Additional usage (optional)
+### 6. Additional Usage (optional)
 
 Existing .SAM/.BAM can be converted into coverage percentages by specifying length data at compression:
 
