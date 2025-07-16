@@ -159,7 +159,7 @@ micov per-sample-group \
 
 ### 6. Binning and Ranking
 
-The `binning` command allows you to divide genome positions int fix-sized bins and compute summary statistics across samples, based on sample metadata. This is useful for identifying regions of interest (e.g. high variability across samples) and summarizing coverage data in a structured way. 
+The `binning` command allows you to divide genome positions into fix-sized bins and compute summary statistics across samples, based on sample metadata. This is useful for identifying regions of interest (e.g. high variability across samples).
 
 ```bash
 mkdir -p "./example/binning"
@@ -173,13 +173,7 @@ micov binning \
     --rank
 ```
 
-To identify the bins with the most variable coverage patterns across sample groups, the following metrics are calculated from the distribution of counts per bin across samples.
-
-* **Coefficient of Variation (CV):** Ratio of standard deviation to mean, which is a normalized measure of dispersion. Higher CV indicates greater variability relative to the average coverage. 
-* **Entropy:** Entropy quantifies the uniformity of a distribution. Lower entropy suggests a more uneven distribution.
-* **Gini Coefficient:** Meaasures inequality in a distribution, ranging from 0 to 1. Higher Gini coefficients indicate greater unevenness in read or sample counts across bins, highlighting localized coverage spikes or variability.
-
-Each bin is ranked based on all three metrics individually. The sum of these ranks is then computed and used to assign a final rank, with bins exhibiting higher variability (characterized by higher CV, lower entropy, and higher Gini coefficient across sample groups) ranked at the top. 
+Each bin is ranked based on the standard deviation of sample hits across groups assoicated with the chosen metadata category, with bins exhibiting higher variability ranked at the top. 
 
 The rankings are saved in the output `stats_by_variance_of_sample_hits.tsv` whereas binning statistics (start and end positions of each bin, number of sample hits per bin, number of read hits per bin.etc) are saved in `stats_bins.tsv`.
 
