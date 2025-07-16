@@ -142,6 +142,9 @@ nonzero coverage of the current genome. Both options select independent of
 sample metadata, and will select the max number of samples observed in a sample
 group.
 
+Pairwise Kolmogorov-Smirnov (KS) tests between all sample groups' cumulative coverage curves are automatically conducted and results saved in `cumulative.ks.tsv`. The KS test quantifies whether two sample groups differ in the distribution of their cumulative genome coverages, with the KS statistic measuring the maximal difference between the two cumulative distributions, and the KS p-value assessing the statistical significance of the difference.
+
+
 ```bash
 mkdir -p "./example/plots/per_sample_groups"
 
@@ -154,7 +157,27 @@ micov per-sample-group \
  --plot
 ```
 
-### 6. Additional usage (optional)
+### 6. Binning and Ranking
+
+The `binning` command allows you to divide genome positions into fix-sized bins and compute summary statistics across samples, based on sample metadata. This is useful for identifying regions of interest (e.g. high variability across samples).
+
+```bash
+mkdir -p "./example/binning"
+
+micov binning \
+    --parquet-coverage ./example/parquet/example \
+    --sample-metadata ./example/metadata/sample_metadata.txt \
+    --features-to-keep ./example/metadata/feature_metadata.txt \
+    --metadata-variable "dog" \
+    --outdir ./example/binning \
+    --rank
+```
+
+Each bin is ranked based on the standard deviation of sample hits across groups assoicated with the chosen metadata category, with bins exhibiting higher variability ranked at the top. 
+
+The rankings are saved in the output `stats_by_variance_of_sample_hits.tsv` whereas binning statistics (start and end positions of each bin, number of sample hits per bin, number of read hits per bin.etc) are saved in `stats_bins.tsv`.
+
+### 7. Additional Usage (optional)
 
 Existing .SAM/.BAM can be converted into coverage percentages by specifying length data at compression:
 
