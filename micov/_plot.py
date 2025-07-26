@@ -27,6 +27,7 @@ def per_sample_plots(
     output,
     monte,
     monte_iters,
+    percentile,
 ):
     """Construct plots for all genomes.
 
@@ -80,6 +81,7 @@ def per_sample_plots(
             sample_metadata_column,
             output,
             target_name,
+            percentile,
             monte_iters,
             monte,
             False,
@@ -92,6 +94,7 @@ def per_sample_plots(
             sample_metadata_column,
             output,
             target_name,
+            percentile,
             monte_iters,
             monte,
             True,
@@ -133,6 +136,7 @@ def add_monte(
     coverage_full,
     accumulate,
     lengths,
+    percentile,
 ):
     """Perform a Monte Carlo simulation over coverage.
 
@@ -162,6 +166,8 @@ def add_monte(
         cumulative curve.
     lengths : pl.DataFrame
         genome to length data
+    percentile : bool
+        If true, use percentiles (0-100) on x-axis instead of sample counts.
 
     Notes
     -----
@@ -226,6 +232,9 @@ def add_monte(
     median = np.median(monte_y, axis=0)
     std = np.std(monte_y, axis=0)
 
+    if percentile and monte_x is not None:
+        monte_x = [x * 100 / (len(monte_x) - 1) for x in monte_x]
+
     ax.plot(
         monte_x, median, color=color, linestyle=ls_median, linewidth=1, alpha=line_alpha
     )
@@ -257,6 +266,7 @@ def coverage_curve(
     variable,
     output,
     target_name,
+    percentile,
     iters=None,
     with_monte=None,
     accumulate=False,
@@ -292,6 +302,9 @@ def coverage_curve(
     min_group_size : int, optional
         The minimum number of samples to have coverage against the target
         in order to be plotted
+    percentile : bool, optional
+        If true, use percentiles (0-100) on x-axis instead of sample counts.
+        If false, use sample counts.
 
     Notes
     -----
@@ -356,7 +369,12 @@ def coverage_curve(
         max_x = max(max_x, cur_x.max())
 
         labels.append(f"{name} (n={len(cur_x)})")
-        ax.plot(cur_x, cur_y, color=color)
+
+        if percentile and cur_x is not None:
+            cur_x_percentile = cur_x * 100 / (len(cur_x) - 1)
+            ax.plot(cur_x_percentile, cur_y, color=color)
+        else:
+            ax.plot(cur_x, cur_y, color=color)
         curves[name] = cur_y
 
     if not labels:
@@ -374,6 +392,7 @@ def coverage_curve(
             coverage_full,
             accumulate,
             lengths,
+            percentile,
         )
         labels.append(label)
         curves[label] = median_curve
@@ -381,7 +400,10 @@ def coverage_curve(
     tag = "cumulative" if accumulate else "non-cumulative"
 
     ax.set_ylabel("Percent genome covered", fontsize=16)
-    ax.set_xlabel("Within group sample rank by coverage", fontsize=16)
+    if percentile:
+        ax.set_xlabel("Within group sample percentile by coverage", fontsize=16)
+    else:
+        ax.set_xlabel("Within group sample rank by coverage", fontsize=16)
     ax.tick_params(axis="both", which="major", labelsize=16)
     ax.tick_params(axis="both", which="minor", labelsize=16)
     ax.set_xlim(0, max_x)

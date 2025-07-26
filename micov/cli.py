@@ -413,6 +413,7 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
 @click.option("--memory", type=str, default="16gb", required=False)
 @click.option("--threads", type=int, default=4, required=False)
 @click.option("--target-names", type=str, required=False)
+@click.option("--percentile", is_flag=True, default=False, help="Use percentile")
 def per_sample_group(
     parquet_coverage,
     sample_metadata,
@@ -425,6 +426,7 @@ def per_sample_group(
     target_names,
     memory,
     threads,
+    percentile,
 ):
     """Generate sample group plots and coverage data."""
     metadata_pl = parse_sample_metadata(sample_metadata)
@@ -445,6 +447,7 @@ def per_sample_group(
         output,
         monte,
         monte_iters,
+        percentile,
     )
 
 
