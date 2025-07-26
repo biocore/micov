@@ -20,14 +20,19 @@ classifiers = [
 ]
 dynamic = ["version"]
 
+# click < 8.2, due to merge of https://github.com/pallets/click/pull/2604
+# which implicitly removes "_group" suffixes in command line names
+
+# duckdb < 1.3 as jemalloc fails to compile on (very) old linux systems.
+# no issue yet. 
 dependencies = [
-    "click",
+    "click<8.2",
     "scipy",
     "pyarrow<16.0.0",
     "polars-u64-idx<1.23.0",
     "numba",
     "matplotlib>=3.9.0",
-    "duckdb>=1.2.0",
+    "duckdb (>=1.2.0,<1.3)",
     "pytest",
 ]
 
