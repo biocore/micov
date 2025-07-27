@@ -401,12 +401,15 @@ def coverage_curve(
 
     ax.set_ylabel("Percent genome covered", fontsize=16)
     if percentile:
-        ax.set_xlabel("Within group sample percentile by coverage", fontsize=16)
+        ax.set_xlabel("Within group sample percentile", fontsize=16)
     else:
         ax.set_xlabel("Within group sample rank by coverage", fontsize=16)
     ax.tick_params(axis="both", which="major", labelsize=16)
     ax.tick_params(axis="both", which="minor", labelsize=16)
-    ax.set_xlim(0, max_x)
+    if percentile:
+        ax.set_xlim(0, 100)
+    else:
+        ax.set_xlim(0, max_x)
     ax.set_ylim(0, 100)
     ax.set_title((f"{tag}: {target_name}({target}) " f"({length}bp)"), fontsize=16)
     ax.legend(labels, fontsize=14, loc="center left")
