@@ -142,6 +142,9 @@ nonzero coverage of the current genome. Both options select independent of
 sample metadata, and will select the max number of samples observed in a sample
 group.
 
+Additionally, users can specify `--percentile` to display plots with the x-axis
+representing percentile of samples instead of absolute sample counts. 
+
 Pairwise Kolmogorov-Smirnov (KS) tests between all sample groups' cumulative coverage curves are automatically conducted and results saved in `cumulative.ks.tsv`. The KS test quantifies whether two sample groups differ in the distribution of their cumulative genome coverages, with the KS statistic measuring the maximal difference between the two cumulative distributions, and the KS p-value assessing the statistical significance of the difference.
 
 
