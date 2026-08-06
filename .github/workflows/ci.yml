@@ -10,9 +10,11 @@ on:
 
 env:
   latest_python: "3.12"
-  supported_pythons: '["3.9", "3.10", "3.11", "3.12"]'
-  miniforge_version: "23.11.0-0"
-  miniforge_variant: "Mambaforge"
+  supported_pythons: '["3.11", "3.12"]'
+  # Mambaforge was retired by conda-forge; Miniforge3 is the supported
+  # variant and already bundles mamba.
+  miniforge_version: "latest"
+  miniforge_variant: "Miniforge3"
 
 jobs:
   conf:
@@ -35,7 +37,7 @@ jobs:
     runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v2
+      - uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
           python-version: ${{ env.latest_python }}
@@ -63,10 +65,12 @@ jobs:
         use_conda: [true, false]
     steps:
       - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v2
+      - uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
-          python-version: ${{ env.latest_python }}
+          # was env.latest_python, which made the whole version matrix
+          # decorative -- every cell silently tested only the latest Python
+          python-version: ${{ matrix.python_version }}
           miniforge-version: ${{ env.miniforge_version }}
           miniforge-variant: ${{ env.miniforge_variant }}
           environment-file: ci/conda_host_env.yml
@@ -81,7 +85,7 @@ jobs:
         if: ${{ !matrix.use_conda }}
         shell: bash -l {0}
         run: |
-          pip install .
+          pip install .[test]
           conda list
       - name: Run unit tests
         shell: bash -l {0}

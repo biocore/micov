@@ -4,8 +4,12 @@
 # bash
 .nfs*
 
-# vscode
+# editors
 .vscode
+.zed/
+
+# macOS
+.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -15,6 +19,19 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+dist/
+*.whl
+*.tar.gz
 *.egg-info/
 .installed.cfg
 *.egg
+
+# Rust build output (from experiments under localdocs/)
+target/
+
+# Local-only working files: scratch data, archived WIP, side experiments.
+# See localdocs/README.md. Deliberately untracked.
+localdocs/
+
+# Local migration planning document, intentionally not committed
+MIGRATE-TO-MIINT.md

@@ -21,11 +21,13 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python 3.8
-        uses: actions/setup-python@v2
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ env.latest_python }}
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.8
+          # was hardcoded to 3.8, which is EOL and below this project's
+          # requires-python floor; latest_python was declared but unused
+          python-version: ${{ env.latest_python }}
       - name: Build distribution
         run: |
           # set version from '${{ github.ref_name }}'

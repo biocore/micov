@@ -24,11 +24,14 @@ To install the most up-to-date version of micov
 ```bash
 $ git clone https://github.com/biocore/micov.git
 $ cd micov
-$ conda create -n micov python=3.12
+$ conda create -n micov -c conda-forge python=3.12
 $ conda install -q --yes -n micov -c conda-forge --file ci/conda_requirements.txt
 $ conda activate micov
-$ pip install -e .
+$ pip install -e ".[test]"
 ```
+
+The `[test]` extra installs `pytest`, which `make test` needs. Omit it for a
+plain runtime install.
 
 ## Example Usages
 
@@ -151,7 +154,7 @@ Pairwise Kolmogorov-Smirnov (KS) tests between all sample groups' cumulative cov
 ```bash
 mkdir -p "./example/plots/per_sample_groups"
 
-micov per-sample-group \
+micov per-sample \
  --parquet-coverage "./example/parquet/example" \
  --sample-metadata "./example/metadata/sample_metadata.txt" \
  --sample-metadata-column "dog" \
