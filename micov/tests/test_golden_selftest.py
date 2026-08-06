@@ -1,0 +1,504 @@
+"""Negative controls for the golden comparators.
+
+A harness that cannot fail is worse than no harness, because it reads as
+coverage. Every comparator in ``_golden`` is exercised here in *both*
+directions:
+
+- too strict: a perturbation it is supposed to tolerate must still pass
+- too loose: a perturbation it is supposed to catch must raise
+
+The too-strict half is not padding. During the M0 audit two artifacts
+compared byte-identical to their goldens on the first run despite being
+genuinely nondeterministic, so a comparator calibrated by watching one run
+of micov would have been built to demand byte equality and then flaked
+forever. These tests pin the tolerance deliberately instead.
+
+Fixtures here are synthetic and built in a tmpdir, so this module never
+depends on ``example/`` (which ``MANIFEST.in`` prunes from the sdist) and
+always runs in the fast tier.
+"""
+
+import gzip
+import tarfile
+import tempfile
+import unittest
+from pathlib import Path
+
+from micov.tests._golden import (
+    assert_cov_equal,
+    assert_file_set,
+    assert_gzip_text_equal,
+    assert_ks_equal,
+    assert_parquet_equal,
+    assert_png_plausible,
+    assert_tgz_equal,
+    assert_tsv_equal_unordered,
+)
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+COV_HEADER = "genome_id\tstart\tstop"
+COV_ROWS = [
+    "G000154205\t71\t1503",
+    "G000154205\t1630\t1924",
+    "G000436435\t10\t99",
+]
+
+KS_HEADER = "label_A,label_B,ks-statistic,ks-pvalue"
+KS_DETERMINISTIC = [
+    "No,Yes,0.3,0.24244968766417713",
+    "No,not provided,0.3,0.5691054572613793",
+]
+KS_MONTE = [
+    "No,Monte Carlo unfocused (n=20),0.1,0.9999923931635496",
+    "Yes,Monte Carlo unfocused (n=20),0.23684210526315788,0.5351657978006094",
+]
+
+BIN_HEADER = "genome_id\tbin_idx\tbin_start\tbin_stop\tsample_hits_std"
+# rows 2 and 3 are a deliberate tie on sample_hits_std -- polars orders ties
+# arbitrarily, so their relative order must not matter
+BIN_ROWS = [
+    "G000154205\t0\t0\t100\t1.5",
+    "G000154205\t1\t100\t200\t0.5",
+    "G000154205\t2\t200\t300\t0.5",
+]
+BIN_KEYS = ("genome_id", "bin_idx")
+
+
+class GoldenSelfTestBase(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def write(self, name, lines):
+        """Write newline-terminated text and return its path."""
+        path = self.tmp / name
+        path.write_text("\n".join(lines) + "\n")
+        return path
+
+    def write_gz(self, name, lines, mtime):
+        """Write gzip text with an explicit mtime, so bytes are controllable."""
+        path = self.tmp / name
+        with gzip.GzipFile(path, "wb", mtime=mtime) as fp:
+            fp.write(("\n".join(lines) + "\n").encode())
+        return path
+
+    def write_parquet(self, name, select):
+        """Write a parquet file from a literal SELECT, preserving column order."""
+        import duckdb
+
+        path = self.tmp / name
+        con = duckdb.connect()
+        try:
+            con.execute(f"COPY ({select}) TO '{path}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+        return path
+
+
+class TestAssertCovEqual(GoldenSelfTestBase):
+    """`.cov` row order is unstable (source #8); content is not."""
+
+    def test_identical_passes(self):
+        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
+        b = self.write("b.cov", [COV_HEADER, *COV_ROWS])
+        assert_cov_equal(a, b)
+
+    def test_shuffled_body_passes(self):
+        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
+        b = self.write("b.cov", [COV_HEADER, *reversed(COV_ROWS)])
+        assert_cov_equal(a, b)
+
+    def test_changed_interval_fails(self):
+        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
+        bad = [COV_ROWS[0], COV_ROWS[1], "G000436435\t10\t100"]
+        b = self.write("b.cov", [COV_HEADER, *bad])
+        with self.assertRaises(AssertionError):
+            assert_cov_equal(a, b)
+
+    def test_duplicated_row_fails(self):
+        """Multiset, not set -- a duplicated interval is a real difference."""
+        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
+        b = self.write("b.cov", [COV_HEADER, *COV_ROWS, COV_ROWS[0]])
+        with self.assertRaises(AssertionError):
+            assert_cov_equal(a, b)
+
+    def test_changed_header_fails(self):
+        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
+        b = self.write("b.cov", ["genome\tstart\tstop", *COV_ROWS])
+        with self.assertRaises(AssertionError):
+            assert_cov_equal(a, b)
+
+    def test_missing_file_fails(self):
+        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
+        with self.assertRaises(AssertionError):
+            assert_cov_equal(self.tmp / "absent.cov", a)
+
+
+class TestAssertGzipTextEqual(GoldenSelfTestBase):
+    """`.tsv.gz` bytes carry an mtime (source #2); content is stable."""
+
+    def test_differing_bytes_same_content_passes(self):
+        a = self.write_gz("a.tsv.gz", ["group\tx\ty", "d\t0\t1.5"], mtime=1)
+        b = self.write_gz("b.tsv.gz", ["group\tx\ty", "d\t0\t1.5"], mtime=99999)
+        self.assertNotEqual(a.read_bytes(), b.read_bytes())
+        assert_gzip_text_equal(a, b)
+
+    def test_changed_content_fails(self):
+        a = self.write_gz("a.tsv.gz", ["group\tx\ty", "d\t0\t1.5"], mtime=1)
+        b = self.write_gz("b.tsv.gz", ["group\tx\ty", "d\t0\t1.6"], mtime=1)
+        with self.assertRaises(AssertionError):
+            assert_gzip_text_equal(a, b)
+
+
+class TestAssertParquetEqual(GoldenSelfTestBase):
+    """Row order is unstable (source #6); column order is contractual."""
+
+    QIITA = (
+        "SELECT 'G1' AS genome_id, 10 AS covered, 100 AS length, "
+        "10.0 AS percent_covered, 's1' AS sample_id"
+    )
+    QIITA_TWO_ROWS = QIITA + " UNION ALL SELECT 'G2', 20, 100, 20.0, 's2'"
+
+    def test_identical_passes(self):
+        a = self.write_parquet("a.parquet", self.QIITA_TWO_ROWS)
+        b = self.write_parquet("b.parquet", self.QIITA_TWO_ROWS)
+        assert_parquet_equal(a, b)
+
+    def test_row_order_reversed_passes(self):
+        a = self.write_parquet("a.parquet", self.QIITA_TWO_ROWS)
+        reversed_rows = (
+            "SELECT 'G2' AS genome_id, 20 AS covered, 100 AS length, "
+            "20.0 AS percent_covered, 's2' AS sample_id "
+            "UNION ALL SELECT 'G1', 10, 100, 10.0, 's1'"
+        )
+        b = self.write_parquet("b.parquet", reversed_rows)
+        assert_parquet_equal(a, b)
+
+    def test_column_order_change_fails(self):
+        """This is exactly how nonqiita- and qiita-to-parquet differ."""
+        a = self.write_parquet("a.parquet", self.QIITA)
+        nonqiita = (
+            "SELECT 's1' AS sample_id, 'G1' AS genome_id, 10 AS covered, "
+            "100 AS length, 10.0 AS percent_covered"
+        )
+        b = self.write_parquet("b.parquet", nonqiita)
+        with self.assertRaises(AssertionError):
+            assert_parquet_equal(a, b)
+
+    def test_column_order_change_with_identical_values_fails(self):
+        """Isolate the *ordered* schema check.
+
+        Same column name set, same values in the same positions -- only the
+        names are swapped. The row comparison matches by position and so
+        sees nothing wrong; only an order-sensitive schema check catches it.
+        Without this, `test_column_order_change_fails` would still pass if
+        the schema were compared unordered.
+        """
+        a = self.write_parquet("a.parquet", "SELECT 1 AS x, 1 AS y")
+        b = self.write_parquet("b.parquet", "SELECT 1 AS y, 1 AS x")
+        with self.assertRaises(AssertionError):
+            assert_parquet_equal(a, b)
+
+    def test_changed_float_fails(self):
+        a = self.write_parquet("a.parquet", self.QIITA)
+        changed = self.QIITA.replace(
+            "10.0 AS percent_covered", "10.5 AS percent_covered"
+        )
+        b = self.write_parquet("b.parquet", changed)
+        with self.assertRaises(AssertionError):
+            assert_parquet_equal(a, b)
+
+    def test_row_count_change_fails(self):
+        a = self.write_parquet("a.parquet", self.QIITA)
+        b = self.write_parquet("b.parquet", self.QIITA_TWO_ROWS)
+        with self.assertRaises(AssertionError):
+            assert_parquet_equal(a, b)
+
+    def test_duplicate_multiplicity_change_fails(self):
+        """Same row *set* and same count, different multiplicities.
+
+        Only a multiset comparison catches this -- plain `EXCEPT` would
+        report both sides as equal.
+        """
+        two_x_one_y = (
+            "SELECT 'G1' AS genome_id, 10 AS covered, 100 AS length, "
+            "10.0 AS percent_covered, 's1' AS sample_id "
+            "UNION ALL SELECT 'G1', 10, 100, 10.0, 's1' "
+            "UNION ALL SELECT 'G2', 20, 100, 20.0, 's2'"
+        )
+        one_x_two_y = (
+            "SELECT 'G1' AS genome_id, 10 AS covered, 100 AS length, "
+            "10.0 AS percent_covered, 's1' AS sample_id "
+            "UNION ALL SELECT 'G2', 20, 100, 20.0, 's2' "
+            "UNION ALL SELECT 'G2', 20, 100, 20.0, 's2'"
+        )
+        a = self.write_parquet("a.parquet", two_x_one_y)
+        b = self.write_parquet("b.parquet", one_x_two_y)
+        with self.assertRaises(AssertionError):
+            assert_parquet_equal(a, b)
+
+    def test_changed_dtype_fails(self):
+        a = self.write_parquet("a.parquet", self.QIITA)
+        retyped = self.QIITA.replace("10 AS covered", "CAST(10 AS BIGINT) AS covered")
+        b = self.write_parquet("b.parquet", retyped)
+        with self.assertRaises(AssertionError):
+            assert_parquet_equal(a, b)
+
+
+class TestAssertTsvEqualUnordered(GoldenSelfTestBase):
+    """Binning tie order is unstable (sources #5, #7); values are not."""
+
+    def test_tie_block_reordered_passes(self):
+        a = self.write("a.tsv", [BIN_HEADER, *BIN_ROWS])
+        swapped = [BIN_ROWS[0], BIN_ROWS[2], BIN_ROWS[1]]
+        b = self.write("b.tsv", [BIN_HEADER, *swapped])
+        assert_tsv_equal_unordered(a, b, sort_keys=BIN_KEYS)
+
+    def test_changed_value_fails(self):
+        a = self.write("a.tsv", [BIN_HEADER, *BIN_ROWS])
+        bad = [BIN_ROWS[0], BIN_ROWS[1], "G000154205\t2\t200\t300\t0.6"]
+        b = self.write("b.tsv", [BIN_HEADER, *bad])
+        with self.assertRaises(AssertionError):
+            assert_tsv_equal_unordered(a, b, sort_keys=BIN_KEYS)
+
+    def test_changed_header_fails(self):
+        a = self.write("a.tsv", [BIN_HEADER, *BIN_ROWS])
+        b = self.write("b.tsv", [BIN_HEADER.replace("bin_idx", "idx"), *BIN_ROWS])
+        with self.assertRaises(AssertionError):
+            assert_tsv_equal_unordered(a, b, sort_keys=BIN_KEYS)
+
+    def test_row_count_change_fails(self):
+        a = self.write("a.tsv", [BIN_HEADER, *BIN_ROWS])
+        b = self.write("b.tsv", [BIN_HEADER, *BIN_ROWS[:2]])
+        with self.assertRaises(AssertionError):
+            assert_tsv_equal_unordered(a, b, sort_keys=BIN_KEYS)
+
+    def test_unknown_sort_key_fails(self):
+        """A typo in sort_keys must be loud, not silently unsorted."""
+        a = self.write("a.tsv", [BIN_HEADER, *BIN_ROWS])
+        b = self.write("b.tsv", [BIN_HEADER, *BIN_ROWS])
+        with self.assertRaises(AssertionError):
+            assert_tsv_equal_unordered(a, b, sort_keys=("nope",))
+
+
+class TestAssertKsEqual(GoldenSelfTestBase):
+    """Monte Carlo rows are unseeded (source #1); the rest are published."""
+
+    def test_identical_passes(self):
+        rows = [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE]
+        assert_ks_equal(self.write("a.ks.tsv", rows), self.write("b.ks.tsv", rows))
+
+    def test_monte_pvalue_change_passes(self):
+        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        drifted = [
+            "No,Monte Carlo unfocused (n=20),0.15,0.8123456789",
+            "Yes,Monte Carlo unfocused (n=20),0.2,0.4999999999",
+        ]
+        b = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *drifted])
+        assert_ks_equal(a, b)
+
+    def test_deterministic_pvalue_change_fails(self):
+        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        bad = ["No,Yes,0.3,0.24244968766417799", KS_DETERMINISTIC[1]]
+        b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(a, b)
+
+    def test_deterministic_statistic_change_fails(self):
+        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        bad = ["No,Yes,0.4,0.24244968766417713", KS_DETERMINISTIC[1]]
+        b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(a, b)
+
+    def test_dropped_monte_row_fails(self):
+        """Tolerating the values must not tolerate losing the comparison."""
+        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        b = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, KS_MONTE[0]])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(a, b)
+
+    def test_monte_pvalue_out_of_range_fails(self):
+        """The range check guards the *observed* output, so it goes first."""
+        bad = [
+            "No,Monte Carlo unfocused (n=20),0.1,1.5",
+            KS_MONTE[1],
+        ]
+        observed = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
+        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(observed, golden)
+
+    def test_monte_statistic_out_of_range_fails(self):
+        bad = [
+            "No,Monte Carlo unfocused (n=20),-0.1,0.5",
+            KS_MONTE[1],
+        ]
+        observed = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
+        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(observed, golden)
+
+    def test_non_numeric_monte_value_fails(self):
+        bad = [
+            "No,Monte Carlo unfocused (n=20),nan,inf",
+            KS_MONTE[1],
+        ]
+        observed = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
+        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(observed, golden)
+
+    def test_malformed_row_fails(self):
+        """A short row must raise AssertionError, not ValueError from zip."""
+        observed = self.write(
+            "a.ks.tsv", [KS_HEADER, "No,Yes,0.3", *KS_MONTE]
+        )
+        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(observed, golden)
+
+    def test_wrong_header_fails(self):
+        observed = self.write("a.ks.tsv", ["a,b,c,d", *KS_DETERMINISTIC])
+        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(observed, golden)
+
+    def test_dropped_deterministic_row_fails(self):
+        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        b = self.write("b.ks.tsv", [KS_HEADER, KS_DETERMINISTIC[0], *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(a, b)
+
+
+class TestAssertTgzEqual(GoldenSelfTestBase):
+    """tgz member mtimes are `time.time()` (source #3); content is stable."""
+
+    def make_tgz(self, name, members, mtime):
+        path = self.tmp / name
+        with tarfile.open(path, "w:gz") as tar:
+            for member_name, payload in members.items():
+                src = self.tmp / f"_src_{member_name}"
+                src.write_bytes(payload)
+                info = tar.gettarinfo(str(src), arcname=member_name)
+                info.mtime = mtime
+                with open(src, "rb") as fp:
+                    tar.addfile(info, fp)
+        return path
+
+    def test_differing_mtimes_same_content_passes(self):
+        members = {"s1.cov": b"G1\t1\t2\n", "s2.cov": b"G1\t3\t4\n"}
+        a = self.make_tgz("a.tgz", members, mtime=1)
+        b = self.make_tgz("b.tgz", members, mtime=99999)
+        assert_tgz_equal(a, b)
+
+    def test_changed_member_content_fails(self):
+        a = self.make_tgz("a.tgz", {"s1.cov": b"G1\t1\t2\n"}, mtime=1)
+        b = self.make_tgz("b.tgz", {"s1.cov": b"G1\t1\t3\n"}, mtime=1)
+        with self.assertRaises(AssertionError):
+            assert_tgz_equal(a, b)
+
+    def test_missing_member_fails(self):
+        members = {"s1.cov": b"G1\t1\t2\n", "s2.cov": b"G1\t3\t4\n"}
+        a = self.make_tgz("a.tgz", members, mtime=1)
+        b = self.make_tgz("b.tgz", {"s1.cov": members["s1.cov"]}, mtime=1)
+        with self.assertRaises(AssertionError):
+            assert_tgz_equal(a, b)
+
+    def test_cov_member_row_order_passes(self):
+        """`artifact.cov` inside the archive inherits source #8.
+
+        Observed in the committed consolidated.tgz: that one member differs
+        in row order and nothing else.
+        """
+        header = b"genome_id\tstart\tstop\n"
+        rows = [b"G1\t1\t2\n", b"G1\t3\t4\n"]
+        a = self.make_tgz("a.tgz", {"artifact.cov": header + b"".join(rows)}, mtime=1)
+        b = self.make_tgz(
+            "b.tgz", {"artifact.cov": header + b"".join(reversed(rows))}, mtime=1
+        )
+        assert_tgz_equal(a, b)
+
+    def test_cov_member_changed_interval_fails(self):
+        header = b"genome_id\tstart\tstop\n"
+        a = self.make_tgz(
+            "a.tgz", {"artifact.cov": header + b"G1\t1\t2\n"}, mtime=1
+        )
+        b = self.make_tgz(
+            "b.tgz", {"artifact.cov": header + b"G1\t1\t3\n"}, mtime=1
+        )
+        with self.assertRaises(AssertionError):
+            assert_tgz_equal(a, b)
+
+    def test_non_cov_member_row_order_fails(self):
+        """The tolerance is scoped to `.cov`; .txt members stay exact."""
+        a = self.make_tgz("a.tgz", {"coverage_percentage.txt": b"x\ny\n"}, mtime=1)
+        b = self.make_tgz("b.tgz", {"coverage_percentage.txt": b"y\nx\n"}, mtime=1)
+        with self.assertRaises(AssertionError):
+            assert_tgz_equal(a, b)
+
+
+class TestAssertPngPlausible(GoldenSelfTestBase):
+    def test_valid_png_passes(self):
+        path = self.tmp / "a.png"
+        path.write_bytes(PNG_MAGIC + b"\x00" * 64)
+        assert_png_plausible(path)
+
+    def test_empty_fails(self):
+        path = self.tmp / "a.png"
+        path.write_bytes(b"")
+        with self.assertRaises(AssertionError):
+            assert_png_plausible(path)
+
+    def test_not_a_png_fails(self):
+        path = self.tmp / "a.png"
+        path.write_bytes(b"<html>oops</html>")
+        with self.assertRaises(AssertionError):
+            assert_png_plausible(path)
+
+    def test_missing_fails(self):
+        with self.assertRaises(AssertionError):
+            assert_png_plausible(self.tmp / "absent.png")
+
+    def test_magic_only_fails(self):
+        """A truncated write is a real failure, not a plausible plot."""
+        path = self.tmp / "a.png"
+        path.write_bytes(PNG_MAGIC)
+        with self.assertRaises(AssertionError):
+            assert_png_plausible(path)
+
+
+class TestAssertFileSet(GoldenSelfTestBase):
+    def setUp(self):
+        super().setUp()
+        self.outdir = self.tmp / "out"
+        self.outdir.mkdir()
+        for name in ("a.png", "b.ks.tsv"):
+            (self.outdir / name).write_text("x")
+
+    def test_exact_match_passes(self):
+        assert_file_set(self.outdir, {"a.png", "b.ks.tsv"})
+
+    def test_extra_file_fails(self):
+        with self.assertRaises(AssertionError):
+            assert_file_set(self.outdir, {"a.png"})
+
+    def test_missing_file_fails(self):
+        with self.assertRaises(AssertionError):
+            assert_file_set(self.outdir, {"a.png", "b.ks.tsv", "c.tsv"})
+
+
+class TestComparatorsRejectDirectories(GoldenSelfTestBase):
+    """A path that exists but is not a file must not read as success."""
+
+    def test_directory_is_not_a_valid_artifact(self):
+        d = self.tmp / "adir"
+        d.mkdir()
+        with self.assertRaises(AssertionError):
+            assert_png_plausible(d)
+
+
+if __name__ == "__main__":
+    unittest.main()
