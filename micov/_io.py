@@ -284,8 +284,10 @@ def _test_has_header_taxonomy(line):
 
     if (
         line.startswith("#")
-        or line.split("\t")[0] in genome_id_columns
-        and line.split("\t")[1] in taxonomy_columns
+        or (
+            line.split("\t")[0] in genome_id_columns
+            and line.split("\t")[1] in taxonomy_columns
+        )
     ):
         has_header = True
     else:
