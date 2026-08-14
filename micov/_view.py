@@ -1,15 +1,14 @@
 import os
 
 import duckdb
-import polars as pl
 
 from micov._constants import (
     ABSENT,
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
-    COLUMN_LENGTH_DTYPE,
     COLUMN_NAME,
+    COLUMN_PERCENT_COVERED,
     COLUMN_REGION_ID,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
@@ -17,7 +16,6 @@ from micov._constants import (
     NOT_APPLICABLE,
     PRESENT,
 )
-from micov._cov import compress_per_sample, coverage_percent_per_sample
 
 
 class View:
@@ -35,7 +33,7 @@ class View:
         self.dbbase = dbbase
         self.sample_metadata = sample_metadata
         self.features_to_keep = features_to_keep
-        self.feature_names_df = feature_names
+        self.feature_names_source = feature_names
 
         self.constrain_positions = False
         self.constrain_features = False
@@ -51,27 +49,75 @@ class View:
     def __del__(self):
         self.close()
 
+    def _read_tsv(self, path, rename, all_varchar=False):
+        """Build a SELECT over a TSV, renaming its leading columns.
+
+        micov's metadata files identify their key columns by *position*, not by
+        name, so the first column -- and for feature names the second -- is
+        renamed to the canonical name whatever the file happened to call it.
+
+        Returns SQL rather than a relation so callers can compose it into a
+        larger statement.
+        """
+        varchar = ", all_varchar=true" if all_varchar else ""
+        source = f"read_csv('{path}', delim='\t', header=true{varchar})"
+        columns = [row[0] for row in self.con.sql(f"DESCRIBE FROM {source}").fetchall()]
+        # not strict: `rename` covers only the leading columns, and the file
+        # carries however many more it likes
+        selected = [
+            f'"{old}" AS {new}' for old, new in zip(columns, rename, strict=False)
+        ]
+        selected += [f'"{column}"' for column in columns[len(rename) :]]
+        return f"SELECT {', '.join(selected)} FROM {source}"
+
     def _feature_filters(self):
+        """Load the feature constraints and decide which filter mode applies.
+
+        Three modes: no constraint, genome-level, and sub-genome region. Only
+        the last needs interval clipping, and it is selected by the presence of
+        a `start`/`stop` pair in the feature file.
+        """
+        coverage = f"{self.dbbase}.coverage.parquet"
+
         if self.features_to_keep is None:
+            self.con.sql(f"""CREATE TABLE feature_constraint AS
+                             SELECT DISTINCT {COLUMN_GENOME_ID},
+                                    NULL AS {COLUMN_START},
+                                    NULL AS {COLUMN_STOP}
+                             FROM '{coverage}'""")
             return
 
-        if COLUMN_START in self.features_to_keep.columns:
-            if COLUMN_STOP not in self.features_to_keep.columns:
+        query = self._read_tsv(self.features_to_keep, [COLUMN_GENOME_ID])
+        columns = [row[0] for row in self.con.sql(f"DESCRIBE {query}").fetchall()]
+
+        if COLUMN_START in columns:
+            if COLUMN_STOP not in columns:
                 raise KeyError(f"'{COLUMN_START}' found but missing '{COLUMN_STOP}'")
             self.constrain_positions = True
-        elif COLUMN_STOP in self.features_to_keep.columns:
-            if COLUMN_START not in self.features_to_keep.columns:
-                raise KeyError(f"'{COLUMN_STOP}' found but missing '{COLUMN_START}'")
-        else:
-            self.features_to_keep = self.features_to_keep.with_columns(
-                pl.lit(None).alias(COLUMN_START), pl.lit(None).alias(COLUMN_STOP)
+            # read_csv infers BIGINT for the interval bounds, but the rest of
+            # the View works in UINTEGER and feature_metadata's dtypes are
+            # visible to downstream consumers.
+            query = (
+                f"SELECT * EXCLUDE ({COLUMN_START}, {COLUMN_STOP}), "
+                f"{COLUMN_START}::UINTEGER AS {COLUMN_START}, "
+                f"{COLUMN_STOP}::UINTEGER AS {COLUMN_STOP} FROM ({query})"
             )
+        elif COLUMN_STOP in columns:
+            raise KeyError(f"'{COLUMN_STOP}' found but missing '{COLUMN_START}'")
+        else:
+            # the downstream SQL always names start/stop, so supply them as
+            # typed NULLs. INTEGER matches what a bare NULL literal resolves to
+            # in the `features_to_keep is None` branch above.
+            query = (f"SELECT *, NULL::INTEGER AS {COLUMN_START}, "
+                     f"NULL::INTEGER AS {COLUMN_STOP} FROM ({query})")
 
-        if len(self.features_to_keep) > 0:
+        self.con.sql(f"CREATE TABLE feature_constraint AS {query}")
+
+        count = self.con.sql("SELECT COUNT(*) FROM feature_constraint").fetchone()[0]
+        if count > 0:
             self.constrain_features = True
 
     def _init(self):
-        self._feature_filters()
         self._load_db()
 
     def _load_db(self):
@@ -86,22 +132,16 @@ class View:
 
         # constrain the metadata before any feature filtering as the unfocused
         # monte carlo curve assumes access to _any_ sample with _any_ coverage
-        md_df = self.sample_metadata  # noqa: F841
+        metadata = self._read_tsv(
+            self.sample_metadata, [COLUMN_SAMPLE_ID], all_varchar=True
+        )
         self.con.sql(f"""CREATE TABLE metadata AS
                          SELECT md.*
-                         FROM md_df md
+                         FROM ({metadata}) md
                              SEMI JOIN '{coverage}' cov
                                  ON md.{COLUMN_SAMPLE_ID}=cov.{COLUMN_SAMPLE_ID}""")
 
-        feat_df = self.features_to_keep
-        if feat_df is None:
-            self.con.sql(f"""CREATE TABLE feature_constraint AS
-                             SELECT DISTINCT {COLUMN_GENOME_ID},
-                                    NULL AS {COLUMN_START},
-                                    NULL AS {COLUMN_STOP}
-                             FROM '{coverage}'""")
-        else:
-            self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
+        self._feature_filters()
 
         # views are "free". Let's establish a common reference point for unmodified
         # position data'
@@ -128,36 +168,76 @@ class View:
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
 
-            # pull the new position data, compress, and reconstruct the view
-            # we "wrap" a table so "positions" is a consistent entity in the database
-            # TODO: replace with duckdb native per sample compression
-            #   Do we stream to parquet? this could be large
-            positions_df = self.con.sql(f"""SELECT * FROM positions
-                                            ORDER BY {COLUMN_SAMPLE_ID},
-                                                     {COLUMN_GENOME_ID},
-                                                     {COLUMN_START}""").pl()
+            # clipping to the region bounds can leave overlapping intervals, so
+            # re-compress per sample. We "wrap" a table so "positions" is a
+            # consistent entity in the database.
+            #
+            # Gaps-and-islands: an interval opens a new island only when it
+            # starts strictly beyond every stop seen so far in its partition.
+            # `>` rather than `>=` is what merges *touching* intervals --
+            # [400,500) and [500,505) become [400,505) -- which is micov's
+            # documented behaviour and is pinned by test_cov.py.
+            self.con.sql(f"""CREATE TABLE recompressed_positions AS
+                WITH ordered AS (
+                    SELECT {COLUMN_SAMPLE_ID}, {COLUMN_GENOME_ID},
+                           {COLUMN_START}, {COLUMN_STOP},
+                           MAX({COLUMN_STOP}) OVER (
+                               PARTITION BY {COLUMN_SAMPLE_ID}, {COLUMN_GENOME_ID}
+                               ORDER BY {COLUMN_START}, {COLUMN_STOP}
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                           ) AS prior_stop
+                    FROM positions
+                ),
+                islands AS (
+                    SELECT *,
+                           SUM(CASE
+                                   WHEN prior_stop IS NULL
+                                        OR {COLUMN_START} > prior_stop
+                                   THEN 1 ELSE 0
+                               END) OVER (
+                               PARTITION BY {COLUMN_SAMPLE_ID}, {COLUMN_GENOME_ID}
+                               ORDER BY {COLUMN_START}, {COLUMN_STOP}
+                               ROWS UNBOUNDED PRECEDING
+                           ) AS island
+                    FROM ordered
+                )
+                SELECT {COLUMN_GENOME_ID},
+                       MIN({COLUMN_START})::UINTEGER AS {COLUMN_START},
+                       MAX({COLUMN_STOP})::UINTEGER AS {COLUMN_STOP},
+                       {COLUMN_SAMPLE_ID}
+                FROM islands
+                GROUP BY {COLUMN_SAMPLE_ID}, {COLUMN_GENOME_ID}, island""")
 
-            if len(positions_df) == 0:
+            empty = self.con.sql(
+                "SELECT COUNT(*) FROM recompressed_positions"
+            ).fetchone()[0]
+            if empty == 0:
                 msg = "No positions left after filtering."
                 raise ValueError(msg)
 
-            positions_df = compress_per_sample(positions_df)
-            self.con.sql("CREATE TABLE recompressed_positions AS FROM positions_df")
             self.con.sql("""CREATE OR REPLACE VIEW positions AS
                             SELECT * FROM recompressed_positions""")
 
-            # obtain the length of the constrained regions for computing coverage
-            # percent
-            diff = pl.col(COLUMN_STOP) - pl.col(COLUMN_START)
-            lengths = (
-                self.features_to_keep.lazy()
-                .with_columns(diff.cast(COLUMN_LENGTH_DTYPE).alias(COLUMN_LENGTH))
-                .drop([COLUMN_START, COLUMN_STOP])
-                .collect()
-            )
-
-            coverage_df = coverage_percent_per_sample(positions_df, lengths)  # noqa: F841
-            self.con.sql("CREATE TABLE recomputed_coverage AS FROM coverage_df")
+            # breadth against the *region* length rather than the genome length.
+            # Every genome reaching this point came through the join against
+            # feature_constraint above, so the inner join cannot drop one --
+            # which is why there is no "unrepresented genome" check here.
+            self.con.sql(f"""CREATE TABLE recomputed_coverage AS
+                SELECT pos.{COLUMN_GENOME_ID},
+                       SUM(pos.{COLUMN_STOP} - pos.{COLUMN_START})::UINTEGER
+                           AS {COLUMN_COVERED},
+                       fc.{COLUMN_LENGTH},
+                       (SUM(pos.{COLUMN_STOP} - pos.{COLUMN_START})
+                        / fc.{COLUMN_LENGTH}) * 100 AS {COLUMN_PERCENT_COVERED},
+                       pos.{COLUMN_SAMPLE_ID}
+                FROM recompressed_positions pos
+                    JOIN (SELECT {COLUMN_GENOME_ID},
+                                 ({COLUMN_STOP} - {COLUMN_START})::UINTEGER
+                                     AS {COLUMN_LENGTH}
+                          FROM feature_constraint) fc
+                        USING ({COLUMN_GENOME_ID})
+                GROUP BY pos.{COLUMN_SAMPLE_ID}, pos.{COLUMN_GENOME_ID},
+                         fc.{COLUMN_LENGTH}""")
             self.con.sql("""CREATE OR REPLACE VIEW coverage AS
                             SELECT * FROM recomputed_coverage""")
 
@@ -269,9 +349,8 @@ class View:
 
     def coverages(self):
         schema = self.con.sql(f"""DESCRIBE SELECT {COLUMN_COVERED}, {COLUMN_LENGTH}
-                                  FROM coverage""").pl()
-        schema = schema.filter(pl.col("column_type") == "BIGINT")
-        if len(schema) > 0:
+                                  FROM coverage""").fetchall()
+        if any(column_type == "BIGINT" for _, column_type, *_ in schema):
             # old files used int64
             # UINTEGER is UInt32
             # TODO: guarentee we are consistent with _constansts.py
@@ -285,9 +364,8 @@ class View:
 
     def positions(self):
         schema = self.con.sql(f"""DESCRIBE SELECT {COLUMN_START}, {COLUMN_STOP}
-                                  FROM positions""").pl()
-        schema = schema.filter(pl.col("column_type") == "BIGINT")
-        if len(schema) > 0:
+                                  FROM positions""").fetchall()
+        if any(column_type == "BIGINT" for _, column_type, *_ in schema):
             # old files used int64
             # UINTEGER is UInt32
             # TODO: guarentee we are consistent with _constansts.py
@@ -300,19 +378,30 @@ class View:
             return self.con.sql("SELECT * from positions")
 
     def feature_names(self):
-        if self.feature_names_df is None:
+        if self.feature_names_source is None:
             return self.con.sql(f"""
                 SELECT DISTINCT {COLUMN_GENOME_ID}, {COLUMN_GENOME_ID} AS {COLUMN_NAME}
                 FROM feature_metadata
             """)
         else:
-            feature_names = self.feature_names_df  # noqa
+            names = self._read_tsv(
+                self.feature_names_source, [COLUMN_GENOME_ID, COLUMN_NAME]
+            )
+            # A name that looks like a lineage keeps only its last element.
+            # '^.*; ' is greedy, so it consumes through the *final* delimiter
+            # and leaves a plain name untouched -- both cases in one pass.
+            names = (
+                f"SELECT {COLUMN_GENOME_ID}, "
+                f"regexp_replace(regexp_replace({COLUMN_NAME}, '^.*; ', ''), "
+                r"'[ \[\]]', '_', 'g')"
+                f" AS {COLUMN_NAME} FROM ({names})"
+            )
             return self.con.sql(f"""
                 SELECT DISTINCT
                     fm.{COLUMN_GENOME_ID},
                     COALESCE(fn.{COLUMN_NAME}, fm.{COLUMN_GENOME_ID}) AS {COLUMN_NAME}
                 FROM feature_metadata fm
-                LEFT JOIN feature_names fn
+                LEFT JOIN ({names}) fn
                     USING ({COLUMN_GENOME_ID})""")
 
     def sample_presence_absence(self):
@@ -339,79 +428,46 @@ class View:
         """)
 
         self.con.sql(f"""
-            -- extract the samples which are "present" and "absent" and the
-            -- regions they are present -- in. Note that a sample is present in a
-            -- region if it has coverage in that -- region. It is considered absent
-            -- if it nas nonzero coverage for the genome -- AND lacks coverage
-            -- within the focus region.
+            -- One row per sample, one column per region. A sample is present in
+            -- a region if it has coverage there; absent if it has coverage of
+            -- the genome but none within the region; and not applicable if it
+            -- has no coverage of that genome at all -- the last of which shows
+            -- up as a sample/region pair that never reached has_region, so the
+            -- PIVOT leaves a NULL for COALESCE to fill.
+
+            -- A sample can be both present and absent in one region, via two
+            -- intervals of which only one overlaps. BOOL_OR resolves that to
+            -- present, matching the precedence the previous implementation got
+            -- from coalescing the present column first.
 
             -- n.b. we have to materialize as pivot elements cannot be used in views
             -- without explicilty naming the columns. Since we do not know the regions
             -- in advance, we cannot readily define the columns. As far as I know,
             -- the only way would be a clunky dynamic SQL query.
-            CREATE OR REPLACE TABLE present AS (
+            CREATE OR REPLACE TABLE sample_presence_absence AS (
                 SELECT
                     {COLUMN_SAMPLE_ID},
-                    CASE
-                        WHEN COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}) > 0
-                        THEN '{PRESENT}'
-                        ELSE NULL
-                    END
-                FROM (PIVOT (SELECT * EXCLUDE (painfo)
-                             FROM has_region
-                             WHERE painfo='{PRESENT}')
-                      ON {COLUMN_REGION_ID})
-            );
-            CREATE OR REPLACE TABLE absent AS (
-                SELECT
-                    {COLUMN_SAMPLE_ID},
-                    CASE
-                        WHEN COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}) > 0
-                        THEN '{ABSENT}'
-                        ELSE NULL
-                    END
-                FROM (PIVOT (SELECT * EXCLUDE (painfo)
-                             FROM has_region
-                             WHERE painfo='{ABSENT}')
-                      ON {COLUMN_REGION_ID})
+                    COALESCE(COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}),
+                             '{NOT_APPLICABLE}')
+                FROM (
+                    PIVOT (
+                        SELECT
+                            {COLUMN_SAMPLE_ID},
+                            {COLUMN_REGION_ID},
+                            CASE
+                                WHEN BOOL_OR(painfo = '{PRESENT}')
+                                THEN '{PRESENT}'
+                                ELSE '{ABSENT}'
+                            END AS painfo
+                        FROM has_region
+                        GROUP BY {COLUMN_SAMPLE_ID}, {COLUMN_REGION_ID}
+                    ) ON {COLUMN_REGION_ID} USING FIRST(painfo)
+                )
             );
             """)
 
-        # Joining, coalescing, and filling nulls as far as I could tell requires
-        # clunky dynamic SQL in order to determine the set of columns to
-        # coalesce. It's easy to do within Polars.'
-        present = self.con.sql("SELECT * FROM present").pl()
-        absent = self.con.sql("SELECT * FROM absent").pl()
-
-        # columns in common are ones where there is a mix of samples which are present
-        # and absent
-        common = (set(present.columns) & set(absent.columns)) - {
-            COLUMN_SAMPLE_ID,
-        }
-
-        # when there are duplicates, the left column receives the original name
-        # and the right column is suffixed. The default suffix is "_right".
-        exprs = [pl.coalesce([c, c + "_right"]).alias(c) for c in common]
-
-        # after we coalesce, the right columns are unnecessary
-        drops = [c + "_right" for c in common]
-
-        joined = (  # noqa
-            present.lazy()
-            .join(absent.lazy(), on={COLUMN_SAMPLE_ID}, how="full", coalesce=True)
-            .with_columns(exprs)
-            .drop(drops)
-            .fill_null(pl.lit(NOT_APPLICABLE))
-            .collect()
-        )
-
-        # clean up, and createa an object which can be pulled like the other access
-        # methods of this class.
-        self.con.sql("""
-            DROP VIEW has_region;
-            DROP TABLE present;
-            DROP TABLE absent;
-            CREATE OR REPLACE TABLE sample_presence_absence AS FROM joined;
-            """)
+        # kept in its own call: PIVOT resolves its columns at bind time, and
+        # batching the DROP alongside it makes has_region unresolvable
+        self.con.sql("DROP VIEW has_region")
 
         return self.con.sql("SELECT * FROM sample_presence_absence")

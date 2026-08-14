@@ -118,11 +118,23 @@ class ViewTests(unittest.TestCase):
             schema=[(COLUMN_GENOME_ID, str)],
         )
 
+    def tsv(self, df):
+        """Write a fixture frame out as a TSV and return its path.
+
+        View reads its metadata straight from disk with DuckDB rather than
+        accepting a parsed frame, so fixtures are materialized the same way a
+        user supplies them.
+        """
+        self._tsv_count = getattr(self, "_tsv_count", 0) + 1
+        path = f"{self.d}/fixture{self._tsv_count}.tsv"
+        df.write_csv(path, separator="\t")
+        return path
+
     def tearDown(self):
         shutil.rmtree(self.d)
 
     def test_view_sample_superset(self):
-        v = View(f"{self.d}/{self.name}", self.md, self.feat)
+        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(self.feat))
 
         obs_md = v.metadata().pl()
         obs_cov = v.coverages().pl()
@@ -144,7 +156,7 @@ class ViewTests(unittest.TestCase):
 
     def test_view_sample_subset(self):
         md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3", "S5"]))
-        v = View(f"{self.d}/{self.name}", md, None)
+        v = View(f"{self.d}/{self.name}", self.tsv(md), None)
 
         obs_md = v.metadata().pl()
         obs_cov = v.coverages().pl()
@@ -207,7 +219,7 @@ class ViewTests(unittest.TestCase):
     def test_view_constrain_features(self):
         feat = self.feat.filter(pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5", "G6"]))
 
-        v = View(f"{self.d}/{self.name}", self.md, feat)
+        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
         obs_md = v.metadata().pl()
         obs_cov = v.coverages().pl()
@@ -256,7 +268,7 @@ class ViewTests(unittest.TestCase):
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
             ],
         )
-        v = View(f"{self.d}/{self.name}", self.md, feat)
+        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
         obs_md = v.metadata().pl()
         obs_cov = v.coverages().pl()
@@ -313,7 +325,7 @@ class ViewTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "No positions left"):
-            View(f"{self.d}/{self.name}", self.md, feat)
+            View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
     def test_view_constrain_positions_bounds_simple(self):
         feat = pl.DataFrame(
@@ -325,7 +337,7 @@ class ViewTests(unittest.TestCase):
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
             ],
         )
-        v = View(f"{self.d}/{self.name}", self.md, feat)
+        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
         obs_md = v.metadata().pl()
         obs_cov = v.coverages().pl()
@@ -399,7 +411,7 @@ class ViewTests(unittest.TestCase):
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
             ],
         )
-        v = View(f"{self.d}/{self.name}", self.md, feat)
+        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
         obs_md = v.metadata().pl()
         obs_cov = v.coverages().pl()
@@ -475,7 +487,7 @@ class ViewTests(unittest.TestCase):
         )
 
     def test_sample_presence_absence_no_regions(self):
-        v = View(f"{self.d}/{self.name}", self.md, self.feat)
+        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(self.feat))
         with self.assertRaisesRegex(ValueError, r"^Cannot calculate"):
             v.sample_presence_absence()
 
@@ -495,7 +507,7 @@ class ViewTests(unittest.TestCase):
                 (COLUMN_STOP, COLUMN_STOP_DTYPE),
             ],
         )
-        v = View(f"{self.d}/{self.name}", self.md, feat)
+        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
         obs = v.sample_presence_absence().pl()
         exp = pl.DataFrame(
@@ -535,7 +547,7 @@ class ViewTests(unittest.TestCase):
             ],
         )
         with self.assertRaisesRegex(ValueError, "Region IDs are not unique"):
-            View(f"{self.d}/{self.name}", self.md, feat)
+            View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
     def test_feature_names(self):
         names = pl.DataFrame(
@@ -544,7 +556,12 @@ class ViewTests(unittest.TestCase):
             schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
         )
 
-        v = View(f"{self.d}/{self.name}", self.md, self.feat, names)
+        v = View(
+            f"{self.d}/{self.name}",
+            self.tsv(self.md),
+            self.tsv(self.feat),
+            self.tsv(names),
+        )
         exp = pl.DataFrame(
             [["G1", "foo"], ["G2", "bar"], ["G3", "G3"], ["G4", "G4"], ["G5", "G5"]],
             orient="row",

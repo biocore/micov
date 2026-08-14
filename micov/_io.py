@@ -320,6 +320,46 @@ def parse_genome_lengths(lengths):
     return df[[genome_id_col, length_col]].rename(rename)
 
 
+def load_genome_lengths(con, lengths):
+    """Load a TSV of feature and length information into DuckDB.
+
+    The SQL twin of `parse_genome_lengths`, which callers still working in
+    polars continue to use. Validation and its messages are deliberately
+    identical, so either path rejects the same file the same way; the two
+    converge into one when the last polars consumer moves to SQL.
+    """
+    with open(lengths) as fp:
+        first_line = fp.readline()
+
+    header = "true" if _test_has_header(first_line) else "false"
+    source = f"read_csv('{lengths}', delim='\t', header={header})"
+
+    # the columns are identified by position, so report problems using
+    # whatever the file happened to call them
+    described = con.sql(f"DESCRIBE FROM {source}").fetchall()
+    genome_id_col, length_col = described[0][0], described[1][0]
+
+    if "INT" not in described[1][1]:
+        raise ValueError(f"'{length_col}' is not integer'")
+
+    con.sql(f"""CREATE TABLE genome_lengths AS
+                SELECT "{genome_id_col}" AS {COLUMN_GENOME_ID},
+                       "{length_col}" AS {COLUMN_LENGTH}
+                FROM {source}""")
+
+    distinct, total, smallest = con.sql(f"""
+        SELECT COUNT(DISTINCT {COLUMN_GENOME_ID}),
+               COUNT({COLUMN_GENOME_ID}),
+               MIN({COLUMN_LENGTH})
+        FROM genome_lengths""").fetchone()
+
+    if distinct != total:
+        raise ValueError(f"'{genome_id_col}' is not unique")
+
+    if smallest <= 0:
+        raise ValueError("Lengths of zero or less cannot be used")
+
+
 def parse_taxonomy(taxonomy):
     """Parse a TSV representing feature and taxonomy information."""
     with open(taxonomy) as fp:

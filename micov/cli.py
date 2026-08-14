@@ -19,12 +19,10 @@ from ._io import (
     _first_col_as_set,
     _single_df,
     compress_from_stream,
+    load_genome_lengths,
     parse_bed_cov_to_df,
-    parse_feature_names,
-    parse_features_to_keep,
     parse_genome_lengths,
     parse_qiita_coverages,
-    parse_sample_metadata,
     parse_taxonomy,
     set_taxonomy_as_id,
     write_qiita_cov,
@@ -300,13 +298,11 @@ def qiita_to_parquet(
 @click.option("--threads", type=int, default=4, required=False)
 def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
     """Aggregate BED3 files to parquet."""
-    lengths = parse_genome_lengths(lengths)
-
     columns = "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', 'stop': 'UINTEGER'}"
     # TODO: use a connection, passparams in as config dict
     duckdb.sql(f"SET memory_limit TO '{memory}'")
     duckdb.sql(f"SET threads TO {threads}")
-    duckdb.sql("CREATE TABLE genome_lengths AS FROM lengths")
+    load_genome_lengths(duckdb, lengths)
 
     # stream the .cov or .cov.gz files into parquet. Extract the name of the
     # file, without the extension, and store as the sample_id
@@ -429,14 +425,11 @@ def per_sample_group(
     percentile,
 ):
     """Generate sample group plots and coverage data."""
-    metadata_pl = parse_sample_metadata(sample_metadata)
-    features_pl = parse_features_to_keep(features_to_keep)
-    names_pl = parse_feature_names(target_names)
     view = View(
         parquet_coverage,
-        metadata_pl,
-        features_pl,
-        names_pl,
+        sample_metadata,
+        features_to_keep,
+        target_names,
         threads=threads,
         memory=memory,
     )
@@ -502,10 +495,12 @@ def binning(
     threads,
 ):
     """Bin genome positions and quantify read and sample hits across bins."""
-    metadata_pl = parse_sample_metadata(sample_metadata)
-    features_pl = parse_features_to_keep(features_to_keep)
     view = View(
-        parquet_coverage, metadata_pl, features_pl, threads=threads, memory=memory
+        parquet_coverage,
+        sample_metadata,
+        features_to_keep,
+        threads=threads,
+        memory=memory,
     )
 
     all_covered_positions = view.positions()
@@ -586,15 +581,15 @@ def extract_sample_presence(
     threads,
 ):
     """Extract variables for each described feature to keep region."""
-    metadata_pl = parse_sample_metadata(sample_metadata)
-    features_pl = parse_features_to_keep(features_to_keep)
     view = View(
-        parquet_coverage, metadata_pl, features_pl, threads=threads, memory=memory
+        parquet_coverage,
+        sample_metadata,
+        features_to_keep,
+        threads=threads,
+        memory=memory,
     )
 
-    view.sample_presence_absence().pl().write_csv(
-        output, separator="\t", include_header=True
-    )
+    view.sample_presence_absence().write_csv(output, sep="\t", header=True)
 
 
 if __name__ == "__main__":
