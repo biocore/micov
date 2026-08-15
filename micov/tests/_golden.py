@@ -69,6 +69,24 @@ Sources of nondeterminism
    Corroboration that this was known but never written down: ``cli_test.sh``
    already pipes both sides through ``sort``.
 
+9. Summation order inside a standard deviation -- ``sample_hits_std`` in
+   ``stats_by_variance_of_sample_hits.tsv``
+   Added 2026-08-14 while moving binning into SQL. polars' ``std()`` cannot be
+   reproduced bit-for-bit outside polars: over 18 hand-checked cases it matches
+   neither ``numpy.std(ddof=1)``, DuckDB's ``stddev_samp``, sum-of-squares,
+   mean-corrected sum-of-squares, two-pass, nor Welford -- and on ``[2, 3, 3]``
+   *none* of the six agree with it. It looks like a chunked SIMD reduction,
+   whose summation order no SQL expression fixes.
+   Measured against the committed golden: 103 of 1999 rows differ, by at most
+   **3 ULP** (5.8e-16 relative), in *both* directions -- the same golden value
+   drifts up in one row and down in another, which is the signature of float
+   noise rather than a systematic change. Every ranking swap it causes is
+   between bins whose golden values differ by <= 8.9e-16, in a column whose
+   largest value is 6.8.
+   => Compare that one column with a tight relative tolerance
+      (``TSV_FLOAT_REL_TOL``, ~20x looser than the observed drift and far
+      tighter than any real defect) and every other column exactly.
+
 Two traps: outputs that matched by luck
 ---------------------------------------
 
@@ -119,6 +137,7 @@ bisecting a migration milestone.
 
 import csv
 import gzip
+import math
 import tarfile
 from collections import Counter
 from pathlib import Path
@@ -132,6 +151,11 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MONTE_LABEL_PREFIX = "Monte Carlo "
 
 KS_COLUMNS = ("label_A", "label_B", "ks-statistic", "ks-pvalue")
+
+#: Relative tolerance for TSV columns whose summation order is not
+#: reproducible (source #9). The measured drift is 5.8e-16; this is ~20x
+#: looser, and still orders of magnitude tighter than any real defect.
+TSV_FLOAT_REL_TOL = 1e-14
 
 
 def _require_file(path, role):
@@ -331,16 +355,23 @@ def _read_tsv(path):
     return lines[0], lines[1:]
 
 
-def assert_tsv_equal_unordered(observed, expected, sort_keys):
+def assert_tsv_equal_unordered(observed, expected, sort_keys, float_columns=()):
     """Assert two TSVs match after normalizing row order.
 
     Binning outputs order tie blocks arbitrarily (source #5) and genome
     blocks by set iteration (source #7), so rows are sorted by
-    `sort_keys` -- then by the whole line, to make the order total -- before
-    comparing. Values are still compared exactly.
+    `sort_keys` -- then by their remaining fields, to make the order total --
+    before comparing. Values are then compared exactly.
 
-    An unknown name in `sort_keys` raises rather than silently degrading to
-    an unsorted comparison, which would reintroduce the flakiness.
+    `float_columns` names columns to compare with `TSV_FLOAT_REL_TOL` instead,
+    for values whose summation order is not reproducible (source #9). Those
+    columns are excluded from the sort tie-break too, so a drifted value can
+    never pair two different rows against each other. Every column not named
+    stays exact.
+
+    An unknown name in `sort_keys` or `float_columns` raises rather than
+    silently degrading to an unsorted or unchecked comparison, which would
+    reintroduce the flakiness this exists to prevent.
     """
     observed = _require_file(observed, "observed")
     expected = _require_file(expected, "expected golden")
@@ -355,16 +386,23 @@ def assert_tsv_equal_unordered(observed, expected, sort_keys):
         )
 
     columns = got_header.split("\t")
-    missing = [key for key in sort_keys if key not in columns]
+    missing = [
+        key for key in (*sort_keys, *float_columns) if key not in columns
+    ]
     if missing:
         raise AssertionError(
-            f"sort_keys not present in header: {missing}\n  columns: {columns}"
+            f"column names not present in header: {missing}\n  columns: {columns}"
         )
     indices = [columns.index(key) for key in sort_keys]
+    approximate = {columns.index(key) for key in float_columns}
+    exact = [i for i in range(len(columns)) if i not in approximate]
 
     def canonical(line):
         fields = line.split("\t")
-        return (tuple(fields[i] for i in indices), line)
+        return (
+            tuple(fields[i] for i in indices),
+            tuple(fields[i] for i in exact),
+        )
 
     if len(got_body) != len(want_body):
         raise AssertionError(
@@ -375,15 +413,49 @@ def assert_tsv_equal_unordered(observed, expected, sort_keys):
 
     got_sorted = sorted(got_body, key=canonical)
     want_sorted = sorted(want_body, key=canonical)
-    if got_sorted != want_sorted:
-        diff = _first_difference(got_sorted, want_sorted)
-        i, g, w = diff
-        raise AssertionError(
-            f"TSV rows differ after sorting by {list(sort_keys)}\n"
-            f"  observed: {observed}\n  expected: {expected}\n"
-            f"  first difference at sorted row {i + 1}:\n"
-            f"    observed: {g!r}\n    expected: {w!r}"
-        )
+
+    for row, (got_line, want_line) in enumerate(
+        zip(got_sorted, want_sorted, strict=True)
+    ):
+        if got_line == want_line:
+            continue
+
+        got_fields = got_line.split("\t")
+        want_fields = want_line.split("\t")
+        reason = None
+        if len(got_fields) != len(want_fields):
+            reason = "field count differs"
+        else:
+            for i, (got_field, want_field) in enumerate(
+                zip(got_fields, want_fields, strict=True)
+            ):
+                if got_field == want_field:
+                    continue
+                if i not in approximate:
+                    reason = f"{columns[i]!r} differs"
+                    break
+                try:
+                    close = math.isclose(
+                        float(got_field), float(want_field),
+                        rel_tol=TSV_FLOAT_REL_TOL, abs_tol=TSV_FLOAT_REL_TOL,
+                    )
+                except ValueError:
+                    reason = f"{columns[i]!r} is not numeric"
+                    break
+                if not close:
+                    reason = (
+                        f"{columns[i]!r} differs by more than "
+                        f"{TSV_FLOAT_REL_TOL:g} relative"
+                    )
+                    break
+
+        if reason is not None:
+            raise AssertionError(
+                f"TSV rows differ after sorting by {list(sort_keys)}: {reason}\n"
+                f"  observed: {observed}\n  expected: {expected}\n"
+                f"  first difference at sorted row {row + 1}:\n"
+                f"    observed: {got_line!r}\n    expected: {want_line!r}"
+            )
 
 
 def _is_monte(row):

@@ -749,10 +749,14 @@ class TestBinningFullCorpus(MicovCliTestCase):
             EXAMPLE / "binning" / "stats_bins.tsv",
             sort_keys=BIN_STATS_KEYS,
         )
+        # sample_hits_std alone is approximate: a standard deviation's
+        # summation order is not reproducible outside polars (source #9).
+        # Every other column, including the bin bounds, stays exact.
         assert_tsv_equal_unordered(
             outdir / "stats_by_variance_of_sample_hits.tsv",
             EXAMPLE / "binning" / "stats_by_variance_of_sample_hits.tsv",
             sort_keys=BIN_VARIANCE_KEYS,
+            float_columns=("sample_hits_std",),
         )
 
 

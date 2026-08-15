@@ -6,12 +6,13 @@ from glob import glob
 
 import click
 import duckdb
-import polars as pl
 
 from ._constants import (
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
     COLUMN_SAMPLE_ID,
+    COLUMN_START,
+    COLUMN_STOP,
 )
 from ._cov import coverage_percent
 from ._io import (
@@ -29,7 +30,7 @@ from ._io import (
 )
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
-from ._quant import make_csv_ready, pos_to_bins
+from ._quant import pos_to_bins
 from ._utils import logger
 from ._view import View
 
@@ -503,45 +504,41 @@ def binning(
         memory=memory,
     )
 
-    all_covered_positions = view.positions()
-    metadata = view.metadata().select(COLUMN_SAMPLE_ID, metadata_variable)
-    feature_metadata = view.feature_metadata().select(COLUMN_GENOME_ID, COLUMN_LENGTH)
+    # named views so one statement can reach all three. The accessors, not the
+    # underlying tables, because they carry the dtype normalization for
+    # parquet written by older micov versions.
+    view.positions().create_view("binning_positions", replace=True)
+    view.metadata().create_view("binning_metadata", replace=True)
+    view.feature_metadata().create_view("binning_features", replace=True)
 
-    length_map = dict(feature_metadata.fetchall())
-    genomes = set(length_map)
+    positions = f"""SELECT pos.{COLUMN_GENOME_ID}, pos.{COLUMN_START},
+                           pos.{COLUMN_STOP}, pos.{COLUMN_SAMPLE_ID},
+                           md."{metadata_variable}"
+                    FROM binning_positions pos
+                        JOIN binning_metadata md
+                            USING ({COLUMN_SAMPLE_ID})"""
+    lengths = f"SELECT {COLUMN_GENOME_ID}, {COLUMN_LENGTH} FROM binning_features"
 
-    df_bins_list = []
-    for genome_id in genomes:
-        length = length_map[genome_id]
-        df_pos_md = (
-            all_covered_positions.filter(f"{COLUMN_GENOME_ID} = '{genome_id}'")
-            .join(metadata, COLUMN_SAMPLE_ID)
-            .pl()
-            .lazy()
-        )
-        df_bins = pos_to_bins(df_pos_md, metadata_variable, bin_num, length).collect()
-        df_bins_list.append(df_bins)
+    # materialized because both outputs read it, and re-executing would repeat
+    # the scan of the covered positions
+    view.con.sql(
+        pos_to_bins(positions, lengths, metadata_variable, bin_num)
+    ).create("bin_stats")
+    df_bins = view.con.table("bin_stats")
 
-    df_bins = pl.concat(df_bins_list).lazy()
-    df_bins_by_sample_hits = (
-        df_bins.group_by(COLUMN_GENOME_ID, "bin_idx", "bin_start", "bin_stop")
-        .agg(pl.col("sample_hits").std().alias("sample_hits_std"))
-        .fill_null(0)
-        .sort("sample_hits_std", descending=True)
+    df_bins_by_sample_hits = df_bins.query(
+        "stats",
+        f"""SELECT {COLUMN_GENOME_ID}, bin_idx, bin_start, bin_stop,
+                   COALESCE(stddev_samp(sample_hits), 0) AS sample_hits_std
+            FROM stats
+            GROUP BY {COLUMN_GENOME_ID}, bin_idx, bin_start, bin_stop
+            ORDER BY sample_hits_std DESC""",
     )
 
     os.makedirs(outdir, exist_ok=True)
-    make_csv_ready(df_bins).sink_csv(
-        f"{outdir}/stats_bins.tsv",
-        separator="\t",
-        include_header=True,
-    )
-
-    # it's not obvious but this cannot use sink_csv?'
-    df_bins_by_sample_hits.collect().write_csv(
-        f"{outdir}/stats_by_variance_of_sample_hits.tsv",
-        separator="\t",
-        include_header=True,
+    df_bins.write_csv(f"{outdir}/stats_bins.tsv", sep="\t", header=True)
+    df_bins_by_sample_hits.write_csv(
+        f"{outdir}/stats_by_variance_of_sample_hits.tsv", sep="\t", header=True
     )
 
 

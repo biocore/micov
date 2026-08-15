@@ -283,6 +283,81 @@ class TestAssertTsvEqualUnordered(GoldenSelfTestBase):
             assert_tsv_equal_unordered(a, b, sort_keys=("nope",))
 
 
+class TestAssertTsvFloatTolerance(GoldenSelfTestBase):
+    """`sample_hits_std` drifts a few ULP outside polars (source #9).
+
+    The tolerance has to absorb that and nothing else, so these pin both
+    edges: what it must let through, and what it must still catch.
+    """
+
+    STD = "sample_hits_std"
+
+    def rows(self, last):
+        return [
+            "G000154205\t0\t0\t100\t1.5",
+            "G000154205\t1\t100\t200\t0.5",
+            f"G000154205\t2\t200\t300\t{last}",
+        ]
+
+    def test_ulp_drift_passes(self):
+        # the exact drift measured against the committed binning golden
+        a = self.write("a.tsv", [BIN_HEADER, *self.rows("1.1547005383792515")])
+        b = self.write("b.tsv", [BIN_HEADER, *self.rows("1.1547005383792517")])
+        assert_tsv_equal_unordered(
+            a, b, sort_keys=BIN_KEYS, float_columns=(self.STD,)
+        )
+
+    def test_drift_beyond_tolerance_fails(self):
+        # 1e-12 relative -- far below anything a reader would notice, and
+        # still caught
+        a = self.write("a.tsv", [BIN_HEADER, *self.rows("1.154700538379")])
+        b = self.write("b.tsv", [BIN_HEADER, *self.rows("1.1547005383792517")])
+        with self.assertRaises(AssertionError):
+            assert_tsv_equal_unordered(
+                a, b, sort_keys=BIN_KEYS, float_columns=(self.STD,)
+            )
+
+    def test_exact_columns_still_exact(self):
+        """Naming one column approximate must not relax the others."""
+        a = self.write("a.tsv", [BIN_HEADER, *BIN_ROWS])
+        bad = [BIN_ROWS[0], BIN_ROWS[1], "G000154205\t2\t200\t301\t0.5"]
+        b = self.write("b.tsv", [BIN_HEADER, *bad])
+        with self.assertRaises(AssertionError):
+            assert_tsv_equal_unordered(
+                a, b, sort_keys=BIN_KEYS, float_columns=(self.STD,)
+            )
+
+    def test_tie_block_reordered_still_passes(self):
+        """Drifted values must not pair two different rows against each other.
+
+        Rows 2 and 3 tie on the approximate column, so it is excluded from the
+        sort tie-break; otherwise a drift could align row 2 with row 3.
+        """
+        a = self.write("a.tsv", [BIN_HEADER, *BIN_ROWS])
+        swapped = [BIN_ROWS[0], BIN_ROWS[2], BIN_ROWS[1]]
+        b = self.write("b.tsv", [BIN_HEADER, *swapped])
+        assert_tsv_equal_unordered(
+            a, b, sort_keys=BIN_KEYS, float_columns=(self.STD,)
+        )
+
+    def test_unknown_float_column_fails(self):
+        """A typo must be loud, not a silently exact comparison."""
+        a = self.write("a.tsv", [BIN_HEADER, *BIN_ROWS])
+        b = self.write("b.tsv", [BIN_HEADER, *BIN_ROWS])
+        with self.assertRaises(AssertionError):
+            assert_tsv_equal_unordered(
+                a, b, sort_keys=BIN_KEYS, float_columns=("nope",)
+            )
+
+    def test_non_numeric_in_float_column_fails(self):
+        a = self.write("a.tsv", [BIN_HEADER, *self.rows("0.5")])
+        b = self.write("b.tsv", [BIN_HEADER, *self.rows("nan-ish")])
+        with self.assertRaises(AssertionError):
+            assert_tsv_equal_unordered(
+                a, b, sort_keys=BIN_KEYS, float_columns=(self.STD,)
+            )
+
+
 class TestAssertKsEqual(GoldenSelfTestBase):
     """Monte Carlo rows are unseeded (source #1); the rest are published."""
 
