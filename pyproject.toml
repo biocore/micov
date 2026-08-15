@@ -5,9 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "micov"
 requires-python = ">=3.11"
-# 3.13 is deliberately not claimed: the `pyarrow<16.0.0` pin below caps at
-# pyarrow 15.0.2, which publishes no cp313 wheels, so a 3.13 install would
-# have to build it from source. Revisit once pyarrow is dropped.
+# 3.13 is still not claimed. The blocker used to be `pyarrow<16.0.0`, which
+# capped at 15.0.2 and publishes no cp313 wheels; pyarrow is gone now, but
+# nothing has been run on 3.13, so claiming it would be a guess. Revisit by
+# adding 3.13 to the CI matrix first.
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: Science/Research",
@@ -20,16 +21,23 @@ classifiers = [
 ]
 dynamic = ["version"]
 
-# duckdb < 1.3 as jemalloc fails to compile on (very) old linux systems.
-# no issue yet.
+# The old `duckdb<1.3` ceiling existed because jemalloc failed to compile on
+# very old linux. It is dropped deliberately: duckdb-miint requires >=1.5.4,
+# so the ceiling was unholdable, and those systems need a wheel rather than a
+# pin. Keep this floor in step with ci/conda_requirements.txt -- the two files
+# previously disagreed, which made the conda and pypi CI paths test different
+# duckdb majors.
+#
+# pyarrow was removed here, not merely unpinned. It was never imported by
+# micov; it came in as the polars<->DuckDB handoff, and no such handoff is
+# left. Verified by running the full golden suite with pyarrow uninstalled.
 dependencies = [
     "click",
     "scipy",
-    "pyarrow<16.0.0",
     "polars-u64-idx<1.23.0",
     "numba",
     "matplotlib>=3.9.0",
-    "duckdb (>=1.2.0,<1.3)",
+    "duckdb>=1.5.4",
 ]
 
 readme = "README.md"

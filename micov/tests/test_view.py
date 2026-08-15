@@ -3,7 +3,6 @@ import unittest
 from tempfile import mkdtemp
 
 import polars as pl
-import polars.testing as plt
 
 from micov._constants import (
     ABSENT,
@@ -26,22 +25,74 @@ from micov._constants import (
 )
 from micov._view import View
 
+# The View hands back DuckDB relations, so expectations are plain rows plus the
+# SQL type of each column. The types restate `_constants.py` in DuckDB's terms:
+# UINTEGER is pl.UInt32, DOUBLE is float, VARCHAR is str.
+METADATA_SCHEMA = (
+    (COLUMN_SAMPLE_ID, "VARCHAR"),
+    ("foo", "VARCHAR"),
+)
+COVERAGE_SCHEMA = (
+    (COLUMN_GENOME_ID, "VARCHAR"),
+    (COLUMN_SAMPLE_ID, "VARCHAR"),
+    (COLUMN_COVERED, "UINTEGER"),
+    (COLUMN_LENGTH, "UINTEGER"),
+    (COLUMN_PERCENT_COVERED, "DOUBLE"),
+)
+POSITION_SCHEMA = (
+    (COLUMN_GENOME_ID, "VARCHAR"),
+    (COLUMN_SAMPLE_ID, "VARCHAR"),
+    (COLUMN_START, "UINTEGER"),
+    (COLUMN_STOP, "UINTEGER"),
+)
+FEATURE_METADATA_SCHEMA = (
+    (COLUMN_GENOME_ID, "VARCHAR"),
+    (COLUMN_START, "UINTEGER"),
+    (COLUMN_STOP, "UINTEGER"),
+    (COLUMN_LENGTH, "UINTEGER"),
+    (COLUMN_REGION_ID, "VARCHAR"),
+)
+FEATURE_NAME_SCHEMA = (
+    (COLUMN_GENOME_ID, "VARCHAR"),
+    (COLUMN_NAME, "VARCHAR"),
+)
+
+# the fixture corpus, shared by the parquet writer and the expectations so the
+# two cannot drift apart
+COVERAGE_ROWS = [
+    ("G1", "S1", 8, 100, 8.0),
+    ("G2", "S1", 20, 100, 20.0),
+    ("G3", "S1", 30, 100, 30.0),
+    ("G3", "S2", 11, 100, 11.0),
+    ("G4", "S2", 21, 100, 21.0),
+    ("G2", "S3", 52, 100, 52.0),
+    ("G3", "S3", 62, 100, 62.0),
+    ("G4", "S3", 72, 100, 72.0),
+    ("G5", "S3", 82, 100, 82.0),
+    ("G4", "S1", 20, 100, 20.0),
+]
+POSITION_ROWS = [
+    ("G1", "S1", 1, 5),
+    ("G1", "S1", 6, 10),
+    ("G2", "S1", 30, 50),
+    ("G3", "S1", 15, 30),
+    ("G3", "S1", 75, 90),
+    ("G4", "S1", 5, 15),
+    ("G4", "S1", 45, 55),
+    ("G3", "S2", 1, 11),
+    ("G4", "S2", 30, 51),
+    ("G2", "S3", 1, 52),
+    ("G3", "S3", 1, 62),
+    ("G4", "S3", 8, 13),
+    ("G4", "S3", 20, 87),
+    ("G5", "S3", 10, 92),
+]
+
 
 def make_cov_pos(d, name):
     (
         pl.LazyFrame(
-            [
-                ["G1", "S1", 8, 100, 8.0],
-                ["G2", "S1", 20, 100, 20.0],
-                ["G3", "S1", 30, 100, 30.0],
-                ["G3", "S2", 11, 100, 11.0],
-                ["G4", "S2", 21, 100, 21.0],
-                ["G2", "S3", 52, 100, 52.0],
-                ["G3", "S3", 62, 100, 62.0],
-                ["G4", "S3", 72, 100, 72.0],
-                ["G5", "S3", 82, 100, 82.0],
-                ["G4", "S1", 20, 100, 20.0],
-            ],
+            COVERAGE_ROWS,
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
@@ -55,22 +106,7 @@ def make_cov_pos(d, name):
 
     (
         pl.LazyFrame(
-            [
-                ["G1", "S1", 1, 5],
-                ["G1", "S1", 6, 10],
-                ["G2", "S1", 30, 50],
-                ["G3", "S1", 15, 30],
-                ["G3", "S1", 75, 90],
-                ["G4", "S1", 5, 15],
-                ["G4", "S1", 45, 55],
-                ["G3", "S2", 1, 11],
-                ["G4", "S2", 30, 51],
-                ["G2", "S3", 1, 52],
-                ["G3", "S3", 1, 62],
-                ["G4", "S3", 8, 13],
-                ["G4", "S3", 20, 87],
-                ["G5", "S3", 10, 92],
-            ],
+            POSITION_ROWS,
             orient="row",
             schema=[
                 (COLUMN_GENOME_ID, str),
@@ -80,6 +116,14 @@ def make_cov_pos(d, name):
             ],
         ).sink_parquet(f"{d}/{name}.covered_positions.parquet")
     )
+
+
+def by_sample(rows, samples):
+    return [row for row in rows if row[1] in samples]
+
+
+def by_genome(rows, genomes):
+    return [row for row in rows if row[0] in genomes]
 
 
 class ViewTests(unittest.TestCase):
@@ -94,26 +138,7 @@ class ViewTests(unittest.TestCase):
             schema=[(COLUMN_SAMPLE_ID, str), ("foo", str)],
         )
         self.feat = pl.DataFrame(
-            [
-                [
-                    "G1",
-                ],
-                [
-                    "G2",
-                ],
-                [
-                    "G3",
-                ],
-                [
-                    "G4",
-                ],
-                [
-                    "G5",
-                ],
-                [
-                    "G6",
-                ],
-            ],
+            [["G1"], ["G2"], ["G3"], ["G4"], ["G5"], ["G6"]],
             orient="row",
             schema=[(COLUMN_GENOME_ID, str)],
         )
@@ -133,87 +158,68 @@ class ViewTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.d)
 
+    def assert_relation(self, relation, schema, rows):
+        """Compare a View relation against expected columns, types and rows.
+
+        Column order and row order are both insensitive -- the View's three
+        branches emit the same columns in different orders -- but the column
+        names, their SQL types and the values are all checked. The types carry
+        their own weight: a UINTEGER quietly widening to BIGINT changes a
+        parquet column type, which is a frozen output contract, and is
+        invisible in the values.
+
+        `schema` fixes the order `rows` are written in, so the expectations do
+        not have to track whichever order the relation happens to use.
+        """
+        columns = list(relation.columns)
+        observed_schema = dict(
+            zip(columns, (str(t) for t in relation.types), strict=True)
+        )
+        self.assertEqual(observed_schema, dict(schema))
+
+        order = [columns.index(name) for name, _ in schema]
+        observed = sorted(tuple(row[i] for i in order) for row in relation.fetchall())
+        self.assertEqual(observed, sorted(rows))
+
     def test_view_sample_superset(self):
         v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(self.feat))
 
-        obs_md = v.metadata().pl()
-        obs_cov = v.coverages().pl()
-        obs_pos = v.positions().pl()
-
-        exp_md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S2", "S3"]))
-        exp_cov = pl.read_parquet(f"{self.d}/{self.name}.coverage.parquet")
-        exp_pos = pl.read_parquet(f"{self.d}/{self.name}.covered_positions.parquet")
-
-        plt.assert_frame_equal(
-            obs_md, exp_md, check_column_order=False, check_row_order=False
+        # S4 and S5 have no coverage, so they drop out of the metadata
+        self.assert_relation(
+            v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
         )
-        plt.assert_frame_equal(
-            obs_cov, exp_cov, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_pos, exp_pos, check_column_order=False, check_row_order=False
-        )
+        self.assert_relation(v.coverages(), COVERAGE_SCHEMA, COVERAGE_ROWS)
+        self.assert_relation(v.positions(), POSITION_SCHEMA, POSITION_ROWS)
 
     def test_view_sample_subset(self):
         md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3", "S5"]))
         v = View(f"{self.d}/{self.name}", self.tsv(md), None)
 
-        obs_md = v.metadata().pl()
-        obs_cov = v.coverages().pl()
-        obs_pos = v.positions().pl()
-        obs_fmd = v.feature_metadata().pl()
-        obs_fn = v.feature_names().pl()
-
-        exp_md = md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3"]))
-        exp_cov = pl.read_parquet(f"{self.d}/{self.name}.coverage.parquet").filter(
-            pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3"])
+        kept = ("S1", "S3")
+        self.assert_relation(
+            v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S3", "c")]
         )
-        exp_pos = pl.read_parquet(
-            f"{self.d}/{self.name}.covered_positions.parquet"
-        ).filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3"]))
-        exp_fmd = pl.DataFrame(
+        self.assert_relation(
+            v.coverages(), COVERAGE_SCHEMA, by_sample(COVERAGE_ROWS, kept)
+        )
+        self.assert_relation(
+            v.positions(), POSITION_SCHEMA, by_sample(POSITION_ROWS, kept)
+        )
+        self.assert_relation(
+            v.feature_metadata(),
+            FEATURE_METADATA_SCHEMA,
             [
-                ["G1", 0, 100, 100, "G1_0_100"],
-                ["G2", 0, 100, 100, "G2_0_100"],
-                ["G3", 0, 100, 100, "G3_0_100"],
-                ["G4", 0, 100, 100, "G4_0_100"],
-                ["G5", 0, 100, 100, "G5_0_100"],
-            ],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-                (COLUMN_REGION_ID, str),
+                ("G1", 0, 100, 100, "G1_0_100"),
+                ("G2", 0, 100, 100, "G2_0_100"),
+                ("G3", 0, 100, 100, "G3_0_100"),
+                ("G4", 0, 100, 100, "G4_0_100"),
+                ("G5", 0, 100, 100, "G5_0_100"),
             ],
         )
-        exp_fn = pl.DataFrame(
-            [
-                ["G1", "G1"],
-                ["G2", "G2"],
-                ["G3", "G3"],
-                ["G4", "G4"],
-                ["G5", "G5"],
-            ],
-            orient="row",
-            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
-        )
-
-        plt.assert_frame_equal(
-            obs_md, exp_md, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_cov, exp_cov, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_pos, exp_pos, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_fn, exp_fn, check_column_order=False, check_row_order=False
+        self.assert_relation(
+            v.feature_names(),
+            FEATURE_NAME_SCHEMA,
+            [("G1", "G1"), ("G2", "G2"), ("G3", "G3"), ("G4", "G4"), ("G5", "G5")],
         )
 
     def test_view_constrain_features(self):
@@ -221,41 +227,21 @@ class ViewTests(unittest.TestCase):
 
         v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
-        obs_md = v.metadata().pl()
-        obs_cov = v.coverages().pl()
-        obs_pos = v.positions().pl()
-        obs_fmd = v.feature_metadata().pl()
-
-        exp_md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S2", "S3"]))
-        exp_cov = pl.read_parquet(f"{self.d}/{self.name}.coverage.parquet").filter(
-            pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5"])
+        # G6 is requested but has no coverage, so it never appears
+        kept = ("G1", "G5")
+        self.assert_relation(
+            v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
         )
-        exp_pos = pl.read_parquet(
-            f"{self.d}/{self.name}.covered_positions.parquet"
-        ).filter(pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5"]))
-        exp_fmd = pl.DataFrame(
-            [["G1", 0, 100, 100, "G1_0_100"], ["G5", 0, 100, 100, "G5_0_100"]],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-                (COLUMN_REGION_ID, str),
-            ],
+        self.assert_relation(
+            v.coverages(), COVERAGE_SCHEMA, by_genome(COVERAGE_ROWS, kept)
         )
-
-        plt.assert_frame_equal(
-            obs_md, exp_md, check_column_order=False, check_row_order=False
+        self.assert_relation(
+            v.positions(), POSITION_SCHEMA, by_genome(POSITION_ROWS, kept)
         )
-        plt.assert_frame_equal(
-            obs_cov, exp_cov, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_pos, exp_pos, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
+        self.assert_relation(
+            v.feature_metadata(),
+            FEATURE_METADATA_SCHEMA,
+            [("G1", 0, 100, 100, "G1_0_100"), ("G5", 0, 100, 100, "G5_0_100")],
         )
 
     def test_view_constrain_positions_full(self):
@@ -270,47 +256,35 @@ class ViewTests(unittest.TestCase):
         )
         v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
-        obs_md = v.metadata().pl()
-        obs_cov = v.coverages().pl()
-        obs_pos = v.positions().pl()
-        obs_fmd = v.feature_metadata().pl()
-
-        exp_md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S2", "S3"]))
-        exp_cov = (
-            pl.read_parquet(f"{self.d}/{self.name}.coverage.parquet")
-            .filter(pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5"]))
-            .with_columns(
-                pl.col(COLUMN_LENGTH) * 10, pl.col(COLUMN_PERCENT_COVERED) / 10
-            )
+        self.assert_relation(
+            v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
         )
-        exp_pos = pl.read_parquet(
-            f"{self.d}/{self.name}.covered_positions.parquet"
-        ).filter(pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5"]))
-
-        # the user is requesting a stop position outside of the size the genome but ok?
-        exp_fmd = pl.DataFrame(
-            [["G1", 0, 1000, 1000, "G1_0_1000"], ["G5", 0, 1000, 1000, "G5_0_1000"]],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-                (COLUMN_REGION_ID, str),
+        # breadth is unchanged but is now against the 1000bp region rather than
+        # the 100bp genome, so every percent drops by a factor of ten.
+        #
+        # 8.200000000000001, not 8.2: the percent is `(covered / length) * 100`
+        # and (82 / 1000) * 100 is not exactly 8.2 in a double. The literal is
+        # deliberate -- it pins the order of operations, so reassociating to
+        # `covered * 100 / length` would be caught rather than tolerated.
+        self.assert_relation(
+            v.coverages(),
+            COVERAGE_SCHEMA,
+            [
+                ("G1", "S1", 8, 1000, 0.8),
+                ("G5", "S3", 82, 1000, 8.200000000000001),
             ],
         )
-
-        plt.assert_frame_equal(
-            obs_md, exp_md, check_column_order=False, check_row_order=False
+        self.assert_relation(
+            v.positions(), POSITION_SCHEMA, by_genome(POSITION_ROWS, ("G1", "G5"))
         )
-        plt.assert_frame_equal(
-            obs_cov, exp_cov, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_pos, exp_pos, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
+        # the user is requesting a stop position outside of the size the genome but ok?
+        self.assert_relation(
+            v.feature_metadata(),
+            FEATURE_METADATA_SCHEMA,
+            [
+                ("G1", 0, 1000, 1000, "G1_0_1000"),
+                ("G5", 0, 1000, 1000, "G5_0_1000"),
+            ],
         )
 
     def test_view_constrain_positions_none(self):
@@ -339,60 +313,26 @@ class ViewTests(unittest.TestCase):
         )
         v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
-        obs_md = v.metadata().pl()
-        obs_cov = v.coverages().pl()
-        obs_pos = v.positions().pl()
-        obs_fmd = v.feature_metadata().pl()
-
-        exp_md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S2", "S3"]))
-
-        exp_cov = pl.DataFrame(
-            [["G1", "S1", 2, 2, 100.0], ["G5", "S3", 10, 20, 50.0]],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_SAMPLE_ID, str),
-                (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
-                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-                (COLUMN_PERCENT_COVERED, COLUMN_PERCENT_COVERED_DTYPE),
-            ],
+        self.assert_relation(
+            v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
+        )
+        self.assert_relation(
+            v.coverages(),
+            COVERAGE_SCHEMA,
+            [("G1", "S1", 2, 2, 100.0), ("G5", "S3", 10, 20, 50.0)],
         )
         # both start and stop are clipped for G1/S1
         # left bound of G5/S3 is outside of its interval so verify the correct
         # start is retained
-        exp_pos = pl.DataFrame(
-            [["G1", "S1", 7, 9], ["G5", "S3", 10, 20]],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_SAMPLE_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-            ],
+        self.assert_relation(
+            v.positions(),
+            POSITION_SCHEMA,
+            [("G1", "S1", 7, 9), ("G5", "S3", 10, 20)],
         )
-        exp_fmd = pl.DataFrame(
-            [["G1", 7, 9, 2, "G1_7_9"], ["G5", 0, 20, 20, "G5_0_20"]],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-                (COLUMN_REGION_ID, str),
-            ],
-        )
-
-        plt.assert_frame_equal(
-            obs_md, exp_md, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_cov, exp_cov, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_pos, exp_pos, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
+        self.assert_relation(
+            v.feature_metadata(),
+            FEATURE_METADATA_SCHEMA,
+            [("G1", 7, 9, 2, "G1_7_9"), ("G5", 0, 20, 20, "G5_0_20")],
         )
 
     def test_view_constrain_positions_bounds_complex(self):
@@ -413,77 +353,42 @@ class ViewTests(unittest.TestCase):
         )
         v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
-        obs_md = v.metadata().pl()
-        obs_cov = v.coverages().pl()
-        obs_pos = v.positions().pl()
-        obs_fmd = v.feature_metadata().pl()
-
-        exp_md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S2", "S3"]))
-
-        exp_cov = pl.DataFrame(
+        self.assert_relation(
+            v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
+        )
+        self.assert_relation(
+            v.coverages(),
+            COVERAGE_SCHEMA,
             [
-                ["G1", "S1", 8, 100, 8.0],
-                ["G2", "S1", 10, 20, 50.0],
-                ["G2", "S3", 12, 20, 60.0],
-                ["G3", "S3", 20, 20, 100.0],
-                ["G5", "S3", 20, 20, 100.0],
-            ],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_SAMPLE_ID, str),
-                (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
-                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-                (COLUMN_PERCENT_COVERED, COLUMN_PERCENT_COVERED_DTYPE),
+                ("G1", "S1", 8, 100, 8.0),
+                ("G2", "S1", 10, 20, 50.0),
+                ("G2", "S3", 12, 20, 60.0),
+                ("G3", "S3", 20, 20, 100.0),
+                ("G5", "S3", 20, 20, 100.0),
             ],
         )
-
-        exp_pos = pl.DataFrame(
+        self.assert_relation(
+            v.positions(),
+            POSITION_SCHEMA,
             [
-                ["G1", "S1", 1, 5],
-                ["G1", "S1", 6, 10],
-                ["G2", "S1", 40, 50],
-                ["G2", "S3", 40, 52],
-                ["G3", "S3", 40, 60],
-                ["G5", "S3", 40, 60],
-            ],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_SAMPLE_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
+                ("G1", "S1", 1, 5),
+                ("G1", "S1", 6, 10),
+                ("G2", "S1", 40, 50),
+                ("G2", "S3", 40, 52),
+                ("G3", "S3", 40, 60),
+                ("G5", "S3", 40, 60),
             ],
         )
-
-        exp_fmd = pl.DataFrame(
+        # G4's region is requested but no sample has coverage inside it
+        self.assert_relation(
+            v.feature_metadata(),
+            FEATURE_METADATA_SCHEMA,
             [
-                ["G1", 0, 100, 100, "G1_0_100"],
-                ["G2", 40, 60, 20, "G2_40_60"],
-                ["G3", 40, 60, 20, "G3_40_60"],
-                ["G5", 40, 60, 20, "G5_40_60"],
+                ("G1", 0, 100, 100, "G1_0_100"),
+                ("G2", 40, 60, 20, "G2_40_60"),
+                ("G3", 40, 60, 20, "G3_40_60"),
+                ("G5", 40, 60, 20, "G5_40_60"),
             ],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-                (COLUMN_REGION_ID, str),
-            ],
-        )
-
-        plt.assert_frame_equal(
-            obs_md, exp_md, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_cov, exp_cov, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_pos, exp_pos, check_column_order=False, check_row_order=False
-        )
-        plt.assert_frame_equal(
-            obs_fmd, exp_fmd, check_column_order=False, check_row_order=False
         )
 
     def test_sample_presence_absence_no_regions(self):
@@ -509,24 +414,23 @@ class ViewTests(unittest.TestCase):
         )
         v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
 
-        obs = v.sample_presence_absence().pl()
-        exp = pl.DataFrame(
-            [
-                ["S1", PRESENT, PRESENT, ABSENT, NOT_APPLICABLE],
-                ["S2", NOT_APPLICABLE, NOT_APPLICABLE, ABSENT, NOT_APPLICABLE],
-                ["S3", NOT_APPLICABLE, PRESENT, PRESENT, PRESENT],
-            ],
-            orient="row",
-            schema=[
-                (COLUMN_SAMPLE_ID, str),
-                ("G1_0_100", str),
-                ("G2_40_60", str),
-                ("G3_40_60", str),
-                ("G5_40_60", str),
-            ],
+        schema = (
+            (COLUMN_SAMPLE_ID, "VARCHAR"),
+            ("G1_0_100", "VARCHAR"),
+            ("G2_40_60", "VARCHAR"),
+            ("G3_40_60", "VARCHAR"),
+            ("G5_40_60", "VARCHAR"),
         )
-        plt.assert_frame_equal(
-            obs, exp, check_column_order=False, check_row_order=False
+        # absent means the sample covers the genome but not the region; not
+        # applicable means it has no coverage of that genome at all
+        self.assert_relation(
+            v.sample_presence_absence(),
+            schema,
+            [
+                ("S1", PRESENT, PRESENT, ABSENT, NOT_APPLICABLE),
+                ("S2", NOT_APPLICABLE, NOT_APPLICABLE, ABSENT, NOT_APPLICABLE),
+                ("S3", NOT_APPLICABLE, PRESENT, PRESENT, PRESENT),
+            ],
         )
 
     def test_integrity_checks(self):
@@ -562,15 +466,18 @@ class ViewTests(unittest.TestCase):
             self.tsv(self.feat),
             self.tsv(names),
         )
-        exp = pl.DataFrame(
-            [["G1", "foo"], ["G2", "bar"], ["G3", "G3"], ["G4", "G4"], ["G5", "G5"]],
-            orient="row",
-            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
-        )
 
-        obs = v.feature_names().pl()
-        plt.assert_frame_equal(
-            obs, exp, check_column_order=False, check_row_order=False
+        # a genome with no supplied name falls back to its own id
+        self.assert_relation(
+            v.feature_names(),
+            FEATURE_NAME_SCHEMA,
+            [
+                ("G1", "foo"),
+                ("G2", "bar"),
+                ("G3", "G3"),
+                ("G4", "G4"),
+                ("G5", "G5"),
+            ],
         )
 
 

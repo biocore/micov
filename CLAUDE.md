@@ -131,7 +131,7 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 |---|---|
 | `cli.py` | click command surface; the only user-facing contract |
 | `_view.py` | `View` — DuckDB session with three filter modes: none, genome-level (`constrain_features`), sub-genome region (`constrain_positions`). Only the third does real work: clips intervals to region bounds, re-compresses per sample, recomputes breadth against *region* length |
-| `_cov.py` | numba interval compression, breadth, rank ordering, cumulative accumulation |
+| `_cov.py` | two interval-merge implementations: `compress` (numba + polars, still used by `_io.py`, `cli.py`, `_per_sample.py`) and `merge_intervals` (numpy, used by the curve path). Plus breadth, rank ordering, cumulative accumulation |
 | `_io.py` | parsers/writers; `compress_from_stream` flushes every 100 MB so memory is bounded on arbitrarily large SAM streams |
 | `_plot.py` | matplotlib curves and position plots, plus the KS tests (largest module, no unit tests) |
 | `_quant.py` | binning |
@@ -148,9 +148,11 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 - `ruff` runs with `fix = true`, so **`make lint` edits your files** rather than reporting. Check `git status` after linting.
 - `_test_has_header_taxonomy` (`_io.py`) tests *substrings*, not membership: `genome_id_columns` is the plain string `"genome_id"`, so a column named `genome` is accepted as a header. The plural names make it read as a collection. No test covers this function.
 - `MANIFEST.in` has `graft micov`, so **any** stray file under `micov/` is packaged into the sdist — including untracked ones, which then breaks `check-manifest`. Keep scratch work in `localdocs/` (gitignored, pruned from the sdist).
-- `pyproject.toml` and `ci/conda_requirements.txt` disagree on duckdb: the latter has no `<1.3` ceiling, and CI's conda path installs with `pip install . --no-deps`, so **the conda and pypi CI paths test different duckdb majors**. M1 must reconcile both files.
-- `pyarrow<16.0.0` caps at pyarrow 15.0.2, which has no cp313 wheels, so Python 3.13 cannot be supported until pyarrow is dropped.
+- `pyproject.toml` and `ci/conda_requirements.txt` **must declare the same duckdb floor**. They previously disagreed (`<1.3` in one, no ceiling in the other), and because CI's conda path installs with `pip install . --no-deps`, the conda and pypi paths silently tested different duckdb majors. Both now say `duckdb>=1.5.4`; change them together.
+- Python 3.13 is unclaimed but no longer blocked. The blocker was `pyarrow<16.0.0`, which capped at 15.0.2 and has no cp313 wheels; pyarrow is gone. Nothing has been run on 3.13, so add it to the CI matrix before claiming it.
 
 ## In-flight work
 
-An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint), removing polars, numba, pyarrow, and scipy, and raising the DuckDB floor to `>=1.5.4` (miint's version) in place of the current `<1.3` pin. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
+An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint). **Done so far:** every polars↔DuckDB crossing has been deleted by moving its computation into plain DuckDB SQL — `_view.py`, `_plot.py`, `_quant.py` and `cli.py` no longer cross that boundary — `pyarrow` has been dropped, and the DuckDB floor is now `>=1.5.4`. **Still to do:** introduce miint itself and replace the hand-written SQL with its primitives, then remove polars, numba, and scipy. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
+
+`_plot.py` and `_cov.py`'s curve functions now carry **`dict`s of numpy arrays** — the shape `DuckDBPyRelation.fetchnumpy()` returns — rather than polars frames. `_cov.mask_table(table, keep)` applies a boolean mask or index array to every column. Watch for numpy's `uint64 + int` promoting to `float64`; the rank columns cast deliberately to avoid it.
