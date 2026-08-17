@@ -8,6 +8,30 @@ The primary input mapping structure for micov is per-sample SAM/BAM or BED
 (3-column). These data are then consolidated into Parquet files to utilize
 pushdown filters.
 
+## Requirements
+
+micov's compute runs on DuckDB with the
+[miint](https://github.com/the-miint/duckdb-miint) extension. miint is a DuckDB
+**community extension**, not a Python package, so it is not installed by `pip`
+or `conda`. micov fetches it from the DuckDB community repository the first
+time it opens a connection, which **requires outbound network access on first
+use**; afterwards it is cached in `~/.duckdb/extensions/` and no network is
+needed.
+
+Supported platforms are **Linux** (x86_64, aarch64) and **macOS on Apple
+silicon**. Upstream publishes no miint build for Windows or for Intel macOS, so
+micov does not run there.
+
+To install without network access, or to use a local miint build, put the
+extension somewhere on disk and point micov at it:
+
+```bash
+export MICOV_MIINT_EXTENSION_PATH=/path/to/miint.duckdb_extension
+```
+
+Alternatively, pre-seed the cache on a machine that does have network access
+and copy `~/.duckdb/extensions/` across.
+
 ## Installation
 
 We recommend creating a separate conda environment, and installing

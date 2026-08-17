@@ -1,7 +1,5 @@
 import os
 
-import duckdb
-
 from micov._constants import (
     ABSENT,
     COLUMN_COVERED,
@@ -16,6 +14,7 @@ from micov._constants import (
     NOT_APPLICABLE,
     PRESENT,
 )
+from micov._miint import connection
 
 
 class View:
@@ -38,16 +37,18 @@ class View:
         self.constrain_positions = False
         self.constrain_features = False
 
-        self.con = duckdb.connect(
-            ":memory:", config={"threads": threads, "memory_limit": f"{memory}"}
-        )
+        self.con = connection(memory=memory, threads=threads)
         self._init()
 
     def close(self):
         self.con.close()
 
     def __del__(self):
-        self.close()
+        # opening the connection can now fail -- it requires the miint
+        # extension -- which leaves `con` unset. A finaliser that raises buries
+        # micov's authored message under "Exception ignored in __del__".
+        if getattr(self, "con", None) is not None:
+            self.close()
 
     def _read_tsv(self, path, rename, all_varchar=False):
         """Build a SELECT over a TSV, renaming its leading columns.

@@ -60,7 +60,12 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: ["ubuntu-latest", "macos-13", "windows-latest"]
+        # micov requires the miint DuckDB community extension, which upstream
+        # publishes for linux_amd64, linux_arm64 and osx_arm64 only. macos-13
+        # (Intel) and windows-latest have no build, so they were dropped rather
+        # than carried as a second, silently-diverging compute path.
+        # macos-latest is arm64, so macOS stays covered.
+        os: ["ubuntu-latest", "macos-latest"]
         python_version: ${{ fromJSON(needs.conf.outputs.supported_pythons) }}
         use_conda: [true, false]
     steps:
@@ -87,6 +92,14 @@ jobs:
         run: |
           pip install .[test]
           conda list
+      # Done as its own step so a community-repository outage reads as an
+      # install failure rather than as a wall of confusing test failures. It
+      # also warms ~/.duckdb/extensions once, instead of every test process
+      # racing to fetch the same file.
+      - name: Install the miint extension
+        shell: bash -l {0}
+        run: |
+          python -c "import duckdb; duckdb.sql('INSTALL miint FROM community')"
       - name: Run unit tests
         shell: bash -l {0}
         run: |

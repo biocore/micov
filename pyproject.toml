@@ -13,7 +13,11 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: BSD License",
-    "Operating System :: OS Independent",
+    # not OS Independent any more: micov requires the miint DuckDB community
+    # extension, which upstream publishes only for Linux (x86_64, aarch64) and
+    # macOS on Apple silicon. Windows and Intel macOS have no build.
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -31,6 +35,11 @@ dynamic = ["version"]
 # pyarrow was removed here, not merely unpinned. It was never imported by
 # micov; it came in as the polars<->DuckDB handoff, and no such handoff is
 # left. Verified by running the full golden suite with pyarrow uninstalled.
+#
+# miint is deliberately absent, and cannot be added: it is a DuckDB *community
+# extension*, not a Python distribution, so there is nothing here to depend on.
+# micov requires it all the same -- `micov/_miint.py` installs and loads it,
+# and raises if it cannot.
 dependencies = [
     "click",
     "scipy",

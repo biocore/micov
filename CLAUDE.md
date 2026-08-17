@@ -98,6 +98,7 @@ micov is published and its outputs are in the wild. Unless a task explicitly ove
 - **CLI surface is frozen**, with one approved exception already taken: the `click<8.2` pin has been **removed** and `micov per-sample` is now the canonical name. pallets/click#2604 strips the `_group` suffix when deriving a command name, so the `per_sample_group` callback registers as `per-sample`; `per-sample-group` no longer resolves. Recorded in `ChangeLog.md`. The registered set is exactly: `binning`, `compress`, `consolidate`, `extract-sample-presence`, `nonqiita-to-parquet`, `per-sample`, `position-plot`, `qiita-coverage`, `qiita-to-parquet`.
 - **Output file formats are frozen.** `.cov` / `.cov.gz` BED-like TSVs, `{base}.coverage.parquet` and `{base}.covered_positions.parquet` column names and types, and the Qiita `coverages.tgz` layout must stay readable by released micov versions and by Qiita.
 - **Published numbers must reproduce.** Coverage values, KS statistics, and p-values are cited in the paper. A change that moves them is a regression, not an improvement.
+- **Platform support was narrowed, deliberately.** Windows and Intel macOS were dropped because miint publishes no build for them; supported platforms are Linux (x86_64, aarch64) and macOS on Apple silicon. micov also now needs network access on its **first** run to fetch the extension — a deployment-surface change that matters for Qiita and for HPC compute nodes without egress. `MICOV_MIINT_EXTENSION_PATH` and a pre-seeded `~/.duckdb/extensions/` are the two ways around it.
 
 ## Coordinate and coverage conventions
 
@@ -137,6 +138,7 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 | `_quant.py` | binning |
 | `_convert.py` | CIGAR → reference span, LRU-cached (`150M` dominates real data) |
 | `_constants.py` | column names and dtypes |
+| `_miint.py` | `connection()` — the only place micov opens a DuckDB connection, and the only place the miint extension is installed and loaded |
 
 `micov/_rank.py` is **dead code** — nothing imports it, and it pulls in an undeclared pandas dependency. The `--rank` flag on `micov binning` is a **no-op**; the variance ranking is written unconditionally.
 
@@ -153,6 +155,8 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 
 ## In-flight work
 
-An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint). **Done so far:** every polars↔DuckDB crossing has been deleted by moving its computation into plain DuckDB SQL — `_view.py`, `_plot.py`, `_quant.py` and `cli.py` no longer cross that boundary — `pyarrow` has been dropped, and the DuckDB floor is now `>=1.5.4`. **Still to do:** introduce miint itself and replace the hand-written SQL with its primitives, then remove polars, numba, and scipy. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
+An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint). **Done so far:** every polars↔DuckDB crossing has been deleted by moving its computation into plain DuckDB SQL — `_view.py`, `_plot.py`, `_quant.py` and `cli.py` no longer cross that boundary — `pyarrow` has been dropped, the DuckDB floor is now `>=1.5.4`, and **miint is loaded on every connection** via `_miint.connection()`. **Still to do:** replace the hand-written SQL with miint's primitives, then remove polars, numba, and scipy. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
+
+miint is a DuckDB **community extension**, not a Python package — it cannot be declared in `pyproject.toml`, and `pip index versions duckdb-miint` finds nothing. It is required at runtime instead, with no fallback: two compute paths that must agree numerically would put the frozen coverage and KS numbers at risk. `miint_version()` returns a **git short hash**, not a semantic version, so there is no orderable floor to pin; the guard that will replace it is a capability check, added with the first micov code that calls a miint primitive.
 
 `_plot.py` and `_cov.py`'s curve functions now carry **`dict`s of numpy arrays** — the shape `DuckDBPyRelation.fetchnumpy()` returns — rather than polars frames. `_cov.mask_table(table, keep)` applies a boolean mask or index array to every column. Watch for numpy's `uint64 + int` promoting to `float64`; the rank columns cast deliberately to avoid it.
