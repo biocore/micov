@@ -12,14 +12,22 @@ pushdown filters.
 
 micov's compute runs on DuckDB with the
 [miint](https://github.com/the-miint/duckdb-miint) extension. miint is a DuckDB
-**community extension**, not a Python package, so it is not installed by `pip`
-or `conda`. micov fetches it from the DuckDB community repository the first
+**extension**, not a Python package, so it is not installed by `pip` or
+`conda`. micov fetches it from <https://ftp.microbio.me/pub/miint> the first
 time it opens a connection, which **requires outbound network access on first
 use**; afterwards it is cached in `~/.duckdb/extensions/` and no network is
 needed.
 
+miint is currently published **unsigned**, so micov enables DuckDB's
+`allow_unsigned_extensions` on every connection. This is a development
+posture and will be tightened once signed builds are available.
+
+DuckDB is pinned to **1.5.4**. Extensions are built per DuckDB version, and
+the repository above carries a `v1.5.4` tree only; a newer DuckDB has no miint
+build to load.
+
 Supported platforms are **Linux** (x86_64, aarch64) and **macOS on Apple
-silicon**. Upstream publishes no miint build for Windows or for Intel macOS, so
+silicon**. No miint build is published for Windows or for Intel macOS, so
 micov does not run there.
 
 To install without network access, or to use a local miint build, put the
@@ -68,11 +76,11 @@ First, activate the **Conda environment** where `micov` is installed:
 conda activate micov
 ```
 
-### 2. Process SAM Files to Extract Covered Positions
-Next, we will process SAM files to extract covered positions. Note: If you have
-`coverages.tgz` coverage files from Qitta, please go to step 4. `micov` accepts
-**headerless** SAM/BAM files, and writes out BED-like files which describe the
-observed start and stop positions on the references in the SAM data.
+### 2. Process SAM Files into Coverage Parquet
+
+Next, process SAM files into coverage data. Note: if you have `coverages.tgz`
+coverage files from Qiita, please go to step 4. `micov` accepts **headerless**
+SAM/BAM.
 
 If your input files contain headers, remove them using `samtools` before running micov:
 
@@ -86,29 +94,58 @@ Similarly, if your input files are in BAM format, convert them to SAM format usi
 samtools view input.bam > output.sam
 ```
 
-Next, compress the SAM data into BED coverge files. The `samtools` command above
-can be piped into `micov` to compress the SAM data into BED-like files if
-desired, but for simplicity, we will demonstrate use from SAM. In writing, we
-asssume the name of the SAM file corresponds to a sample name. The subsequent
-code expects the BED files to have either a `.cov` or `.cov.gz` extension.
+`micov compress` writes two Parquet files per sample,
+`{output}.coverage.parquet` and `{output}.covered_positions.parquet`.
+
+**`--lengths` is required.** It supplies the coverage denominators, and it also
+serves as the reference map: headerless SAM carries no header for htslib to
+resolve reference names against. An example length file is at
+`./example/metadata/length.tsv`; see step 3 for how to build one.
 
 ```bash
-mkdir -p "./example/coverages"
+mkdir -p "./example/parquet"
 
 for file in ./example/samfiles/*.sam.xz; do
     sample_id=$(basename "$file" .sam.xz)
 
     echo "Processing $file..."
 
-    # Run micov compress
-    xzcat $file | micov compress | gzip > "./example/coverages/${sample_id}.cov.gz"
+    micov compress \
+        --data "$file" \
+        --lengths ./example/metadata/length.tsv \
+        --output "./example/parquet/${sample_id}"
 done
 ```
 
+`micov` also reads from a pipe, which is the better option for large inputs
+since nothing is staged on disk. Give it `--sample-id`, as there is no filename
+to take one from:
+
+```bash
+xzcat foo.sam.xz | micov compress \
+    --lengths length.tsv --sample-id foo --output foo
+```
+
+Reads whose reference is absent from `--lengths` cannot be attributed to a
+genome and are dropped; `micov` reports how many. Note it cannot distinguish
+those from reads that simply did not align, because htslib reports both the
+same way — so if that count is surprising, check that `--lengths` covers every
+reference the data was aligned against.
 
 ### 3. Consolidate Coverage Files
-After extracting coverage data, consolidate the `.cov` files into Parquet
-representations. This requires a **length mapping file (`length.tsv`)**, which
+`micov nonqiita-to-parquet` builds the same Parquet representation from BED3
+`.cov`/`.cov.gz` files. `micov compress` no longer writes `.cov`, so this is
+for **existing** coverage files — including aggregating one sample across
+several runs, which `compress` does not do:
+
+```bash
+micov nonqiita-to-parquet \
+    --pattern "run*/sample1.cov.gz" \
+    --output combined/sample1 \
+    --lengths length.tsv
+```
+
+It requires a **length mapping file (`length.tsv`)**, which
 maps genome IDs to their corresponding genome lengths. An example length file
 can be found in `./example/metadata/length.tsv`. If this file is not available,
 it can for example be generated using `seqkit`:
@@ -209,14 +246,12 @@ The rankings are saved in the output `stats_by_variance_of_sample_hits.tsv` wher
 
 ### 7. Additional Usage (optional)
 
-Existing .SAM/.BAM can be converted into coverage percentages by specifying length data at compression:
+Per-genome coverage percentages are a column of `{output}.coverage.parquet`:
 
 ```bash
-$ xzcat some_data.sam.xz | micov compress --length length.tsv > coverages.tsv
+$ duckdb -c "SELECT genome_id, percent_covered FROM 'foo.coverage.parquet'"
 ```
 
-Multiple coverage files for the same sample can be aggregated into a single file:
-
-```bash
-$ zcat run1/sample1.cov.gz run2/sample1.cov.gz | micov compress | gzip > combined/sample1.cov.gz
-```
+Multiple coverage files for the same sample are aggregated with
+`nonqiita-to-parquet`, which takes a glob (see step 3). `micov compress` takes
+SAM/BAM only.

@@ -6,6 +6,39 @@ micov 0.0.1-dev
 
 Backward incompatible changes:
 
+* **`micov compress` writes Parquet, not `.cov`.** It now produces
+  `{output}.coverage.parquet` and `{output}.covered_positions.parquet`
+  directly from SAM/BAM, collapsing the intermediate BED3 hop. Consequences:
+  - `--lengths` and `--output` are now **required**. `--lengths` supplies the
+    coverage denominators *and* htslib's reference map, since headerless SAM
+    carries no header to resolve reference names against.
+  - `--sample-id` is new. It defaults to the `--data` filename with its
+    extensions stripped, and is required when reading stdin or a directory,
+    because `coverage.parquet` is keyed by sample.
+  - The two TSV summary output modes are gone, and `--taxonomy` with them.
+    `{output}.coverage.parquet` already carries `genome_id`, `covered`,
+    `length` and `percent_covered`.
+  - **BED3 input is no longer accepted.** Aggregating `.cov`/`.cov.gz` --
+    including one sample across several runs -- is `micov nonqiita-to-parquet`,
+    which takes a glob.
+
+  `.cov` remains fully *readable*: `nonqiita-to-parquet`, `qiita-to-parquet`
+  and `consolidate` are unchanged, the Qiita `coverages.tgz` layout is
+  untouched, and existing `.cov` artifacts stay valid input. Only the writer
+  went away. Verified against all 49 committed `example/samfiles/`: every
+  sample's intervals come back identical to the `example/coverages/*.cov.gz`
+  produced by the previous implementation.
+* micov's alignment ingest now runs through miint's `read_alignments` and
+  `compress_intervals` rather than its own CIGAR walker and numba interval
+  merge. **`numba` is no longer a dependency.**
+* DuckDB is now pinned to `>=1.5.4,<1.5.5`. miint is published per DuckDB
+  version and the repository carries a `v1.5.4` tree only, so a newer DuckDB
+  has no extension build to load. The ceiling comes off when one is published.
+* The miint extension is now installed from `https://ftp.microbio.me/pub/miint`
+  rather than the DuckDB community repository, and micov enables
+  `allow_unsigned_extensions` because those builds are currently unsigned. A
+  cache holding a community-origin build is upgraded automatically.
+
 * micov now requires the [miint](https://github.com/the-miint/duckdb-miint)
   DuckDB extension. miint is a DuckDB *community extension* rather than a
   Python package, so it cannot be declared as a dependency; micov installs and

@@ -20,10 +20,20 @@ import platform
 
 import duckdb
 
-#: Points at a miint build on disk, bypassing the community repository. This is
+#: Points at a miint build on disk, bypassing the repository entirely. This is
 #: the escape hatch for local miint development and for deployments with no
 #: outbound network -- micov reaches the network on first use otherwise.
 MIINT_EXTENSION_PATH_VARIABLE = "MICOV_MIINT_EXTENSION_PATH"
+
+#: Overrides `MIINT_REPOSITORY` so the source can move without a release.
+MIINT_REPOSITORY_VARIABLE = "MICOV_MIINT_REPOSITORY"
+
+#: **The only place micov names where the extension comes from.** miint is not
+#: in the DuckDB community repository; it is published here. Changing where
+#: micov installs from is this one line, which is why `connection()` is also the
+#: only place micov opens a DuckDB connection -- see `cli.py`, which was moved
+#: behind it so that stayed true.
+MIINT_REPOSITORY = "https://ftp.microbio.me/pub/miint"
 
 # There is deliberately no minimum-version check. `miint_version()` reports a
 # git short hash (e.g. 'c2e8d97'), not a semantic version, so there is nothing
@@ -57,14 +67,21 @@ def connection(memory="8gb", threads=1):
         DuckDB's own error rather than letting it through, because the
         requirement is micov's and DuckDB's message does not mention micov.
     """
-    config = {"threads": threads, "memory_limit": memory}
+    # Unconditional, where M2 scoped this to the override branch alone. miint's
+    # published builds are **not signed**, so DuckDB refuses them outright
+    # ("Attempting to install an extension file that doesn't have a valid
+    # signature") and micov cannot run at all without this. It is a development
+    # posture, not a settled one: when miint is signed, delete this line and
+    # restore the narrow version that only relaxed signatures for a build the
+    # caller explicitly pointed at from disk.
+    config = {
+        "threads": threads,
+        "memory_limit": memory,
+        "allow_unsigned_extensions": True,
+    }
 
     override = os.environ.get(MIINT_EXTENSION_PATH_VARIABLE)
-    if override:
-        # only when a build from disk was explicitly asked for: local and
-        # development builds are unsigned, but relaxing this unconditionally
-        # would let any unsigned extension load on every micov connection
-        config["allow_unsigned_extensions"] = True
+    repository = os.environ.get(MIINT_REPOSITORY_VARIABLE, MIINT_REPOSITORY)
 
     con = duckdb.connect(":memory:", config=config)
     try:
@@ -74,7 +91,21 @@ def connection(memory="8gb", threads=1):
             # INSTALL is a no-op when the extension is already present, so the
             # network is only reached on first use; seeding
             # ~/.duckdb/extensions/ ahead of time makes this work offline
-            con.sql("INSTALL miint FROM community")
+            try:
+                con.sql(f"INSTALL miint FROM '{repository}'")
+            except duckdb.Error:
+                # A cache holding a build from a *different* origin makes
+                # INSTALL fail outright ("the origin is different ... rerun
+                # with FORCE INSTALL") rather than fall through. Every user who
+                # ran an earlier micov has exactly that cache, since micov used
+                # to install from the DuckDB community repository, so without
+                # this retry the repository change would strand all of them.
+                #
+                # Retried on any install error rather than by matching the
+                # message: a corrupt or partial cache needs the same fix, and
+                # if FORCE INSTALL fails too the error is raised below anyway.
+                # The re-download happens once, not per connection.
+                con.sql(f"FORCE INSTALL miint FROM '{repository}'")
             con.sql("LOAD miint")
     except duckdb.Error as exc:
         # asked of the connection rather than read from `duckdb.__version__`:
@@ -83,12 +114,14 @@ def connection(memory="8gb", threads=1):
         # to orient themselves by. `version()` is right on that wheel.
         version = con.sql("SELECT version()").fetchall()[0][0]
         con.close()
-        raise RuntimeError(_unavailable_message(override, version, exc)) from exc
+        raise RuntimeError(
+            _unavailable_message(override, repository, version, exc)
+        ) from exc
 
     return con
 
 
-def _unavailable_message(override, version, exc):
+def _unavailable_message(override, repository, version, exc):
     """Compose the error micov reports when miint cannot be loaded."""
     system = platform.system()
     machine = platform.machine()
@@ -107,14 +140,15 @@ def _unavailable_message(override, version, exc):
     else:
         problem = (
             "micov requires the miint DuckDB extension, and could not install "
-            f"or load it for {context}."
+            f"or load it from '{repository}' for {context}."
         )
         remedy = (
             "miint is published for Linux (x86_64, aarch64) and macOS on "
             "Apple silicon; there is no build for Windows or Intel macOS, and "
-            "a build has to exist for the DuckDB version in use. Installing "
-            "reaches the network on first use. To load a build from disk "
-            f"instead, set {MIINT_EXTENSION_PATH_VARIABLE}."
+            "the repository has to carry a build for the DuckDB version in "
+            f"use. Set {MIINT_REPOSITORY_VARIABLE} to install from elsewhere, "
+            f"or {MIINT_EXTENSION_PATH_VARIABLE} to load a build from disk. "
+            "Installing reaches the network on first use."
         )
 
     return f"{problem}\n\n{remedy}\n\nDuckDB reported: {exc}"

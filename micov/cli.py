@@ -2,10 +2,8 @@
 
 import os
 import sys
-from glob import glob
 
 import click
-import duckdb
 
 from ._constants import (
     COLUMN_GENOME_ID,
@@ -16,22 +14,20 @@ from ._constants import (
 )
 from ._cov import coverage_percent
 from ._io import (
-    _check_and_compress,
+    ALIGNMENT_POSITIONS_TABLE,
     _first_col_as_set,
-    _single_df,
-    compress_from_stream,
+    compress_alignments,
     load_genome_lengths,
     parse_bed_cov_to_df,
     parse_genome_lengths,
     parse_qiita_coverages,
-    parse_taxonomy,
-    set_taxonomy_as_id,
+    write_coverage_parquet,
     write_qiita_cov,
 )
+from ._miint import connection
 from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
 from ._quant import pos_to_bins
-from ._utils import logger
 from ._view import View
 
 
@@ -118,75 +114,120 @@ def qiita_coverage(
 
 
 @cli.command()
-@click.option("--data", type=click.Path(exists=True), required=False)
-@click.option("--output", type=click.Path(exists=False))
+@click.option(
+    "--data",
+    type=click.Path(exists=True),
+    required=False,
+    help="SAM/BAM file, or a directory of them. Omit to read stdin.",
+)
+@click.option(
+    "--output",
+    type=click.Path(exists=False),
+    required=True,
+    help="Base path for the .coverage.parquet / .covered_positions.parquet pair",
+)
+@click.option(
+    "--sample-id",
+    type=str,
+    required=False,
+    help=(
+        "Sample ID. Defaults to the --data filename with its extensions "
+        "stripped; required when reading stdin or a directory."
+    ),
+)
 @click.option(
     "--disable-compression",
     is_flag=True,
     default=False,
-    help="Do not compress the regions",
+    help="Do not merge overlapping intervals",
 )
 @click.option(
     "--lengths",
     type=click.Path(exists=True),
-    required=False,
-    help="Genome lengths, if provided compute coverage",
-)
-@click.option(
-    "--taxonomy",
-    type=click.Path(exists=True),
-    required=False,
+    required=True,
     help=(
-        "Genome taxonomy, if provided show species in coverage "
-        "percentage. Only works when --length is provided"
+        "Genome lengths. Also serves as the reference map: headerless SAM "
+        "carries no header for htslib to resolve RNAME against."
     ),
 )
-def compress(data, output, disable_compression, lengths, taxonomy):
-    """Compress BAM/SAM/BED mapping data.
+@click.option("--memory", type=str, default="16gb", required=False)
+@click.option("--threads", type=int, default=4, required=False)
+def compress(data, output, sample_id, disable_compression, lengths, memory, threads):
+    """Compress SAM/BAM alignments into per-sample coverage parquet.
+
+    Writes `{output}.coverage.parquet` and `{output}.covered_positions.parquet`.
 
     This command can work with pipes, e.g.:
 
-    samtools view foo.bam | micov coverage | gzip > foo.cov.gz
+    xzcat foo.sam.xz | micov compress --lengths l.tsv --sample-id foo --output foo
     """
-    if output == "-" or output is None:
-        output = sys.stdout
-
-    if lengths is not None:
-        lengths = parse_genome_lengths(lengths)
-
-        if taxonomy is not None:
-            taxonomy = parse_taxonomy(taxonomy)
-
-    if data is not None and os.path.isdir(data):
-        file_list = (
-            glob(data + "/*.sam") + glob(data + "/*.sam.xz") + glob(data + "/*.sam.gz")
+    if data is None:
+        # DuckDB reads the pipe directly, so the documented xzcat idiom still
+        # works without buffering the stream to disk first. That only holds
+        # because --lengths supplies the reference map up front -- deriving it
+        # from the data would need a second pass stdin cannot give.
+        source = "/dev/stdin"
+        origin = "stdin"
+    elif os.path.isdir(data):
+        # A directory is handed to htslib as one glob, so unlike the
+        # single-file path there is nowhere to decompress `.xz`/`.bz2` first.
+        # Left alone it fails as a bare `IO Error: Failed to open SAM file`
+        # naming one arbitrary member, which does not say what to do about it.
+        unreadable = sorted(
+            name
+            for name in os.listdir(data)
+            if name.endswith((".xz", ".bz2"))
         )
-    else:
-        file_list = [data]
-
-    dfs = []
-    for samfile in file_list:
-        df = compress_from_stream(samfile, disable_compression=disable_compression)
-        if df is None or len(df) == 0:
-            logger.warning("File appears empty...")
-        else:
-            dfs.append(df)
-    coverage = _single_df(_check_and_compress(dfs, compress_size=0))
-
-    if lengths is None:
-        coverage.write_csv(output, separator="\t", include_header=True)
-    else:
-        genome_coverage = coverage_percent(coverage, lengths).collect()
-
-        if taxonomy is None:
-            genome_coverage.write_csv(output, separator="\t", include_header=True)
-        else:
-            genome_coverage_with_taxonomy = set_taxonomy_as_id(
-                genome_coverage, taxonomy
+        if unreadable:
+            raise click.UsageError(
+                f"{len(unreadable)} file(s) in '{data}' are xz/bz2 compressed "
+                f"(e.g. {unreadable[0]}), which htslib cannot read, and a "
+                "directory is passed to it as a single glob so micov cannot "
+                "decompress them first. Point --data at one file at a time, or "
+                "pipe them in: `xzcat f.sam.xz | micov compress --sample-id ...`."
             )
-            genome_coverage_with_taxonomy.write_csv(
-                output, separator="\t", include_header=True
+        source = os.path.join(data, "*.sam*")
+        origin = "a directory"
+    else:
+        source = data
+        origin = None
+
+    if sample_id is None:
+        if origin is not None:
+            raise click.UsageError(
+                f"--sample-id is required when reading from {origin}: there is "
+                "no single filename to take the sample ID from, and "
+                "coverage.parquet is keyed by it."
             )
+        sample_id = _sample_id_from_path(data)
+
+    con = connection(memory=memory, threads=threads)
+    load_genome_lengths(con, lengths)
+    compress_alignments(
+        con, source, sample_id, disable_compression=disable_compression
+    )
+    write_coverage_parquet(
+        con, f"SELECT * FROM {ALIGNMENT_POSITIONS_TABLE}", output
+    )
+
+
+def _sample_id_from_path(path):
+    """Derive a sample ID from an alignment filename.
+
+    `foo/bar/baz.sam.xz` becomes `baz`, matching how
+    `nonqiita-to-parquet` reads a sample ID out of a `.cov` filename and how
+    the README's loop names its outputs.
+    """
+    name = os.path.basename(path)
+    for suffix in (".gz", ".xz", ".bz2"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    for suffix in (".sam", ".bam", ".cram"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name
 
 
 @cli.command()
@@ -300,46 +341,29 @@ def qiita_to_parquet(
 def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
     """Aggregate BED3 files to parquet."""
     columns = "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', 'stop': 'UINTEGER'}"
-    # TODO: use a connection, passparams in as config dict
-    duckdb.sql(f"SET memory_limit TO '{memory}'")
-    duckdb.sql(f"SET threads TO {threads}")
-    load_genome_lengths(duckdb, lengths)
+
+    # was DuckDB's implicit default connection, which made this command
+    # non-reentrant: `genome_lengths` was created on a process-global catalog,
+    # so a second in-process call hit "Table with name genome_lengths already
+    # exists". Going through the helper gives each invocation its own catalog
+    # and puts every micov connection in one place.
+    con = connection(memory=memory, threads=threads)
+    load_genome_lengths(con, lengths)
 
     # stream the .cov or .cov.gz files into parquet. Extract the name of the
     # file, without the extension, and store as the sample_id
-    duckdb.sql(f"""
-        COPY (SELECT genome_id,
-                     start,
-                     stop,
-                     regexp_extract(filename,
-                                    '^(.*/)?(.+).cov(.gz)?$', 2) AS sample_id
-              FROM read_csv('{pattern}',
-                            delim='\t',
-                            filename=true,
-                            header=true,
-                            columns={columns}))
-        TO '{output}.covered_positions.parquet'
-            (FORMAT PARQUET, PARQUET_VERSION V2,
-             COMPRESSION zstd)""")
-
-    # scan the aggregated position information, compute the amount covered
-    # and the percent coverage per sample per genome, stream to parquet.
-    duckdb.sql(f"""
-        COPY (WITH covered_amount AS (
-                  SELECT sample_id,
-                         genome_id,
-                         SUM(stop - start)::UINTEGER AS covered
-                  FROM read_parquet('{output}.covered_positions.parquet')
-                  GROUP BY sample_id, genome_id)
-              SELECT sample_id,
-                     genome_id,
-                     covered,
-                     length,
-                     (covered / length) * 100 AS percent_covered
-              FROM covered_amount JOIN genome_lengths using (genome_id))
-        TO '{output}.coverage.parquet'
-            (FORMAT PARQUET, PARQUET_VERSION V2,
-             COMPRESSION zstd)""")
+    positions = f"""SELECT {COLUMN_GENOME_ID},
+                           {COLUMN_START},
+                           {COLUMN_STOP},
+                           regexp_extract(filename,
+                                          '^(.*/)?(.+).cov(.gz)?$', 2)
+                               AS {COLUMN_SAMPLE_ID}
+                    FROM read_csv('{pattern}',
+                                  delim='\t',
+                                  filename=true,
+                                  header=true,
+                                  columns={columns})"""
+    write_coverage_parquet(con, positions, output)
 
     # n.b. a comparable action can be taken with polars. however, polars does
     # not currently allow limiting memory, and in testing, the use exceeded

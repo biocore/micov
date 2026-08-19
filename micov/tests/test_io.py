@@ -17,14 +17,11 @@ from micov._constants import (
     COLUMN_TAXONOMY,
     GENOME_COVERAGE_SCHEMA,
     GENOME_LENGTH_SCHEMA,
-    SAM_SUBSET_SCHEMA_PARSED,
 )
 from micov._io import (
-    compress_from_stream,
     parse_feature_names,
     parse_genome_lengths,
     parse_qiita_coverages,
-    parse_sam_to_df,
     parse_taxonomy,
     set_taxonomy_as_id,
     write_qiita_cov,
@@ -504,75 +501,6 @@ class IOTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "[G000008865]"):
             set_taxonomy_as_id(cov, tax)
-
-    def test_compress_from_stream(self):
-        data = io.BytesIO(
-            b"A\t0\tX\t1\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"B\t0\tY\t10\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"C\t0\tX\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"D\t0\tX\t90\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"E\t0\tY\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-        )
-        exp = pl.DataFrame(
-            [["X", 1, 51], ["X", 90, 150], ["Y", 10, 60], ["Y", 100, 150]],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = compress_from_stream(data, bufsize=2)
-        plt.assert_frame_equal(
-            obs.sort(
-                [
-                    COLUMN_GENOME_ID,
-                ]
-            ),
-            exp,
-        )
-
-        obs = compress_from_stream(io.BytesIO())
-        self.assertEqual(obs, None)
-
-    def test_compress_from_stream_disable_compression(self):
-        data = io.BytesIO(
-            b"A\t0\tX\t1\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"B\t0\tY\t10\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"C\t0\tX\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"D\t0\tX\t90\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"E\t0\tY\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-        )
-        exp = pl.DataFrame(
-            [
-                ["X", 1, 51],
-                ["X", 90, 140],
-                ["X", 100, 150],
-                ["Y", 10, 60],
-                ["Y", 100, 150],
-            ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = compress_from_stream(data, bufsize=2, disable_compression=True)
-        plt.assert_frame_equal(obs.sort([COLUMN_GENOME_ID, COLUMN_START]), exp)
-
-        obs = compress_from_stream(io.BytesIO())
-        self.assertEqual(obs, None)
-
-    def test_parse_sam_to_df(self):
-        data = io.BytesIO(
-            b"A\t0\tX\t1\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"B\t0\tY\t10\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"C\t0\tX\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-        )
-        exp = pl.DataFrame(
-            [
-                ["A", 0, "X", 1, "50M", 51],
-                ["B", 0, "Y", 10, "50M", 60],
-                ["C", 0, "X", 100, "50M", 150],
-            ],
-            orient="row",
-            schema=SAM_SUBSET_SCHEMA_PARSED.dtypes_flat,
-        )
-        obs = parse_sam_to_df(data)
-        plt.assert_frame_equal(obs, exp)
 
 
 if __name__ == "__main__":

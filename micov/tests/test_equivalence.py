@@ -189,135 +189,116 @@ class TestCliSurface(unittest.TestCase):
 
 @requires_micov
 class TestCompressFastTier(MicovCliTestCase):
-    """`compress` against goldens built from test_data/test.sam.xz."""
+    """`compress` writes the parquet pair from SAM/BAM.
+
+    The BED3 `.cov` output mode and the two TSV summary modes are gone: micov
+    now goes SAM -> parquet in one step. `.cov` remains *readable* (Qiita
+    artifacts, `nonqiita-to-parquet`, `consolidate`) -- only `compress` stopped
+    writing it.
+    """
+
+    LENGTHS = DATA / "lengths.tsv"
+
+    def compress(self, output, *args, **kwargs):
+        self.micov(
+            "compress", "--lengths", self.LENGTHS, "--output", output,
+            *args, **kwargs,
+        )
+        return Path(f"{output}.coverage.parquet")
+
+    def intervals(self, base):
+        """The covered positions, ordered, for comparison across two runs."""
+        import duckdb
+
+        return duckdb.sql(
+            f"SELECT genome_id, start, stop "
+            f"FROM '{base}.covered_positions.parquet' ORDER BY 1, 2, 3"
+        ).fetchall()
 
     def test_stdin_and_data_flag_agree(self):
-        """The stdin and --data paths must produce identical intervals.
+        """The pipe idiom and --data must produce identical intervals.
 
-        Compared order-insensitively: `compress` groups by genome without
-        maintain_order, so row order is not stable between runs of the *same*
-        input, let alone between two input paths.
+        This is the R1 case: headerless SAM on stdin has no reference map, and
+        htslib needs one. It works only because --lengths supplies the map up
+        front, so the stream is read once and never rewound.
         """
         sam = DATA / "test.sam.xz"
-        from_data = self.micov_stdout_to(
-            self.tmp / "from_data.tsv", "compress", "--data", sam
-        )
-        from_stdin = self.micov_stdout_to(
-            self.tmp / "from_stdin.tsv",
-            "compress",
+        self.compress(self.tmp / "from_data", "--data", sam)
+        self.compress(
+            self.tmp / "from_stdin",
+            "--sample-id", "test",
             stdin_bytes=lzma.open(sam).read(),
         )
-        assert_cov_equal(from_stdin, from_data)
 
-    def test_plain_matches_golden(self):
-        produced = self.micov_stdout_to(
-            self.tmp / "out.tsv", "compress", "--data", DATA / "test.sam.xz"
-        )
-        assert_cov_equal(produced, GOLDEN / "compress_plain.tsv")
-
-    def test_with_lengths_matches_golden(self):
-        produced = self.micov_stdout_to(
-            self.tmp / "out.tsv",
-            "compress",
-            "--data",
-            DATA / "test.sam.xz",
-            "--lengths",
-            DATA / "lengths.tsv",
-        )
-        assert_tsv_equal_unordered(
-            produced, GOLDEN / "compress_lengths.tsv", sort_keys=("genome_id",)
+        self.assertEqual(
+            self.intervals(self.tmp / "from_stdin"),
+            self.intervals(self.tmp / "from_data"),
         )
 
-    def test_with_lengths_and_taxonomy_matches_golden(self):
-        produced = self.micov_stdout_to(
-            self.tmp / "out.tsv",
-            "compress",
-            "--data",
-            DATA / "test.sam.xz",
-            "--lengths",
-            DATA / "lengths.tsv",
-            "--taxonomy",
-            DATA / "taxonomy.tsv",
-        )
-        assert_tsv_equal_unordered(
-            produced,
-            GOLDEN / "compress_lengths_taxonomy.tsv",
-            sort_keys=("genome_id",),
-        )
+    def test_writes_both_parquet_files(self):
+        self.compress(self.tmp / "out", "--data", DATA / "test.sam.xz")
 
-    def test_taxonomy_requires_every_genome(self):
-        """Documents a real constraint: the taxonomy cannot be a subset.
+        self.assertTrue((self.tmp / "out.coverage.parquet").exists())
+        self.assertTrue((self.tmp / "out.covered_positions.parquet").exists())
 
-        `set_taxonomy_as_id` raises when any covered genome lacks a lineage,
-        which is why the taxonomy fixture has 232 rows and not two.
+    def test_sample_id_defaults_to_the_filename(self):
+        """`coverage.parquet` is keyed by sample_id, so it cannot be blank.
+
+        The README's loop names outputs after the SAM stem, so taking it from
+        the filename is what a caller means by omitting the flag.
         """
-        partial = self.tmp / "partial_taxonomy.tsv"
-        partial.write_text(
-            "genome_id\ttaxonomy\nG000011065\tk__Bacteria; s__Only one\n"
-        )
+        import duckdb
+
+        self.compress(self.tmp / "out", "--data", DATA / "test.sam.xz")
+        observed = duckdb.sql(
+            f"SELECT DISTINCT sample_id FROM '{self.tmp}/out.coverage.parquet'"
+        ).fetchall()
+
+        self.assertEqual(observed, [("test",)])
+
+    def test_sample_id_is_required_when_reading_stdin(self):
+        """There is no filename to fall back on, so this must not guess."""
         proc = self.micov(
-            "compress",
-            "--data",
-            DATA / "test.sam.xz",
-            "--lengths",
-            DATA / "lengths.tsv",
-            "--taxonomy",
-            partial,
+            "compress", "--lengths", self.LENGTHS,
+            "--output", self.tmp / "out",
+            stdin_bytes=lzma.open(DATA / "test.sam.xz").read(),
             expect_success=False,
         )
+
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn(b"unrepresented in", proc.stderr)
+        self.assertIn(b"--sample-id", proc.stderr)
 
-    def test_multiple_cov_files_aggregate_when_headers_are_stripped(self):
-        """Concatenated `.cov` input is merged per genome across samples.
+    def test_lengths_is_required(self):
+        """Required for SAM because it doubles as htslib's reference map.
 
-        Only the first file may carry its header -- see the companion test
-        below for why.
+        A second approved exception to the frozen CLI surface, recorded in
+        ChangeLog.md alongside the `per-sample` rename.
         """
-        first = (DATA / "mini_sampleA.cov").read_bytes()
-        body = (DATA / "mini_sampleB.cov").read_bytes().splitlines(keepends=True)[1:]
-        produced = self.micov_stdout_to(
-            self.tmp / "merged.tsv", "compress", stdin_bytes=first + b"".join(body)
-        )
-        rows = produced.read_text().splitlines()
-        self.assertEqual(rows[0], "genome_id\tstart\tstop")
-        self.assertEqual(
-            set(rows[1:]),
-            {
-                "G000000001\t100\t500",
-                "G000000001\t4200\t4500",
-                "G000000002\t100\t500",
-                "G000000002\t600\t900",
-            },
+        proc = self.micov(
+            "compress", "--data", DATA / "test.sam.xz",
+            "--output", self.tmp / "out",
+            expect_success=False,
         )
 
-    def test_concatenating_cov_files_with_headers_currently_fails(self):
-        """**Pins a bug, not desired behavior.**
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn(b"--lengths", proc.stderr)
 
-        `README.md` documents::
+    def test_bed3_input_is_no_longer_accepted(self):
+        """`.cov` aggregation moved to nonqiita-to-parquet.
 
-            zcat run1/sample1.cov.gz run2/sample1.cov.gz | micov compress
-
-        as the way to aggregate a sample's coverage across runs. But `micov
-        compress` writes a `genome_id\\tstart\\tstop` header, and the BED
-        reader does not skip repeated headers mid-stream, so the second file's
-        header reaches the parser as data and polars fails to cast `start` to
-        u32. Reproduced with the committed `example/coverages/*.cov.gz`, so it
-        affects the documented workflow and not just this fixture.
-
-        This test asserts the *current* failure so the migration cannot change
-        it unnoticed -- in either direction. If a milestone makes this pass,
-        that is an intentional fix and this test plus the README should be
-        updated together. Logged in MIGRATE-TO-MIINT.md §8.
+        Keeping BED3 here would have meant two commands writing the same
+        frozen format from the same input.
         """
-        payload = b"".join(
-            (DATA / f"mini_sample{s}.cov").read_bytes() for s in ("A", "B")
+        cov = self.tmp / "in.cov"
+        cov.write_text("genome_id\tstart\tstop\nG1\t1\t10\n")
+        proc = self.micov(
+            "compress", "--data", cov, "--lengths", self.LENGTHS,
+            "--sample-id", "s", "--output", self.tmp / "out",
+            expect_success=False,
         )
-        proc = self.micov("compress", stdin_bytes=payload, expect_success=False)
-        self.assertNotEqual(
-            proc.returncode, 0, "concatenated headers now parse -- see docstring"
-        )
-        self.assertIn(b"could not parse", proc.stderr)
+
+        self.assertNotEqual(proc.returncode, 0)
+
 
 
 @requires_micov
@@ -352,15 +333,21 @@ class TestParquetFastTier(MicovCliTestCase):
                     GOLDEN / f"mini.{part}.parquet",
                 )
 
-    def test_cannot_be_invoked_twice_in_one_process(self):
-        """Guards the reason this suite uses subprocesses at all.
+    def test_can_be_invoked_twice_in_one_process(self):
+        """Two in-process invocations must both succeed.
 
-        `nonqiita_to_parquet` creates `genome_lengths` on the module-level
-        DuckDB connection, so a second in-process call fails. If that is ever
-        fixed, this test fails and the CliRunner option reopens.
+        This asserted the opposite until M3. `nonqiita_to_parquet` created
+        `genome_lengths` on DuckDB's module-level default connection -- a
+        process-global catalog -- so a second call died with "Table with name
+        genome_lengths already exists". The old test pinned that as though it
+        were a contract; it is a defect, and enshrining it in the interface was
+        the wrong call. Going through `_miint.connection()` gives each
+        invocation its own catalog and fixes it.
+
+        The suite still uses subprocesses everywhere else, deliberately: they
+        exercise the console script and its exit codes, which in-process calls
+        cannot.
         """
-        import duckdb
-
         from micov.cli import nonqiita_to_parquet
 
         args = [
@@ -369,18 +356,17 @@ class TestParquetFastTier(MicovCliTestCase):
             "--lengths",
             str(DATA / "mini_lengths.tsv"),
         ]
-        first = nonqiita_to_parquet.main(
-            [*args, "--output", str(self.tmp / "one")],
-            standalone_mode=False,
-        )
-        self.assertIsNone(first)
-        # duckdb.CatalogException: Table with name "genome_lengths"
-        # already exists!
-        with self.assertRaises(duckdb.CatalogException):
-            nonqiita_to_parquet.main(
-                [*args, "--output", str(self.tmp / "two")],
+        for output in ("one", "two"):
+            result = nonqiita_to_parquet.main(
+                [*args, "--output", str(self.tmp / output)],
                 standalone_mode=False,
             )
+            self.assertIsNone(result)
+
+        # and both runs actually produced their files, so "succeeded" is not
+        # just "did not raise"
+        for output in ("one", "two"):
+            self.assertTrue((self.tmp / f"{output}.coverage.parquet").exists())
 
 
 @requires_micov
@@ -607,18 +593,49 @@ class TestBinningAndPlotsFastTier(MicovCliTestCase):
 @requires_example
 @requires_full_tier
 class TestCompressFullCorpus(MicovCliTestCase):
+    """The whole point of M3: miint ingest must reproduce micov's own output.
+
+    `example/coverages/*.cov.gz` were produced by micov's hand-written CIGAR
+    walker and numba interval merge, both of which are now gone. Every one of
+    the 49 samples must come back byte-identical through `read_alignments` and
+    `compress_intervals`, or the published coverage values move.
+
+    The `.cov` files stay committed as fixtures even though `compress` no
+    longer writes that format -- they are still valid input to
+    `nonqiita-to-parquet`, and they are the only independent record of what the
+    old implementation produced.
+    """
+
     def test_all_samfiles_match_committed_coverages(self):
+        import duckdb
+
         samfiles = sorted((EXAMPLE / "samfiles").glob("*.sam.xz"))
         self.assertEqual(len(samfiles), 49)
+
         for sam in samfiles:
             sample_id = sam.name[: -len(".sam.xz")]
             with self.subTest(sample=sample_id):
-                produced = self.micov_stdout_to(
-                    self.tmp / f"{sample_id}.cov", "compress", "--data", sam
+                base = self.tmp / sample_id
+                self.micov(
+                    "compress",
+                    "--data", sam,
+                    "--lengths", EXAMPLE / "metadata" / "length.tsv",
+                    "--output", base,
                 )
-                assert_cov_equal(
-                    produced, EXAMPLE / "coverages" / f"{sample_id}.cov.gz"
-                )
+                produced = duckdb.sql(
+                    f"SELECT genome_id, start, stop "
+                    f"FROM '{base}.covered_positions.parquet' ORDER BY 1, 2, 3"
+                ).fetchall()
+
+                frozen_path = EXAMPLE / "coverages" / f"{sample_id}.cov.gz"
+                frozen = duckdb.sql(
+                    f"SELECT genome_id, start, stop FROM read_csv("
+                    f"'{frozen_path}', delim='\t', header=true, columns="
+                    "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', "
+                    "'stop': 'UINTEGER'}) ORDER BY 1, 2, 3"
+                ).fetchall()
+
+                self.assertEqual(produced, frozen)
 
 
 @requires_micov

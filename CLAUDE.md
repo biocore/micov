@@ -95,7 +95,9 @@ If a test produces an **incorrect expected value**: DO NOT change the expected v
 
 micov is published and its outputs are in the wild. Unless a task explicitly overrides this:
 
-- **CLI surface is frozen**, with one approved exception already taken: the `click<8.2` pin has been **removed** and `micov per-sample` is now the canonical name. pallets/click#2604 strips the `_group` suffix when deriving a command name, so the `per_sample_group` callback registers as `per-sample`; `per-sample-group` no longer resolves. Recorded in `ChangeLog.md`. The registered set is exactly: `binning`, `compress`, `consolidate`, `extract-sample-presence`, `nonqiita-to-parquet`, `per-sample`, `position-plot`, `qiita-coverage`, `qiita-to-parquet`.
+- **`.cov` is now read-only.** `micov compress` stopped writing BED3; every reader (`nonqiita-to-parquet`, `qiita-to-parquet`, `consolidate`, the Qiita `coverages.tgz` layout) is unchanged and existing artifacts stay valid. `example/coverages/*.cov.gz` are kept as committed fixtures and are the only independent record of what the pre-miint implementation produced.
+
+- **CLI surface is frozen**, with three approved exceptions taken so far. **(3)** `micov compress` now takes SAM/BAM only and writes `{output}.coverage.parquet` + `{output}.covered_positions.parquet`; `--lengths` and `--output` became required, `--sample-id` was added, and the BED3 input path, the two TSV summary modes and `--taxonomy` were removed. `.cov` stays readable everywhere else. **(2)** Windows and Intel macOS were dropped (see below). **(1)** the original: the `click<8.2` pin has been **removed** and `micov per-sample` is now the canonical name. pallets/click#2604 strips the `_group` suffix when deriving a command name, so the `per_sample_group` callback registers as `per-sample`; `per-sample-group` no longer resolves. Recorded in `ChangeLog.md`. The registered set is exactly: `binning`, `compress`, `consolidate`, `extract-sample-presence`, `nonqiita-to-parquet`, `per-sample`, `position-plot`, `qiita-coverage`, `qiita-to-parquet`.
 - **Output file formats are frozen.** `.cov` / `.cov.gz` BED-like TSVs, `{base}.coverage.parquet` and `{base}.covered_positions.parquet` column names and types, and the Qiita `coverages.tgz` layout must stay readable by released micov versions and by Qiita.
 - **Published numbers must reproduce.** Coverage values, KS statistics, and p-values are cited in the paper. A change that moves them is a regression, not an improvement.
 - **Platform support was narrowed, deliberately.** Windows and Intel macOS were dropped because miint publishes no build for them; supported platforms are Linux (x86_64, aarch64) and macOS on Apple silicon. micov also now needs network access on its **first** run to fetch the extension — a deployment-surface change that matters for Qiita and for HPC compute nodes without egress. `MICOV_MIINT_EXTENSION_PATH` and a pre-seeded `~/.duckdb/extensions/` are the two ways around it.
@@ -104,19 +106,19 @@ micov is published and its outputs are in the wild. Unless a task explicitly ove
 
 - Intervals are **1-based half-open** `[start, stop)`. `start` is SAM `POS`; `stop = POS + reference span from CIGAR` (`M/=/X` advance alignment, `D/N` advance reference, so deletions and gaps count as covered).
 - Breadth is `sum(stop - start)` over merged intervals — **no `+1`**.
-- `_compress` **merges touching intervals** (`stop1 == start2` → one interval). This is intentional and covered by `micov/tests/test_cov.py`. The `compress` docstring's case 3 claims the opposite and is stale.
+- Interval merging **collapses touching intervals** (`stop1 == start2` → one interval). This is intentional, holds in both implementations — miint's `compress_intervals` and `_cov.merge_intervals` — and is covered by `micov/tests/test_cov.py` and `micov/tests/test_alignments.py`. The `compress` docstring's stale case 3, which claimed the opposite, was corrected in M3.
 - `.cov` files are described as "BED-like" but carry 1-based coordinates, whereas real BED is 0-based. Breadth math is unaffected; joins against genuinely 0-based sources are not.
 - Primary *and* secondary alignments are retained deliberately, so CNVs, horizontally transferred elements, and repeats are represented rather than silently dropped.
 
 ## Architecture
 
 ```
-SAM/BAM (headerless) or BED3
-   │  micov compress               merge overlapping intervals per genome
-   ▼
-.cov / .cov.gz                     BED3; filename stem is the sample_id
-   │  micov nonqiita-to-parquet (DuckDB)  |  micov qiita-to-parquet (Qiita .tgz)
-   ▼
+SAM/BAM (headerless)                          .cov / .cov.gz  (read-only now)
+   │  micov compress                              │  BED3; stem is the sample_id
+   │  read_alignments + compress_intervals        │
+   │  --lengths is the reference map              │  micov nonqiita-to-parquet
+   │                                              │  micov qiita-to-parquet (.tgz)
+   ▼                                              ▼
 {base}.covered_positions.parquet   (genome_id, start, stop, sample_id)   — large
 {base}.coverage.parquet            (genome_id, sample_id, covered, length, percent_covered) — small
    │  View (in-memory DuckDB, pushdown-filtered)
@@ -136,11 +138,10 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 | `_io.py` | parsers/writers; `compress_from_stream` flushes every 100 MB so memory is bounded on arbitrarily large SAM streams |
 | `_plot.py` | matplotlib curves and position plots, plus the KS tests (largest module, no unit tests) |
 | `_quant.py` | binning |
-| `_convert.py` | CIGAR → reference span, LRU-cached (`150M` dominates real data) |
 | `_constants.py` | column names and dtypes |
-| `_miint.py` | `connection()` — the only place micov opens a DuckDB connection, and the only place the miint extension is installed and loaded |
+| `_miint.py` | `connection()` — the only place micov opens a DuckDB connection, **and the only place the extension's install source is named**. `cli.py` was moved behind it so that stays true |
 
-`micov/_rank.py` is **dead code** — nothing imports it, and it pulls in an undeclared pandas dependency. The `--rank` flag on `micov binning` is a **no-op**; the variance ranking is written unconditionally.
+`micov/_convert.py` is **gone** — htslib computes the reference span now. `micov/_rank.py` is **dead code** — nothing imports it, and it pulls in an undeclared pandas dependency. The `--rank` flag on `micov binning` is a **no-op**; the variance ranking is written unconditionally.
 
 ## Known traps
 

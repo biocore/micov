@@ -13,9 +13,9 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: BSD License",
-    # not OS Independent any more: micov requires the miint DuckDB community
-    # extension, which upstream publishes only for Linux (x86_64, aarch64) and
-    # macOS on Apple silicon. Windows and Intel macOS have no build.
+    # not OS Independent any more: micov requires the miint DuckDB extension,
+    # which is published only for Linux (x86_64, aarch64) and macOS on Apple
+    # silicon. Windows and Intel macOS have no build.
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: Implementation :: CPython",
@@ -36,17 +36,26 @@ dynamic = ["version"]
 # micov; it came in as the polars<->DuckDB handoff, and no such handoff is
 # left. Verified by running the full golden suite with pyarrow uninstalled.
 #
-# miint is deliberately absent, and cannot be added: it is a DuckDB *community
-# extension*, not a Python distribution, so there is nothing here to depend on.
-# micov requires it all the same -- `micov/_miint.py` installs and loads it,
-# and raises if it cannot.
+# miint is deliberately absent, and cannot be added: it is a DuckDB *extension*,
+# not a Python distribution, so there is nothing here to depend on. micov
+# requires it all the same -- `micov/_miint.py` installs and loads it, and
+# raises if it cannot.
+#
+# The duckdb CEILING is a repository-coverage artifact, not a technical limit.
+# miint is published per DuckDB version at https://ftp.microbio.me/pub/miint,
+# which carries v1.5.4 and no v1.5.5 tree, so micov cannot run on a DuckDB it
+# has no extension build for. Drop the ceiling once v1.5.5 is published.
+#
+# numba is gone: it backed the interval merge in `_cov.py`, which is now
+# miint's `compress_intervals`, and a `get_covered` list comprehension that
+# never needed compiling. Verified by running the full golden suite with numba
+# uninstalled.
 dependencies = [
     "click",
     "scipy",
     "polars-u64-idx<1.23.0",
-    "numba",
     "matplotlib>=3.9.0",
-    "duckdb>=1.5.4",
+    "duckdb>=1.5.4,<1.5.5",
 ]
 
 readme = "README.md"

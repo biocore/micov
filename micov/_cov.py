@@ -1,4 +1,3 @@
-import numba
 import numpy as np
 import polars as pl
 
@@ -118,37 +117,6 @@ def coverage_percent(coverages, lengths):
 # FROM cumulative_groups
 # GROUP BY sample_id, genome_id, group_id
 # ORDER BY sample_id, genome_id, merged_start;
-@numba.jit(nopython=True)
-def _compress(rows):
-    # derived from zebra
-    # https://github.com/biocore/zebra_filter/blob/master/cover.py#L14
-
-    new_ranges = []
-    start_val = None
-    end_val = None
-
-    # case 1: no active range, start active range.
-    start_val, end_val = rows[0]
-    for start, stop in rows[1:]:
-        if end_val >= start:
-            # case 2: active range continues through this range
-            # extend active range
-            end_val = max(end_val, stop)
-        else:  # if end_val < r[0] - 1:
-            # case 3: active range ends before this range begins
-            # write new range out, then start new active range
-            new_range = (start_val, end_val)
-            new_ranges.append(new_range)
-            start_val = start
-            end_val = stop
-
-    if end_val is not None:
-        new_range = (start_val, end_val)
-        new_ranges.append(new_range)
-
-    return new_ranges
-
-
 def compress_per_sample(df):
     """Compress data per sample."""
     frames = []
@@ -191,9 +159,9 @@ def compress(df):
 
         [1, 10) and [5, 8) become [1, 10)
 
-    3) immediately adjacent intervals are not collapsed
+    3) immediately adjacent (touching) intervals ARE collapsed
 
-        [1, 10) and [10, 20) remain unchanged
+        [1, 10) and [10, 20) become [1, 20)
 
     A visual depiction:
 
@@ -244,15 +212,12 @@ def compress(df):
             COLUMN_GENOME_ID,
         ]
     ):
-        rows = (
-            grp.lazy()
-            .select([COLUMN_START, COLUMN_STOP])
-            .sort(COLUMN_START)
-            .collect()
-            .to_numpy(order="c")
+        bounds = grp.lazy().select([COLUMN_START, COLUMN_STOP]).collect()
+        merged_starts, merged_stops = merge_intervals(
+            bounds[COLUMN_START].to_numpy(), bounds[COLUMN_STOP].to_numpy()
         )
 
-        grp_compressed = _compress(rows)
+        grp_compressed = list(zip(merged_starts, merged_stops, strict=True))
         grp_compressed_df = make_frame(grp_compressed, genome)
         compressed.append(grp_compressed_df)
 
@@ -469,7 +434,6 @@ def compute_cumulative(coverage, grp, target, target_positions, lengths):
     return cur_x, cur_y
 
 
-@numba.jit(nopython=True)
 def get_covered(x_start_stop):
     """Remap (x, y1, y1) into [(x, y1), (x, y2)]."""
     return [[(x, start), (x, stop)] for (x, start, stop) in x_start_stop]

@@ -30,7 +30,12 @@ from micov._constants import (
     COLUMN_START,
     COLUMN_STOP,
 )
-from micov._miint import MIINT_EXTENSION_PATH_VARIABLE, connection
+from micov._miint import (
+    MIINT_EXTENSION_PATH_VARIABLE,
+    MIINT_REPOSITORY,
+    MIINT_REPOSITORY_VARIABLE,
+    connection,
+)
 from micov._view import View
 
 # (system, machine) pairs upstream publishes a miint build for. Windows and
@@ -65,16 +70,20 @@ def miint_is_loaded(con):
 
 
 def installed_extension_path():
-    """Return the on-disk path of the installed miint build, or None."""
-    con = duckdb.connect(":memory:")
+    """Return the on-disk path of the installed miint build, or None.
+
+    Goes through `connection()` rather than installing independently. An
+    earlier version named the repository itself, which silently rotted the
+    moment micov changed where it installs from -- the install failed, this
+    returned None, and the override test skipped instead of failing. Asking the
+    helper keeps there being exactly one place that knows the source.
+    """
+    con = connection()
     try:
-        con.sql("INSTALL miint FROM community")
         rows = con.sql(
             "SELECT install_path FROM duckdb_extensions() "
             "WHERE extension_name = 'miint'"
         ).fetchall()
-    except duckdb.Error:
-        return None
     finally:
         con.close()
     return rows[0][0] if rows and rows[0][0] else None
@@ -166,6 +175,56 @@ class MiintConnectionTests(unittest.TestCase):
             con = connection()
         self.addCleanup(con.close)
 
+        self.assertTrue(miint_is_loaded(con))
+
+
+@requires_miint_build
+class MiintRepositoryTests(unittest.TestCase):
+    """Where the extension is installed from is named in exactly one place.
+
+    micov installs miint from its own repository rather than the DuckDB
+    community one, and that will move again when miint is signed and published.
+    The point of these tests is not the current URL -- it is that there is a
+    single constant to change, and that nothing else in micov names a source.
+    """
+
+    def test_repository_is_the_default_source(self):
+        con = connection()
+        self.addCleanup(con.close)
+
+        installed_from = con.sql(
+            "SELECT installed_from FROM duckdb_extensions() "
+            "WHERE extension_name = 'miint'"
+        ).fetchall()
+
+        # 'community' would mean the constant is not being used
+        self.assertEqual(len(installed_from), 1)
+        self.assertNotEqual(installed_from[0][0], "community")
+
+    def test_repository_is_overridable_without_a_code_change(self):
+        """The override exists so a redeploy is not a release.
+
+        A bad URL must fail as micov's own error naming the variable, the same
+        way a bad `MICOV_MIINT_EXTENSION_PATH` does -- not as a bare DuckDB
+        HTTP error the user cannot connect to micov.
+        """
+        with mock.patch.dict(
+            os.environ, {MIINT_REPOSITORY_VARIABLE: "https://nonexistent.invalid/miint"}
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                connection()
+
+        message = str(ctx.exception)
+        self.assertNotIsInstance(ctx.exception, duckdb.Error)
+        self.assertIn("https://nonexistent.invalid/miint", message)
+        self.assertIn(MIINT_REPOSITORY_VARIABLE, message)
+
+    def test_default_repository_is_named_in_the_message(self):
+        """An install failure has to say where micov was looking."""
+        self.assertTrue(MIINT_REPOSITORY.startswith("http"))
+
+        con = connection()
+        self.addCleanup(con.close)
         self.assertTrue(miint_is_loaded(con))
 
 
