@@ -78,8 +78,7 @@ conda activate micov
 
 ### 2. Process SAM Files into Coverage Parquet
 
-Next, process SAM files into coverage data. Note: if you have `coverages.tgz`
-coverage files from Qiita, please go to step 4. `micov` accepts **headerless**
+Next, process SAM files into coverage data. `micov` accepts **headerless**
 SAM/BAM.
 
 If your input files contain headers, remove them using `samtools` before running micov:
@@ -133,13 +132,13 @@ same way — so if that count is surprising, check that `--lengths` covers every
 reference the data was aligned against.
 
 ### 3. Consolidate Coverage Files
-`micov nonqiita-to-parquet` builds the same Parquet representation from BED3
+`micov cov-to-parquet` builds the same Parquet representation from BED3
 `.cov`/`.cov.gz` files. `micov compress` no longer writes `.cov`, so this is
 for **existing** coverage files — including aggregating one sample across
 several runs, which `compress` does not do:
 
 ```bash
-micov nonqiita-to-parquet \
+micov cov-to-parquet \
     --pattern "run*/sample1.cov.gz" \
     --output combined/sample1 \
     --lengths length.tsv
@@ -160,26 +159,17 @@ sample ID will be `baz`.
 
 ```bash
 
-micov nonqiita-to-parquet \
+micov cov-to-parquet \
     --pattern "example/coverages/*.cov.gz" \
     --output example/parquet/example \
     --lengths example/metadata/length.tsv
 ```
 
-### 4. Convert Coverage Data to Parquet Format
-`micov` provides functionality to convert **Qiita-formatted coverage data** into **Parquet format** as well.
+This command was named `nonqiita-to-parquet` before micov dropped its Qiita
+support. The old name still works but is hidden from `--help`; prefer
+`cov-to-parquet`.
 
-```bash
-mkdir -p "./example/parquet"
-
-# note: multiple coverage files can be specified by repeating the --qiita-coverages argument
-micov qiita-to-parquet \
- --qiita-coverages  "./example/consolidate/consolidated.tgz" \
- --output "./example/parquet/example" \
- --lengths "./example/metadata/length.tsv"
-```
-
-### 5. Generate Per-Sample-Group Plots
+### 4. Generate Per-Sample-Group Plots
 A series of plots can be constructed guided by metadata. Specifically, `micov` produces the following:
 
 * **Non-cumulative coverage curves** for each genome in the feature metadata.
@@ -224,7 +214,7 @@ micov per-sample \
  --plot
 ```
 
-### 6. Binning and Ranking
+### 5. Binning and Ranking
 
 The `binning` command allows you to divide genome positions into fix-sized bins and compute summary statistics across samples, based on sample metadata. This is useful for identifying regions of interest (e.g. high variability across samples).
 
@@ -244,7 +234,7 @@ Each bin is ranked based on the standard deviation of sample hits across groups 
 
 The rankings are saved in the output `stats_by_variance_of_sample_hits.tsv` whereas binning statistics (start and end positions of each bin, number of sample hits per bin, number of read hits per bin.etc) are saved in `stats_bins.tsv`.
 
-### 7. Additional Usage (optional)
+### 6. Additional Usage (optional)
 
 Per-genome coverage percentages are a column of `{output}.coverage.parquet`:
 
@@ -253,5 +243,5 @@ $ duckdb -c "SELECT genome_id, percent_covered FROM 'foo.coverage.parquet'"
 ```
 
 Multiple coverage files for the same sample are aggregated with
-`nonqiita-to-parquet`, which takes a glob (see step 3). `micov compress` takes
+`cov-to-parquet`, which takes a glob (see step 3). `micov compress` takes
 SAM/BAM only.

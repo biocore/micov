@@ -13,7 +13,7 @@ The distinguishing capability is the **cumulative coverage curve**: rank samples
 
 Reference: Weng Y, Guccione C, McDonald D, et al. "Calculating fast differential genome coverages among metagenomic sources using micov." *Communications Biology* 2025. [PMC12635244](https://pmc.ncbi.nlm.nih.gov/articles/PMC12635244/)
 
-micov is published, on pip and conda, and integrated with Qiita. Existing `.cov` and Parquet artifacts and the CLI surface are **contracts** — see Compatibility below.
+micov is published, on pip and conda. It was integrated with Qiita; **that support was removed in M4** and may be revisited. Existing `.cov` and Parquet artifacts and the CLI surface are **contracts** — see Compatibility below.
 
 ## Priorities
 
@@ -95,12 +95,16 @@ If a test produces an **incorrect expected value**: DO NOT change the expected v
 
 micov is published and its outputs are in the wild. Unless a task explicitly overrides this:
 
-- **`.cov` is now read-only.** `micov compress` stopped writing BED3; every reader (`nonqiita-to-parquet`, `qiita-to-parquet`, `consolidate`, the Qiita `coverages.tgz` layout) is unchanged and existing artifacts stay valid. `example/coverages/*.cov.gz` are kept as committed fixtures and are the only independent record of what the pre-miint implementation produced.
+- **`.cov` is now read-only, and `cov-to-parquet` is its only reader.** `micov compress` stopped writing BED3 in M3; M4 removed the Qiita readers. Existing `.cov` artifacts stay valid. `example/coverages/*.cov.gz` are kept as committed fixtures and are the only independent record of what the pre-miint implementation produced.
 
-- **CLI surface is frozen**, with three approved exceptions taken so far. **(3)** `micov compress` now takes SAM/BAM only and writes `{output}.coverage.parquet` + `{output}.covered_positions.parquet`; `--lengths` and `--output` became required, `--sample-id` was added, and the BED3 input path, the two TSV summary modes and `--taxonomy` were removed. `.cov` stays readable everywhere else. **(2)** Windows and Intel macOS were dropped (see below). **(1)** the original: the `click<8.2` pin has been **removed** and `micov per-sample` is now the canonical name. pallets/click#2604 strips the `_group` suffix when deriving a command name, so the `per_sample_group` callback registers as `per-sample`; `per-sample-group` no longer resolves. Recorded in `ChangeLog.md`. The registered set is exactly: `binning`, `compress`, `consolidate`, `extract-sample-presence`, `nonqiita-to-parquet`, `per-sample`, `position-plot`, `qiita-coverage`, `qiita-to-parquet`.
-- **Output file formats are frozen.** `.cov` / `.cov.gz` BED-like TSVs, `{base}.coverage.parquet` and `{base}.covered_positions.parquet` column names and types, and the Qiita `coverages.tgz` layout must stay readable by released micov versions and by Qiita.
+- **CLI surface is frozen**, and the migration has taken four approved exceptions. The registered set is now exactly: `binning`, `compress`, `cov-to-parquet`, `extract-sample-presence`, `per-sample`, `position-plot`, plus the hidden alias `nonqiita-to-parquet`. Every exception is recorded in `ChangeLog.md`.
+  1. **`per-sample`** is the canonical name; the `click<8.2` pin was removed. pallets/click#2604 strips the `_group` suffix when deriving a command name, so the `per_sample_group` callback registers as `per-sample`; `per-sample-group` no longer resolves.
+  2. **Windows and Intel macOS were dropped** (see Platform support below).
+  3. **`compress` takes SAM/BAM only** and writes `{output}.coverage.parquet` + `{output}.covered_positions.parquet`; `--lengths` and `--output` became required, `--sample-id` was added, and the BED3 input path, the two TSV summary modes and `--taxonomy` were removed.
+  4. **Qiita support was removed and `nonqiita-to-parquet` renamed.** `qiita-coverage`, `qiita-to-parquet` and `consolidate` are gone; `nonqiita-to-parquet` became `cov-to-parquet` and survives only as a hidden alias. `micov/tests/test_equivalence.py` pins all of this — the frozen set, that the three Qiita names do not resolve, and that the alias is hidden but works.
+- **Output file formats are frozen.** `.cov` / `.cov.gz` BED-like TSVs, and `{base}.coverage.parquet` / `{base}.covered_positions.parquet` column names and types, must stay readable by released micov versions. The Qiita `coverages.tgz` layout is no longer produced or read; no specimen of it survives in the repo, so reviving it means reconstructing the layout from git history (`example/consolidate/consolidated.tgz`, removed in M4).
 - **Published numbers must reproduce.** Coverage values, KS statistics, and p-values are cited in the paper. A change that moves them is a regression, not an improvement.
-- **Platform support was narrowed, deliberately.** Windows and Intel macOS were dropped because miint publishes no build for them; supported platforms are Linux (x86_64, aarch64) and macOS on Apple silicon. micov also now needs network access on its **first** run to fetch the extension — a deployment-surface change that matters for Qiita and for HPC compute nodes without egress. `MICOV_MIINT_EXTENSION_PATH` and a pre-seeded `~/.duckdb/extensions/` are the two ways around it.
+- **Platform support was narrowed, deliberately.** Windows and Intel macOS were dropped because miint publishes no build for them; supported platforms are Linux (x86_64, aarch64) and macOS on Apple silicon. micov also now needs network access on its **first** run to fetch the extension — a deployment-surface change that matters for HPC compute nodes without egress. `MICOV_MIINT_EXTENSION_PATH` and a pre-seeded `~/.duckdb/extensions/` are the two ways around it.
 
 ## Coordinate and coverage conventions
 
@@ -116,8 +120,8 @@ micov is published and its outputs are in the wild. Unless a task explicitly ove
 SAM/BAM (headerless)                          .cov / .cov.gz  (read-only now)
    │  micov compress                              │  BED3; stem is the sample_id
    │  read_alignments + compress_intervals        │
-   │  --lengths is the reference map              │  micov nonqiita-to-parquet
-   │                                              │  micov qiita-to-parquet (.tgz)
+   │  --lengths is the reference map              │  micov cov-to-parquet
+   │                                              │  (was nonqiita-to-parquet)
    ▼                                              ▼
 {base}.covered_positions.parquet   (genome_id, start, stop, sample_id)   — large
 {base}.coverage.parquet            (genome_id, sample_id, covered, length, percent_covered) — small
@@ -134,8 +138,8 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 |---|---|
 | `cli.py` | click command surface; the only user-facing contract |
 | `_view.py` | `View` — DuckDB session with three filter modes: none, genome-level (`constrain_features`), sub-genome region (`constrain_positions`). Only the third does real work: clips intervals to region bounds, re-compresses per sample, recomputes breadth against *region* length |
-| `_cov.py` | two interval-merge implementations: `compress` (numba + polars, still used by `_io.py`, `cli.py`, `_per_sample.py`) and `merge_intervals` (numpy, used by the curve path). Plus breadth, rank ordering, cumulative accumulation |
-| `_io.py` | parsers/writers; `compress_from_stream` flushes every 100 MB so memory is bounded on arbitrarily large SAM streams |
+| `_cov.py` | `merge_intervals` (numpy) plus rank ordering and cumulative accumulation, all on the curve path. **Polars-free since M4**, which deleted the second merge implementation (`compress`, numba + polars) along with `coverage_percent` |
+| `_io.py` | parsers/writers. `compress_alignments` is the miint ingest; `write_coverage_parquet` is the single producer of the frozen Parquet pair. Still holds polars for BED3 and metadata parsing — that is M5 |
 | `_plot.py` | matplotlib curves and position plots, plus the KS tests (largest module, no unit tests) |
 | `_quant.py` | binning |
 | `_constants.py` | column names and dtypes |
@@ -145,11 +149,10 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 
 ## Known traps
 
-- `_cov.compress_per_sample(df)` and `_per_sample.compress_per_sample(coverage, lengths)` are different functions with the same name and different signatures. Each module resolves its own; do not cross-import.
 - `.ks.tsv` outputs are comma-separated despite the extension (`_plot.py` calls `write_csv` without `separator`).
 - Bonferroni correction is described in the paper but not implemented; `_plot.py` writes raw KS p-values.
 - `ruff` runs with `fix = true`, so **`make lint` edits your files** rather than reporting. Check `git status` after linting.
-- `_test_has_header_taxonomy` (`_io.py`) tests *substrings*, not membership: `genome_id_columns` is the plain string `"genome_id"`, so a column named `genome` is accepted as a header. The plural names make it read as a collection. No test covers this function.
+- `_test_has_header` (`_io.py`) tests *substrings*, not membership: its column-name constants are plain strings, so a column named `genome` is accepted as a header. The plural names make them read as collections. Its taxonomy twin, `_test_has_header_taxonomy`, had the same defect and was deleted in M4 with the rest of the Qiita code.
 - `MANIFEST.in` has `graft micov`, so **any** stray file under `micov/` is packaged into the sdist — including untracked ones, which then breaks `check-manifest`. Keep scratch work in `localdocs/` (gitignored, pruned from the sdist).
 - `pyproject.toml` and `ci/conda_requirements.txt` **must declare the same duckdb floor**. They previously disagreed (`<1.3` in one, no ceiling in the other), and because CI's conda path installs with `pip install . --no-deps`, the conda and pypi paths silently tested different duckdb majors. Both now say `duckdb>=1.5.4`; change them together.
 - Python 3.13 is unclaimed but no longer blocked. The blocker was `pyarrow<16.0.0`, which capped at 15.0.2 and has no cp313 wheels; pyarrow is gone. Nothing has been run on 3.13, so add it to the CI matrix before claiming it.

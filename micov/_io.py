@@ -1,13 +1,8 @@
 import bz2
-import gzip
-import io
 import lzma
-import math
 import os
 import shutil
-import tarfile
 import tempfile
-import time
 from contextlib import contextmanager
 
 import polars as pl
@@ -22,18 +17,8 @@ from ._constants import (
     COLUMN_SAMPLE_ID,
     COLUMN_START,
     COLUMN_STOP,
-    COLUMN_TAXONOMY,
-    GENOME_COVERAGE_SCHEMA,
 )
-from ._cov import compress, coverage_percent
 from ._utils import logger
-
-
-class SetOfAll:
-    """A universal set."""
-
-    def __contains__(self, other):
-        return True
 
 
 def parse_bed_cov_to_df(data):
@@ -100,161 +85,6 @@ def _parse_bed_cov(data, feature_drop, feature_keep, lazy):
         return frame.collect()
 
 
-def parse_qiita_coverages(tgzs, *args, **kwargs):
-    """Parse a Qiita-style coverages.tgz file.
-
-    Parameters
-    ----------
-    tgzs : iterable of str
-        The file paths to process
-    *args : stuff or None
-        Forwarded to _parse_qiita_coverages
-    **kwargs : dict, optional
-        Forwarded to _parse_qiita_coverages
-
-    """
-    if not isinstance(tgzs, list | tuple | set | frozenset):
-        tgzs = [
-            tgzs,
-        ]
-
-    compress_size = kwargs.get("compress_size", 50_000_000)
-
-    if compress_size is not None:
-        assert isinstance(compress_size, int)
-        assert compress_size >= 0
-    else:
-        compress_size = math.inf
-        kwargs["compress_size"] = compress_size
-
-    frame = _parse_qiita_coverages(tgzs[0], *args, **kwargs)
-
-    if len(tgzs) == 1:
-        # short circuit, already compressed
-        return frame
-
-    for tgz in tgzs[1:]:
-        next_frame = _parse_qiita_coverages(tgz, *args, **kwargs)
-        frame = _single_df(_check_and_compress([frame, next_frame], compress_size))
-
-    if compress_size == math.inf:
-        return frame
-    else:
-        return _single_df(
-            _check_and_compress(
-                [
-                    frame,
-                ],
-                compress_size=0,
-            )
-        )
-
-
-def _parse_qiita_coverages(
-    tgz,
-    compress_size=50_000_000,
-    sample_keep=None,
-    sample_drop=None,
-    feature_keep=None,
-    feature_drop=None,
-    append_sample_id=False,
-):
-    """Parse an individual Qiita-style coverages.tgz file.
-
-    A coverages.tgz file contains BED-3 style coverage information per sample.
-
-    Parameters
-    ----------
-    tgz : str
-        The path to process
-    compress_size : int, optional
-        The number of records to buffer until a compression occurs
-    sample_keep : iterable, optional
-        Samples to explicitly keep (all others are dropped)
-    sample_drop : iterable, optional
-        Samples to explicitly drop (all others are kept)
-    feature_keep : iterable, optional
-        Features to explicitly keep (all others are dropped)
-    feature_drop : iterable, optiona;
-        Features to explicilty drop (all others are kept)
-    append_sample_id : bool
-        Whether to include in the resulting DataFrame the detected sample IDs
-
-    Returns
-    -------
-    pl.DataFrame
-        A dataframe representing the coverage data
-
-    """
-    # compress_size=None to disable compression
-    fp = tarfile.open(tgz)
-
-    try:
-        fp.extractfile("coverage_percentage.txt")
-    except KeyError as e:
-        raise KeyError(f"{tgz} does not look like a Qiita coverage tgz") from e
-
-    if sample_keep is None:
-        sample_keep = SetOfAll()
-
-    if sample_drop is None:
-        sample_drop = set()
-
-    coverages = []
-    for name in fp.getnames():
-        if "coverages/" not in name:
-            continue
-
-        _, filename = name.split("/")
-        sample_id = filename.rsplit(".", 1)[0]
-
-        if sample_id in sample_drop:
-            continue
-
-        if sample_id not in sample_keep:
-            continue
-
-        data = fp.extractfile(name)
-        frame = _parse_bed_cov(data, feature_drop, feature_keep, lazy=True)
-
-        if frame is None:
-            continue
-
-        if append_sample_id:
-            frame = frame.with_columns(pl.lit(sample_id).alias(COLUMN_SAMPLE_ID))
-
-        coverages.append(frame.collect())
-        coverages = _check_and_compress(coverages, compress_size)
-
-    if compress_size == math.inf:
-        return _single_df(coverages)
-    else:
-        return _single_df(_check_and_compress(coverages, compress_size=0))
-
-
-def _single_df(coverages):
-    """Map [pl.DataFrame, ...] -> pl.DataFrame."""
-    if len(coverages) > 1:
-        df = pl.concat(coverages, rechunk=True)
-    elif len(coverages) == 0:
-        raise ValueError("No coverages")
-    else:
-        df = coverages[0]
-
-    return df
-
-
-def _check_and_compress(coverages, compress_size):
-    """Check whether we have buffered enough, if so compress."""
-    rowcount = sum([len(df) for df in coverages])
-    if rowcount > compress_size:
-        df = compress(_single_df(coverages))
-        coverages = [
-            df,
-        ]
-    return coverages
-
-
 def _test_has_header(line):
     """Test whether a line appears to be a header."""
     if isinstance(line, bytes):
@@ -266,28 +96,6 @@ def _test_has_header(line):
         line.startswith("#")
         or line.split("\t")[0] in genome_id_columns
         or not line.split("\t")[1].strip().isdigit()
-    ):
-        has_header = True
-    else:
-        has_header = False
-
-    return has_header
-
-
-def _test_has_header_taxonomy(line):
-    """Test whether a line appears to be a taxonomy header."""
-    if isinstance(line, bytes):
-        line = line.decode("utf-8")
-
-    genome_id_columns = COLUMN_GENOME_ID
-    taxonomy_columns = COLUMN_TAXONOMY
-
-    if (
-        line.startswith("#")
-        or (
-            line.split("\t")[0] in genome_id_columns
-            and line.split("\t")[1] in taxonomy_columns
-        )
     ):
         has_header = True
     else:
@@ -358,40 +166,6 @@ def load_genome_lengths(con, lengths):
 
     if smallest <= 0:
         raise ValueError("Lengths of zero or less cannot be used")
-
-
-def parse_taxonomy(taxonomy):
-    """Parse a TSV representing feature and taxonomy information."""
-    with open(taxonomy) as fp:
-        first_line = fp.readline()
-
-    has_header = _test_has_header_taxonomy(first_line)
-    df = pl.read_csv(taxonomy, separator="\t", has_header=has_header)
-    genome_id_col = df.columns[0]
-    taxonomy_col = df.columns[1]
-
-    genome_ids = df[genome_id_col]
-    if len(genome_ids) != len(set(genome_ids)):
-        raise ValueError(f"'{genome_id_col}' is not unique")
-
-    rename = {genome_id_col: COLUMN_GENOME_ID, taxonomy_col: COLUMN_TAXONOMY}
-
-    return df[[genome_id_col, taxonomy_col]].rename(rename)
-
-
-def set_taxonomy_as_id(coverages, taxonomy):
-    """Add taxonomy information to a coverages DataFrame."""
-    missing = set(coverages[COLUMN_GENOME_ID]) - set(taxonomy[COLUMN_GENOME_ID])
-    if len(missing) > 0:
-        raise ValueError(
-            f"{len(missing)} genome(s) appear unrepresented in "
-            f"the taxonomy information, examples: "
-            f"{sorted(missing)[:5]}"
-        )
-
-    return coverages.join(taxonomy, on=COLUMN_GENOME_ID, how="inner").select(
-        COLUMN_TAXONOMY, pl.exclude(COLUMN_TAXONOMY)
-    )
 
 
 #: The table `compress_alignments` leaves behind: the frozen covered-positions
@@ -482,16 +256,16 @@ def compress_alignments(con, sam, sample_id, disable_compression=False):
 
     # htslib parses a non-SAM file as SAM without complaining and simply
     # yields nothing, so BED3 handed to `compress` used to produce two empty
-    # parquet files and exit 0. The old polars path errored here as well (via
-    # `_single_df`'s "No coverages"), and an empty result is never what the
-    # caller meant by asking to compress something.
+    # parquet files and exit 0. The polars path this replaced errored here
+    # too, and an empty result is never what the caller meant by asking to
+    # compress something.
     attributed = con.sql("""SELECT COUNT(*) FROM alignment_groups
                             WHERE reference != '*'""").fetchone()[0]
     if attributed == 0:
         raise ValueError(
             f"No alignments were read from '{sam}'. `micov compress` takes "
             "SAM/BAM; BED3 (.cov/.cov.gz) input goes to `micov "
-            "nonqiita-to-parquet` instead. If the input really is SAM, check "
+            "cov-to-parquet` instead. If the input really is SAM, check "
             "that it is not empty and that --lengths names its references."
         )
 
@@ -520,8 +294,8 @@ def _report_unattributed(con, sam):
     So this warns rather than raises. Raising would abort on ordinary SAM,
     which is full of unaligned reads; staying silent would hide a `--lengths`
     file that covers half the references. Note this is not new loss: micov
-    already dropped genomes missing from `--lengths`, at the join in
-    `coverage_percent`, since it has no length to compute breadth against.
+    already dropped genomes missing from `--lengths`, at the join against
+    `genome_lengths`, since a genome with no length has no breadth denominator.
     """
     unattributed = con.sql("""SELECT aligned_reads FROM alignment_groups
                               WHERE reference = '*'""").fetchall()
@@ -542,7 +316,7 @@ def _report_unattributed(con, sam):
 def write_coverage_parquet(con, positions, output):
     """Write the frozen two-file parquet pair from a covered-positions source.
 
-    Both `micov compress` and `micov nonqiita-to-parquet` land here, so the
+    Both `micov compress` and `micov cov-to-parquet` land here, so the
     format exists in one place. The split is load-bearing: `coverage.parquet`
     is one row per sample per genome and drives ordering and filtering, while
     `covered_positions.parquet` is large and only ever scanned with pushdown
@@ -582,71 +356,6 @@ def write_coverage_parquet(con, positions, output):
               FROM covered_amount JOIN genome_lengths USING ({COLUMN_GENOME_ID}))
         TO '{output}.coverage.parquet'
             (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
-
-
-def _add_file(tf, name, data):
-    """Add a file to a tgz."""
-    ti = tarfile.TarInfo(name)
-    ti.size = len(data)
-    ti.mtime = int(time.time())
-    tf.addfile(ti, io.BytesIO(data))
-
-
-def write_qiita_cov(name, paths, lengths):
-    """Construct a Qiita-style coverages.tgz.
-
-    Parameters
-    ----------
-    name : str
-        The path of the tgz to write.
-    paths : iterable
-        The paths of the coverage data to include in the tgz.
-    lengths : pl.DataFrame
-        The genome -> length information.
-
-    """
-    tf = tarfile.open(name, "w:gz")
-
-    coverages = []
-    for p in paths:
-        with open(p, "rb") as fp:
-            data = fp.read()
-
-        if len(data) == 0:
-            continue
-
-        base = os.path.basename(p)
-        if base.endswith(".cov.gz"):
-            data = gzip.decompress(data)
-            name = base.rsplit(".", 2)[0] + ".cov"
-        elif base.endswith(".cov"):
-            name = base
-        else:
-            name = base + ".cov"
-
-        name = f"coverages/{name}"
-
-        _add_file(tf, name, data)
-        current_coverage = _parse_bed_cov(io.BytesIO(data), None, None, False)
-        coverages.append(current_coverage)
-        coverages = _check_and_compress(coverages, compress_size=50_000_000)
-
-    coverage = _single_df(_check_and_compress(coverages, compress_size=0))
-
-    covdataname = "artifact.cov"
-    covdata = io.BytesIO()
-    coverage.write_csv(covdata, separator="\t", include_header=True)
-    covdata.seek(0)
-    _add_file(tf, covdataname, covdata.read())
-
-    genome_coverage = coverage_percent(coverage, lengths).collect()
-    pername = "coverage_percentage.txt"
-    perdata = io.BytesIO()
-    genome_coverage.write_csv(perdata, separator="\t", include_header=True)
-    perdata.seek(0)
-    _add_file(tf, pername, perdata.read())
-
-    tf.close()
 
 
 def parse_features_to_keep(path):
@@ -690,21 +399,6 @@ def parse_sample_metadata(path):
     """Naively parse sample metadata, do not infer types."""
     df = pl.read_csv(path, separator="\t", infer_schema_length=0)
     return df.rename({df.columns[0]: COLUMN_SAMPLE_ID})
-
-
-def parse_coverage(data, features_to_keep):
-    """Parse a simple TSV descriving total coverage."""
-    cov_df = pl.read_csv(
-        data.read(),
-        separator="\t",
-        new_columns=GENOME_COVERAGE_SCHEMA.columns,
-        schema_overrides=GENOME_COVERAGE_SCHEMA.dtypes_dict,
-    ).lazy()
-
-    if features_to_keep is not None:
-        cov_df = cov_df.filter(pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
-
-    return cov_df
 
 
 def _first_col_as_set(fp):

@@ -36,9 +36,9 @@ Sources of nondeterminism
    ``.tsv.gz`` bytes differ run to run even when the data is identical.
    => Decompress first, then compare content.
 
-3. ``ti.mtime = int(time.time())`` -- ``_io.py:390``
-   ``consolidated.tgz`` bytes differ run to run.
-   => Compare the member-name set plus each member's content.
+3. ``ti.mtime = int(time.time())`` -- the Qiita ``coverages.tgz`` writer
+   Archive bytes differed run to run. **Retired in M4**: micov no longer
+   writes tar archives, and ``assert_tgz_equal`` went with the format.
 
 4. matplotlib version, backend, and font availability
    PNG bytes are not reproducible across environments, and sizes drift
@@ -138,7 +138,6 @@ bisecting a migration milestone.
 import csv
 import gzip
 import math
-import tarfile
 from collections import Counter
 from pathlib import Path
 
@@ -229,8 +228,9 @@ def _cov_mismatch(got, want):
     genome blocks in nondeterministic order (source #8). A multiset rather
     than a set, so a duplicated interval is still caught.
 
-    Shared by :func:`assert_cov_equal` and :func:`assert_tgz_equal`, since
-    the ``.cov`` members inside a Qiita archive inherit the same instability.
+    Used by :func:`assert_cov_equal`. It also backed ``assert_tgz_equal``,
+    whose ``.cov`` archive members inherited the same instability, until M4
+    removed micov's Qiita support and that helper with it.
     """
     if not got or not want:
         return "empty .cov content, expected a header"
@@ -282,10 +282,11 @@ def assert_cov_equal(observed, expected):
 def assert_parquet_equal(observed, expected):
     """Assert two parquet files have the same ordered schema and row multiset.
 
-    Column order **is** part of the contract -- ``nonqiita-to-parquet`` and
-    ``qiita-to-parquet`` differ only in the column order of
-    ``coverage.parquet``, and Qiita reads these files -- so the schema is
-    compared as an ordered sequence of ``(name, type)``.
+    Column order **is** part of the contract: released micov versions read
+    these files, and the two Parquet producers micov used to have differed
+    only in where ``coverage.parquet`` put ``sample_id`` -- a difference
+    invisible to a row-only comparison. So the schema is compared as an
+    ordered sequence of ``(name, type)``.
 
     Row order is not part of the contract (source #6), so rows are compared
     with a bidirectional ``EXCEPT ALL``, which is multiset-exact.
@@ -538,62 +539,6 @@ def assert_ks_equal(observed, expected):
                     f"Monte Carlo {name} outside [0, 1] in {observed}: "
                     f"{value} (row {row})"
                 )
-
-
-def assert_tgz_equal(observed, expected):
-    """Assert two tar.gz archives hold the same members with the same content.
-
-    Member mtimes are ``int(time.time())`` at write (source #3), so archive
-    bytes differ every run. Only member names and payloads are compared.
-
-    ``.cov`` members are compared **order-insensitively**: the aggregate
-    ``artifact.cov`` is produced by ``compress()`` and so inherits source #8.
-    Verified against the committed ``consolidated.tgz``, where exactly that
-    member differs in row order and nothing else. All other members --
-    ``coverage_percentage.txt`` -- are compared exactly.
-    """
-    observed = _require_file(observed, "observed")
-    expected = _require_file(expected, "expected golden")
-
-    def members(path):
-        found = {}
-        with tarfile.open(path, "r:gz") as tar:
-            for info in tar.getmembers():
-                if info.isfile():
-                    found[info.name] = tar.extractfile(info).read()
-        return found
-
-    got, want = members(observed), members(expected)
-    if set(got) != set(want):
-        raise AssertionError(
-            f"tgz member names differ\n"
-            f"  observed: {observed}\n  expected: {expected}\n"
-            f"  only in observed: {sorted(set(got) - set(want))[:5]}\n"
-            f"  only in expected: {sorted(set(want) - set(got))[:5]}"
-        )
-
-    problems = []
-    for name in sorted(got):
-        if got[name] == want[name]:
-            continue
-        if name.endswith(".cov"):
-            mismatch = _cov_mismatch(
-                got[name].decode().splitlines(),
-                want[name].decode().splitlines(),
-            )
-            if mismatch is None:
-                continue
-            problems.append(f"{name}: {mismatch}")
-        else:
-            problems.append(f"{name}: content differs (compared exactly)")
-
-    if problems:
-        joined = "\n  ".join(problems[:5])
-        raise AssertionError(
-            f"tgz member content differs\n"
-            f"  observed: {observed}\n  expected: {expected}\n"
-            f"  {len(problems)} of {len(got)} members differ\n  {joined}"
-        )
 
 
 def assert_png_plausible(observed):

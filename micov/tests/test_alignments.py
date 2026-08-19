@@ -217,9 +217,9 @@ class ReferenceMapGuardTests(unittest.TestCase):
 class CoverageParquetTests(unittest.TestCase):
     """The two-file parquet pair is a frozen output format.
 
-    `compress` and `nonqiita-to-parquet` both write it, so it is produced from
-    one place; these pin the column names, order and types that Qiita and
-    released micov versions read.
+    `compress` and `cov-to-parquet` both write it, so it is produced from
+    one place; these pin the column names, order and types that released micov
+    versions read.
     """
 
     def setUp(self):

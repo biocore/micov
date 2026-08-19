@@ -1,5 +1,6 @@
 """microbiome coverage CLI."""
 
+import copy
 import os
 import sys
 
@@ -12,20 +13,15 @@ from ._constants import (
     COLUMN_START,
     COLUMN_STOP,
 )
-from ._cov import coverage_percent
 from ._io import (
     ALIGNMENT_POSITIONS_TABLE,
-    _first_col_as_set,
     compress_alignments,
     load_genome_lengths,
     parse_bed_cov_to_df,
     parse_genome_lengths,
-    parse_qiita_coverages,
     write_coverage_parquet,
-    write_qiita_cov,
 )
 from ._miint import connection
-from ._per_sample import per_sample_coverage
 from ._plot import per_sample_plots, single_sample_position_plot
 from ._quant import pos_to_bins
 from ._view import View
@@ -34,83 +30,6 @@ from ._view import View
 @click.group()
 def cli():
     """micov: microbiome coverage."""
-
-
-@cli.command()
-@click.option(
-    "--qiita-coverages",
-    type=click.Path(exists=True),
-    multiple=True,
-    required=True,
-    help="Pre-computed Qiita coverage data",
-)
-@click.option(
-    "--samples-to-keep",
-    type=click.Path(exists=True),
-    required=False,
-    help="A metadata file with the samples to keep",
-)
-@click.option(
-    "--samples-to-ignore",
-    type=click.Path(exists=True),
-    required=False,
-    help="A metadata file with the samples to ignore",
-)
-@click.option(
-    "--features-to-keep",
-    type=click.Path(exists=True),
-    required=False,
-    help="A metadata file with the features to keep",
-)
-@click.option(
-    "--features-to-ignore",
-    type=click.Path(exists=True),
-    required=False,
-    help="A metadata file with the features to ignore",
-)
-@click.option("--output", type=click.Path(exists=False), required=True)
-@click.option(
-    "--lengths", type=click.Path(exists=True), required=True, help="Genome lengths"
-)
-def qiita_coverage(
-    qiita_coverages,
-    samples_to_keep,
-    samples_to_ignore,
-    features_to_keep,
-    features_to_ignore,
-    output,
-    lengths,
-):
-    """Compute aggregated coverage from one or more Qiita coverage files."""
-    if samples_to_keep:
-        samples_to_keep = _first_col_as_set(samples_to_keep)
-
-    if samples_to_ignore:
-        samples_to_ignore = _first_col_as_set(samples_to_ignore)
-
-    if features_to_keep:
-        features_to_keep = _first_col_as_set(features_to_keep)
-
-    if features_to_ignore:
-        features_to_ignore = _first_col_as_set(features_to_ignore)
-
-    lengths = parse_genome_lengths(lengths)
-
-    coverage = parse_qiita_coverages(
-        qiita_coverages,
-        sample_keep=samples_to_keep,
-        sample_drop=samples_to_ignore,
-        feature_keep=features_to_keep,
-        feature_drop=features_to_ignore,
-    )
-    coverage.write_csv(
-        output + ".covered-positions.tsv", separator="\t", include_header=True
-    )
-
-    genome_coverage = coverage_percent(coverage, lengths).collect()
-    genome_coverage.write_csv(
-        output + ".coverage.tsv", separator="\t", include_header=True
-    )
 
 
 @cli.command()
@@ -215,7 +134,7 @@ def _sample_id_from_path(path):
     """Derive a sample ID from an alignment filename.
 
     `foo/bar/baz.sam.xz` becomes `baz`, matching how
-    `nonqiita-to-parquet` reads a sample ID out of a `.cov` filename and how
+    `cov-to-parquet` reads a sample ID out of a `.cov` filename and how
     the README's loop names its outputs.
     """
     name = os.path.basename(path)
@@ -249,83 +168,6 @@ def position_plot(positions, output, lengths):
 
 
 @cli.command()
-@click.option("--paths", type=click.Path(exists=True), required=True)
-@click.option("--output", type=click.Path(exists=False))
-@click.option(
-    "--lengths", type=click.Path(exists=True), required=True, help="Genome lengths"
-)
-def consolidate(paths, output, lengths):
-    """Consolidate coverage files into a Qiita-like coverage.tgz."""
-    paths = [path.strip() for path in open(paths)]
-    for path in paths:
-        if not os.path.exists(path):
-            raise OSError(f"{path} not found")
-    lengths = parse_genome_lengths(lengths)
-    write_qiita_cov(output, paths, lengths)
-
-
-@cli.command()
-@click.option(
-    "--qiita-coverages",
-    type=click.Path(exists=True),
-    multiple=True,
-    required=True,
-    help="Pre-computed Qiita coverage data",
-)
-@click.option("--output", type=click.Path(exists=False))
-@click.option(
-    "--lengths", type=click.Path(exists=True), required=True, help="Genome lengths"
-)
-@click.option(
-    "--samples-to-keep",
-    type=click.Path(exists=True),
-    required=False,
-    help="A metadata file with the sample metadata",
-)
-@click.option(
-    "--features-to-keep",
-    type=click.Path(exists=True),
-    required=False,
-    help="A metadata file with the features to keep",
-)
-@click.option(
-    "--features-to-ignore",
-    type=click.Path(exists=True),
-    required=False,
-    help="A metadata file with the features to ignore",
-)
-def qiita_to_parquet(
-    qiita_coverages,
-    lengths,
-    output,
-    samples_to_keep,
-    features_to_keep,
-    features_to_ignore,
-):
-    """Aggregate Qiita coverage to parquet."""
-    if features_to_keep:
-        features_to_keep = _first_col_as_set(features_to_keep)
-
-    if features_to_ignore:
-        features_to_ignore = _first_col_as_set(features_to_ignore)
-
-    if samples_to_keep:
-        samples_to_keep = _first_col_as_set(samples_to_keep)
-
-    lengths = parse_genome_lengths(lengths)
-    covered_positions, coverage = per_sample_coverage(
-        qiita_coverages, samples_to_keep, features_to_keep, features_to_ignore, lengths
-    )
-
-    coverage.collect().write_parquet(
-        output + ".coverage.parquet", compression="zstd", compression_level=3
-    )  # default afaik
-    covered_positions.write_parquet(
-        output + ".covered_positions.parquet", compression="zstd", compression_level=3
-    )  # default afaik
-
-
-@cli.command()
 @click.option(
     "--pattern",
     type=str,
@@ -338,7 +180,7 @@ def qiita_to_parquet(
 )
 @click.option("--memory", type=str, default="16gb", required=False)
 @click.option("--threads", type=int, default=4, required=False)
-def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
+def cov_to_parquet(pattern, lengths, output, memory, threads):
     """Aggregate BED3 files to parquet."""
     columns = "{'genome_id': 'VARCHAR', 'start': 'UINTEGER', 'stop': 'UINTEGER'}"
 
@@ -381,6 +223,19 @@ def nonqiita_to_parquet(pattern, lengths, output, memory, threads):
     #   .drop('filename')
     #   .sink_parquet(f"{output}.covered_positions_pl.parquet",
     #                 compression='zstd'))
+
+
+# `cov-to-parquet` was `nonqiita-to-parquet` until micov dropped Qiita support:
+# the name only ever meant "not the Qiita one", and there is no Qiita one now.
+# The old name stays registered as a hidden alias -- it is what the README
+# documented for two releases and what existing pipelines call -- but it is
+# kept out of `--help` so it is not what anyone reaches for next. A copy of the
+# command object rather than a second declaration, so the two names cannot
+# drift into two implementations.
+_nonqiita_alias = copy.copy(cov_to_parquet)
+_nonqiita_alias.name = "nonqiita-to-parquet"
+_nonqiita_alias.hidden = True
+cli.add_command(_nonqiita_alias)
 
 
 @cli.command()

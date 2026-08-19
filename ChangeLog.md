@@ -6,6 +6,23 @@ micov 0.0.1-dev
 
 Backward incompatible changes:
 
+* **Qiita support has been removed.** `micov qiita-coverage`,
+  `micov qiita-to-parquet` and `micov consolidate` are gone, along with the
+  reader and writer for the Qiita `coverages.tgz` layout. micov no longer
+  reads or writes tar archives, and `example/consolidate/` was removed with
+  them. This may be revisited; nothing about the Parquet or `.cov` formats
+  changed, so a future reader would be additive.
+* **`micov nonqiita-to-parquet` is now `micov cov-to-parquet`.** The old name
+  only ever meant "not the Qiita one". It stays registered as a **hidden
+  alias** -- existing scripts keep working -- but it no longer appears in
+  `micov --help`. Both names reach the same command object, so they cannot
+  diverge.
+
+  `example/parquet/` was regenerated with `cov-to-parquet`, since
+  `qiita-to-parquet` produced it and is gone. The rows are unchanged;
+  `sample_id` moved from the last column of `example.coverage.parquet` to the
+  first. Every downstream artifact -- the KS statistics, the position data,
+  the binning tables -- reproduces from the regenerated corpus.
 * **`micov compress` writes Parquet, not `.cov`.** It now produces
   `{output}.coverage.parquet` and `{output}.covered_positions.parquet`
   directly from SAM/BAM, collapsing the intermediate BED3 hop. Consequences:
@@ -19,15 +36,14 @@ Backward incompatible changes:
     `{output}.coverage.parquet` already carries `genome_id`, `covered`,
     `length` and `percent_covered`.
   - **BED3 input is no longer accepted.** Aggregating `.cov`/`.cov.gz` --
-    including one sample across several runs -- is `micov nonqiita-to-parquet`,
+    including one sample across several runs -- is `micov cov-to-parquet`,
     which takes a glob.
 
-  `.cov` remains fully *readable*: `nonqiita-to-parquet`, `qiita-to-parquet`
-  and `consolidate` are unchanged, the Qiita `coverages.tgz` layout is
-  untouched, and existing `.cov` artifacts stay valid input. Only the writer
-  went away. Verified against all 49 committed `example/samfiles/`: every
-  sample's intervals come back identical to the `example/coverages/*.cov.gz`
-  produced by the previous implementation.
+  `.cov` remains fully *readable* through `cov-to-parquet`, and existing
+  `.cov` artifacts stay valid input. Only the writer went away. Verified
+  against all 49 committed `example/samfiles/`: every sample's intervals come
+  back identical to the `example/coverages/*.cov.gz` produced by the previous
+  implementation.
 * micov's alignment ingest now runs through miint's `read_alignments` and
   `compress_intervals` rather than its own CIGAR walker and numba interval
   merge. **`numba` is no longer a dependency.**

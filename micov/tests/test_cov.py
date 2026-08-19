@@ -1,27 +1,18 @@
 import unittest
 
 import numpy as np
-import polars as pl
-import polars.testing as plt
 
 from micov._constants import (
-    BED_COV_SCHEMA,
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
     COLUMN_PERCENT_COVERED,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
-    COLUMN_START_DTYPE,
     COLUMN_STOP,
-    COLUMN_STOP_DTYPE,
-    GENOME_COVERAGE_SCHEMA,
-    GENOME_LENGTH_SCHEMA,
 )
 from micov._cov import (
-    compress,
     compute_cumulative,
-    coverage_percent,
     get_covered,
     merge_intervals,
     ordered_coverage,
@@ -55,53 +46,6 @@ def table(columns, rows):
 
 
 class CovTests(unittest.TestCase):
-    def test_compress(self):
-        exp = pl.DataFrame([['G123', 10, 50],
-                            ['G123', 51, 89],
-                            ['G123', 90, 100],
-                            ['G123', 101, 110],
-                            ['G456', 200, 300],
-                            ['G456', 400, 505]],
-                           orient='row',
-                           schema=BED_COV_SCHEMA.dtypes_flat)
-        data = pl.DataFrame([['G123', 11, 50],
-                             ['G123', 20, 30],
-                             ['G456', 200, 299],
-                             ['G123', 10, 12],
-                             ['G456', 201, 300],
-                             ['G123', 90, 100],
-                             ['G123', 51, 89],
-                             ['G123', 101, 110],
-                             ['G456', 400, 500],
-                             ['G456', 500, 505]],
-                            orient='row',
-                            schema=BED_COV_SCHEMA.dtypes_flat)
-        obs = compress(data).sort(COLUMN_GENOME_ID).sort(COLUMN_START)
-        plt.assert_frame_equal(obs, exp)
-
-    def test_coverage_percent(self):
-        data = pl.DataFrame([['G123', 11, 50],
-                             ['G456', 200, 299],
-                             ['G123', 90, 100],
-                             ['G456', 400, 500]],
-                            orient='row',
-                            schema=BED_COV_SCHEMA.dtypes_flat)
-        lengths = pl.DataFrame([['G123', 100],
-                                ['G456', 1000],
-                                ['G789', 500]],
-                               orient='row',
-                               schema=GENOME_LENGTH_SCHEMA.dtypes_flat)
-
-        g123_covered = (50 - 11) + (100 - 90)
-        g456_covered = (299 - 200) + (500 - 400)
-        exp = pl.DataFrame([['G123', g123_covered, 100, (g123_covered / 100) * 100],
-                            ['G456', g456_covered, 1000, (g456_covered / 1000) * 100]],
-                           orient='row',
-                           schema=GENOME_COVERAGE_SCHEMA.dtypes_flat)
-
-        obs = coverage_percent(data, lengths).sort(COLUMN_GENOME_ID).collect()
-        plt.assert_frame_equal(obs, exp)
-
     def test_slice_positions(self):
         df = table(POSITION_COLUMNS,
                    [['S1', 'G1', 1, 10],
@@ -214,24 +158,30 @@ class CovTests(unittest.TestCase):
 
 
 class MergeIntervalsTests(unittest.TestCase):
-    """merge_intervals must agree with compress, which is the published behaviour.
+    """merge_intervals is now the only interval merge micov has.
 
-    compress()'s own docstring is stale on this point -- it claims adjacent
-    intervals are left alone -- so these pin the code, not the prose.
+    It was written against `compress`, the numba+polars implementation the
+    published coverage values came from, and was checked case-for-case against
+    it until M4 deleted that path along with Qiita support. The randomized
+    check below now runs against a deliberately naive reference instead: the
+    property it defends -- that touching intervals collapse, and that breadth
+    is therefore what the paper reports -- outlived the implementation it was
+    originally cross-checked against.
     """
 
-    def _compress(self, rows):
-        """Run the existing numba-backed path over (start, stop) pairs."""
-        df = pl.DataFrame(
-            [['G1', start, stop] for start, stop in rows],
-            orient='row',
-            schema=[(COLUMN_GENOME_ID, str),
-                    (COLUMN_START, COLUMN_START_DTYPE),
-                    (COLUMN_STOP, COLUMN_STOP_DTYPE)])
-        out = compress(df).sort(COLUMN_START)
-        return list(zip(out[COLUMN_START].to_list(),
-                        out[COLUMN_STOP].to_list(),
-                        strict=True))
+    def _reference(self, rows):
+        """Merge by sort-and-sweep, the obvious way, with no numpy.
+
+        Touching intervals collapse (`stop == next start` -> one interval),
+        which is micov's convention and the one `compress` implemented.
+        """
+        merged = []
+        for start, stop in sorted(rows):
+            if merged and start <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], stop))
+            else:
+                merged.append((start, stop))
+        return merged
 
     def _merge(self, rows):
         starts = np.array([s for s, _ in rows], dtype=np.uint32)
@@ -267,7 +217,7 @@ class MergeIntervalsTests(unittest.TestCase):
                                         np.array([5, 20], dtype=np.uint32))
         self.assertEqual(int((stops - starts).sum()), 15)
 
-    def test_matches_compress_on_many_random_cases(self):
+    def test_matches_the_reference_on_many_random_cases(self):
         rng = np.random.default_rng(42)
         for case in range(200):
             n = int(rng.integers(1, 12))
@@ -276,7 +226,7 @@ class MergeIntervalsTests(unittest.TestCase):
             rows = list(zip(starts.tolist(),
                             (starts + widths).tolist(), strict=True))
             with self.subTest(case=case, rows=rows):
-                self.assertEqual(self._merge(rows), self._compress(rows))
+                self.assertEqual(self._merge(rows), self._reference(rows))
 
 
 if __name__ == '__main__':

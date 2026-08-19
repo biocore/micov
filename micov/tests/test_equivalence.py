@@ -9,11 +9,12 @@ neither too strict nor too loose.
 Why subprocesses rather than click's ``CliRunner``
 -------------------------------------------------
 
-``nonqiita_to_parquet`` issues ``duckdb.sql("CREATE TABLE genome_lengths …")``
-against the module-level default connection (``cli.py:307``), so a second
-in-process invocation fails with a duplicate-table error. Subprocesses also
-exercise the installed console script, which is itself part of the frozen CLI
-surface.
+Subprocesses exercise the installed console script and its exit codes, which
+are themselves part of the frozen CLI surface; an in-process call checks
+neither. They were originally forced on this suite -- ``nonqiita_to_parquet``
+created ``genome_lengths`` on DuckDB's module-level default connection, so a
+second in-process invocation died on a duplicate table -- and M3 fixed that,
+but the reason above is the one that still holds.
 
 Two tiers
 ---------
@@ -22,8 +23,8 @@ Two tiers
 works from an unpacked sdist, where ``MANIFEST.in`` has pruned ``example/``.
 
 **Full** (``MICOV_GOLDEN_FULL=1``) adds the whole ``example/`` corpus: 49
-samfiles, both Parquet producers, all four ``per-sample`` variants, and
-binning. Roughly two minutes, dominated almost entirely by ``compress``.
+samfiles, ``cov-to-parquet``, all four ``per-sample`` variants, and binning.
+Roughly two minutes, dominated almost entirely by ``compress``.
 
 Tests that need ``example/`` skip with a reason naming the missing directory
 rather than silently passing.
@@ -41,13 +42,11 @@ from typing import ClassVar
 
 from micov.cli import cli
 from micov.tests._golden import (
-    assert_cov_equal,
     assert_file_set,
     assert_gzip_text_equal,
     assert_ks_equal,
     assert_parquet_equal,
     assert_png_plausible,
-    assert_tgz_equal,
     assert_tsv_equal_unordered,
 )
 
@@ -61,19 +60,27 @@ FULL_TIER = os.environ.get("MICOV_GOLDEN_FULL") == "1"
 #: The frozen CLI surface. `per-sample-group` is deliberately absent: click 8.2
 #: strips the `_group` suffix from the callback name, and micov accepted that
 #: rename rather than keeping the `click<8.2` pin (see ChangeLog.md).
+#:
+#: `nonqiita-to-parquet` is registered but hidden -- it is the compatibility
+#: alias for `cov-to-parquet`, kept so existing scripts keep working. It is in
+#: this set because it resolves; `TestCovToParquetAlias` pins that it does not
+#: appear in `--help`.
 EXPECTED_COMMANDS = frozenset(
     {
         "binning",
         "compress",
-        "consolidate",
+        "cov-to-parquet",
         "extract-sample-presence",
         "nonqiita-to-parquet",
         "per-sample",
         "position-plot",
-        "qiita-coverage",
-        "qiita-to-parquet",
     }
 )
+
+#: Removed in M4 along with micov's Qiita support. Named individually rather
+#: than left to the set comparison above so a regression says *which* command
+#: came back and why that matters.
+REMOVED_QIITA_COMMANDS = ("qiita-coverage", "qiita-to-parquet", "consolidate")
 
 BIN_STATS_KEYS = ("genome_id", "dog", "bin_idx")
 BIN_VARIANCE_KEYS = ("genome_id", "bin_idx")
@@ -139,12 +146,6 @@ class MicovCliTestCase(unittest.TestCase):
         path.write_bytes(proc.stdout)
         return path
 
-    def write_paths_file(self, name, paths):
-        """`consolidate --paths` takes a file listing one path per line."""
-        target = self.tmp / name
-        target.write_text("".join(f"{p}\n" for p in paths))
-        return target
-
 
 class TestCliSurface(unittest.TestCase):
     """The canary. A drift here silently broke the documented command name.
@@ -161,6 +162,29 @@ class TestCliSurface(unittest.TestCase):
 
     def test_per_sample_group_no_longer_resolves(self):
         self.assertNotIn("per-sample-group", cli.commands)
+
+    def test_qiita_commands_no_longer_resolve(self):
+        """Qiita support was removed in M4, and may be revisited.
+
+        Asserted by name rather than by the set comparison above so that a
+        partial revival -- one command back, its module still deleted -- fails
+        here instead of somewhere downstream.
+        """
+        for name in REMOVED_QIITA_COMMANDS:
+            with self.subTest(command=name):
+                self.assertNotIn(name, cli.commands)
+
+    def test_per_sample_module_is_gone(self):
+        """`_per_sample.py` was the last polars breadth path.
+
+        Its only callers were the Qiita commands. If it comes back, `_cov.py`
+        is no longer polars-free and the module-name collision with
+        `_cov.compress_per_sample` is back with it.
+        """
+        import importlib
+
+        with self.assertRaises(ImportError):
+            importlib.import_module("micov._per_sample")
 
     def test_per_sample_still_declares_percentile(self):
         """A stale shadowing install lacked this flag; that cost an audit pass."""
@@ -188,13 +212,53 @@ class TestCliSurface(unittest.TestCase):
 
 
 @requires_micov
+class TestCovToParquetAlias(MicovCliTestCase):
+    """`nonqiita-to-parquet` keeps working under its new name.
+
+    The old name only ever meant "not the Qiita one", and with Qiita support
+    gone it names nothing. It stays registered as a hidden alias rather than
+    being deleted outright because it is the command the README documented for
+    two releases and is what existing pipelines call; hidden, because it should
+    not be what anyone reaches for now.
+    """
+
+    def test_old_name_still_runs(self):
+        """The alias is a working command, not just a registered name."""
+        prefix = self.tmp / "alias"
+        self.micov(
+            "nonqiita-to-parquet",
+            "--pattern",
+            f"{DATA}/mini_sample*.cov",
+            "--output",
+            prefix,
+            "--lengths",
+            DATA / "mini_lengths.tsv",
+        )
+        assert_parquet_equal(
+            Path(f"{prefix}.coverage.parquet"),
+            GOLDEN / "mini.coverage.parquet",
+        )
+
+    def test_old_name_is_hidden_and_new_name_is_not(self):
+        listing = self.micov("--help").stdout.decode()
+        self.assertIn("cov-to-parquet", listing)
+        self.assertNotIn("nonqiita-to-parquet", listing)
+
+    def test_both_names_reach_the_same_callback(self):
+        """An alias that drifted into a second implementation is worse than none."""
+        self.assertIs(
+            cli.commands["nonqiita-to-parquet"].callback,
+            cli.commands["cov-to-parquet"].callback,
+        )
+
+
+@requires_micov
 class TestCompressFastTier(MicovCliTestCase):
     """`compress` writes the parquet pair from SAM/BAM.
 
     The BED3 `.cov` output mode and the two TSV summary modes are gone: micov
-    now goes SAM -> parquet in one step. `.cov` remains *readable* (Qiita
-    artifacts, `nonqiita-to-parquet`, `consolidate`) -- only `compress` stopped
-    writing it.
+    now goes SAM -> parquet in one step. `.cov` remains *readable* via
+    `cov-to-parquet` -- only `compress` stopped writing it.
     """
 
     LENGTHS = DATA / "lengths.tsv"
@@ -284,10 +348,17 @@ class TestCompressFastTier(MicovCliTestCase):
         self.assertIn(b"--lengths", proc.stderr)
 
     def test_bed3_input_is_no_longer_accepted(self):
-        """`.cov` aggregation moved to nonqiita-to-parquet.
+        """`.cov` aggregation moved to cov-to-parquet.
 
         Keeping BED3 here would have meant two commands writing the same
         frozen format from the same input.
+
+        The message is asserted, not just the exit code. htslib reads a BED3
+        file as SAM without complaining and simply yields nothing, so the
+        failure micov raises here is the *only* thing that tells the user
+        their input went to the wrong command -- and it names that command, so
+        a rename that misses the string strands them. M4 renamed it once
+        already.
         """
         cov = self.tmp / "in.cov"
         cov.write_text("genome_id\tstart\tstop\nG1\t1\t10\n")
@@ -298,23 +369,25 @@ class TestCompressFastTier(MicovCliTestCase):
         )
 
         self.assertNotEqual(proc.returncode, 0)
-
+        message = proc.stderr.decode(errors="replace")
+        self.assertIn("cov-to-parquet", message)
+        self.assertIn("cov-to-parquet", set(cli.commands))
 
 
 @requires_micov
 class TestParquetFastTier(MicovCliTestCase):
-    """`nonqiita-to-parquet` over the mini corpus.
+    """`cov-to-parquet` over the mini corpus.
 
-    This is the only golden coverage `nonqiita-to-parquet` has. The committed
-    `example/parquet/` files came from `qiita-to-parquet`, and the two commands
-    disagree on `coverage.parquet` column order, so they are not
-    interchangeable despite how README steps 3 and 4 read.
+    Since M4 this is the *only* producer of the parquet pair from `.cov`
+    input -- `qiita-to-parquet`, which wrote the committed `example/parquet/`
+    files, is gone and that corpus was regenerated here. So these goldens are
+    now the whole of micov's coverage for the `.cov` aggregation path.
     """
 
     def build(self):
         prefix = self.tmp / "mini"
         self.micov(
-            "nonqiita-to-parquet",
+            "cov-to-parquet",
             "--pattern",
             f"{DATA}/mini_sample*.cov",
             "--output",
@@ -336,7 +409,7 @@ class TestParquetFastTier(MicovCliTestCase):
     def test_can_be_invoked_twice_in_one_process(self):
         """Two in-process invocations must both succeed.
 
-        This asserted the opposite until M3. `nonqiita_to_parquet` created
+        This asserted the opposite until M3. The command created
         `genome_lengths` on DuckDB's module-level default connection -- a
         process-global catalog -- so a second call died with "Table with name
         genome_lengths already exists". The old test pinned that as though it
@@ -348,7 +421,7 @@ class TestParquetFastTier(MicovCliTestCase):
         exercise the console script and its exit codes, which in-process calls
         cannot.
         """
-        from micov.cli import nonqiita_to_parquet
+        from micov.cli import cov_to_parquet
 
         args = [
             "--pattern",
@@ -357,7 +430,7 @@ class TestParquetFastTier(MicovCliTestCase):
             str(DATA / "mini_lengths.tsv"),
         ]
         for output in ("one", "two"):
-            result = nonqiita_to_parquet.main(
+            result = cov_to_parquet.main(
                 [*args, "--output", str(self.tmp / output)],
                 standalone_mode=False,
             )
@@ -367,72 +440,6 @@ class TestParquetFastTier(MicovCliTestCase):
         # just "did not raise"
         for output in ("one", "two"):
             self.assertTrue((self.tmp / f"{output}.coverage.parquet").exists())
-
-
-@requires_micov
-class TestQiitaRoundTripFastTier(MicovCliTestCase):
-    """`consolidate` then `qiita-coverage`, neither of which had a golden."""
-
-    def test_consolidate_then_qiita_coverage_match_goldens(self):
-        covs = [DATA / f"mini_sample{s}.cov" for s in ("A", "B", "C")]
-        paths = self.write_paths_file("paths.txt", covs)
-        tgz = self.tmp / "mini_consolidated.tgz"
-        self.micov(
-            "consolidate",
-            "--paths",
-            paths,
-            "--output",
-            tgz,
-            "--lengths",
-            DATA / "mini_lengths.tsv",
-        )
-        self.micov(
-            "qiita-coverage",
-            "--qiita-coverages",
-            tgz,
-            "--output",
-            self.tmp / "mini_qiita",
-            "--lengths",
-            DATA / "mini_lengths.tsv",
-        )
-        assert_tsv_equal_unordered(
-            self.tmp / "mini_qiita.coverage.tsv",
-            GOLDEN / "mini_qiita.coverage.tsv",
-            sort_keys=("genome_id",),
-        )
-        assert_cov_equal(
-            self.tmp / "mini_qiita.covered-positions.tsv",
-            GOLDEN / "mini_qiita.covered-positions.tsv",
-        )
-
-    def test_consolidated_archive_layout(self):
-        """The Qiita `.tgz` layout is a frozen format Qiita itself reads."""
-        import tarfile
-
-        covs = [DATA / f"mini_sample{s}.cov" for s in ("A", "B", "C")]
-        paths = self.write_paths_file("paths.txt", covs)
-        tgz = self.tmp / "out.tgz"
-        self.micov(
-            "consolidate",
-            "--paths",
-            paths,
-            "--output",
-            tgz,
-            "--lengths",
-            DATA / "mini_lengths.tsv",
-        )
-        with tarfile.open(tgz) as tar:
-            names = {m.name for m in tar.getmembers() if m.isfile()}
-        self.assertEqual(
-            names,
-            {
-                "coverages/mini_sampleA.cov",
-                "coverages/mini_sampleB.cov",
-                "coverages/mini_sampleC.cov",
-                "artifact.cov",
-                "coverage_percentage.txt",
-            },
-        )
 
 
 @requires_micov
@@ -449,7 +456,7 @@ class TestSamplePresenceFastTier(MicovCliTestCase):
     def run_presence(self):
         prefix = self.tmp / "mini"
         self.micov(
-            "nonqiita-to-parquet",
+            "cov-to-parquet",
             "--pattern",
             f"{DATA}/mini_sample*.cov",
             "--output",
@@ -498,7 +505,7 @@ class TestSamplePresenceFastTier(MicovCliTestCase):
         """Without positions the command must fail loudly, not emit nothing."""
         prefix = self.tmp / "mini"
         self.micov(
-            "nonqiita-to-parquet",
+            "cov-to-parquet",
             "--pattern",
             f"{DATA}/mini_sample*.cov",
             "--output",
@@ -529,7 +536,7 @@ class TestBinningAndPlotsFastTier(MicovCliTestCase):
     def test_binning_emits_expected_files_and_headers(self):
         prefix = self.tmp / "mini"
         self.micov(
-            "nonqiita-to-parquet",
+            "cov-to-parquet",
             "--pattern",
             f"{DATA}/mini_sample*.cov",
             "--output",
@@ -602,7 +609,7 @@ class TestCompressFullCorpus(MicovCliTestCase):
 
     The `.cov` files stay committed as fixtures even though `compress` no
     longer writes that format -- they are still valid input to
-    `nonqiita-to-parquet`, and they are the only independent record of what the
+    `cov-to-parquet`, and they are the only independent record of what the
     old implementation produced.
     """
 
@@ -642,13 +649,26 @@ class TestCompressFullCorpus(MicovCliTestCase):
 @requires_example
 @requires_full_tier
 class TestParquetFullCorpus(MicovCliTestCase):
-    def test_qiita_to_parquet_matches_committed(self):
-        """`qiita-to-parquet` is the provenance of `example/parquet/`."""
+    """`cov-to-parquet` is now the provenance of `example/parquet/`.
+
+    It was `qiita-to-parquet` until M4, and that command is gone, so the
+    corpus was regenerated from `example/coverages/*.cov.gz`. The rows are
+    unchanged; `sample_id` moved from the trailing column position to the
+    leading one, which is the whole of the difference between the two
+    producers.
+
+    This matters more than one test usually does: every downstream golden --
+    binning, sample presence, all four `per-sample` variants -- is computed
+    from this corpus, so without a producer to check it against, a corrupted
+    regeneration would look like a consistent set of "new correct" answers.
+    """
+
+    def test_matches_committed(self):
         prefix = self.tmp / "example"
         self.micov(
-            "qiita-to-parquet",
-            "--qiita-coverages",
-            EXAMPLE / "consolidate" / "consolidated.tgz",
+            "cov-to-parquet",
+            "--pattern",
+            f"{EXAMPLE}/coverages/*.cov.gz",
             "--output",
             prefix,
             "--lengths",
@@ -660,84 +680,6 @@ class TestParquetFullCorpus(MicovCliTestCase):
                     Path(f"{prefix}.{part}.parquet"),
                     EXAMPLE / "parquet" / f"example.{part}.parquet",
                 )
-
-    def test_nonqiita_to_parquet_agrees_except_on_column_order(self):
-        """Pins a real incompatibility between the two producers.
-
-        README steps 3 and 4 write the same prefix and read as
-        interchangeable, but `nonqiita-to-parquet` puts `sample_id` first
-        while `qiita-to-parquet` puts it last. The rows are identical. If the
-        migration ever aligns them, this test fails and the README and the
-        compatibility contract both need updating.
-        """
-        import duckdb
-
-        prefix = self.tmp / "nonqiita"
-        self.micov(
-            "nonqiita-to-parquet",
-            "--pattern",
-            f"{EXAMPLE}/coverages/*.cov.gz",
-            "--output",
-            prefix,
-            "--lengths",
-            EXAMPLE / "metadata" / "length.tsv",
-        )
-        committed = EXAMPLE / "parquet" / "example.coverage.parquet"
-        produced = Path(f"{prefix}.coverage.parquet")
-
-        con = duckdb.connect()
-        try:
-
-            def columns(path):
-                return [
-                    r[0]
-                    for r in con.execute(
-                        f"DESCRIBE SELECT * FROM read_parquet('{path}')"
-                    ).fetchall()
-                ]
-
-            produced_cols, committed_cols = columns(produced), columns(committed)
-            self.assertNotEqual(produced_cols, committed_cols)
-            self.assertEqual(set(produced_cols), set(committed_cols))
-            self.assertEqual(produced_cols[0], "sample_id")
-            self.assertEqual(committed_cols[-1], "sample_id")
-
-            ordered = ", ".join(committed_cols)
-            for left, right in ((produced, committed), (committed, produced)):
-                extra = con.execute(
-                    f"SELECT count(*) FROM ("
-                    f"SELECT {ordered} FROM read_parquet('{left}') EXCEPT ALL "
-                    f"SELECT {ordered} FROM read_parquet('{right}'))"
-                ).fetchone()[0]
-                self.assertEqual(extra, 0)
-        finally:
-            con.close()
-
-        assert_parquet_equal(
-            Path(f"{prefix}.covered_positions.parquet"),
-            EXAMPLE / "parquet" / "example.covered_positions.parquet",
-        )
-
-
-@requires_micov
-@requires_example
-@requires_full_tier
-class TestConsolidateFullCorpus(MicovCliTestCase):
-    def test_matches_committed_archive(self):
-        covs = sorted((EXAMPLE / "coverages").glob("*.cov.gz"))
-        self.assertEqual(len(covs), 49)
-        paths = self.write_paths_file("paths.txt", covs)
-        produced = self.tmp / "consolidated.tgz"
-        self.micov(
-            "consolidate",
-            "--paths",
-            paths,
-            "--output",
-            produced,
-            "--lengths",
-            EXAMPLE / "metadata" / "length.tsv",
-        )
-        assert_tgz_equal(produced, EXAMPLE / "consolidate" / "consolidated.tgz")
 
 
 @requires_micov

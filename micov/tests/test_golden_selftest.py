@@ -19,7 +19,6 @@ always runs in the fast tier.
 """
 
 import gzip
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,7 +30,6 @@ from micov.tests._golden import (
     assert_ks_equal,
     assert_parquet_equal,
     assert_png_plausible,
-    assert_tgz_equal,
     assert_tsv_equal_unordered,
 )
 
@@ -155,19 +153,22 @@ class TestAssertGzipTextEqual(GoldenSelfTestBase):
 class TestAssertParquetEqual(GoldenSelfTestBase):
     """Row order is unstable (source #6); column order is contractual."""
 
-    QIITA = (
+    #: `sample_id` last -- the column order `qiita-to-parquet` wrote, which
+    #: `example/parquet/` carried until M4 regenerated it. Kept as the fixture
+    #: because the pair below is what makes the ordered-schema check bite.
+    TRAILING_ID = (
         "SELECT 'G1' AS genome_id, 10 AS covered, 100 AS length, "
         "10.0 AS percent_covered, 's1' AS sample_id"
     )
-    QIITA_TWO_ROWS = QIITA + " UNION ALL SELECT 'G2', 20, 100, 20.0, 's2'"
+    TRAILING_ID_TWO_ROWS = TRAILING_ID + " UNION ALL SELECT 'G2', 20, 100, 20.0, 's2'"
 
     def test_identical_passes(self):
-        a = self.write_parquet("a.parquet", self.QIITA_TWO_ROWS)
-        b = self.write_parquet("b.parquet", self.QIITA_TWO_ROWS)
+        a = self.write_parquet("a.parquet", self.TRAILING_ID_TWO_ROWS)
+        b = self.write_parquet("b.parquet", self.TRAILING_ID_TWO_ROWS)
         assert_parquet_equal(a, b)
 
     def test_row_order_reversed_passes(self):
-        a = self.write_parquet("a.parquet", self.QIITA_TWO_ROWS)
+        a = self.write_parquet("a.parquet", self.TRAILING_ID_TWO_ROWS)
         reversed_rows = (
             "SELECT 'G2' AS genome_id, 20 AS covered, 100 AS length, "
             "20.0 AS percent_covered, 's2' AS sample_id "
@@ -177,13 +178,13 @@ class TestAssertParquetEqual(GoldenSelfTestBase):
         assert_parquet_equal(a, b)
 
     def test_column_order_change_fails(self):
-        """This is exactly how nonqiita- and qiita-to-parquet differ."""
-        a = self.write_parquet("a.parquet", self.QIITA)
-        nonqiita = (
+        """This is exactly how micov's two Parquet producers used to differ."""
+        a = self.write_parquet("a.parquet", self.TRAILING_ID)
+        leading_id = (
             "SELECT 's1' AS sample_id, 'G1' AS genome_id, 10 AS covered, "
             "100 AS length, 10.0 AS percent_covered"
         )
-        b = self.write_parquet("b.parquet", nonqiita)
+        b = self.write_parquet("b.parquet", leading_id)
         with self.assertRaises(AssertionError):
             assert_parquet_equal(a, b)
 
@@ -202,8 +203,8 @@ class TestAssertParquetEqual(GoldenSelfTestBase):
             assert_parquet_equal(a, b)
 
     def test_changed_float_fails(self):
-        a = self.write_parquet("a.parquet", self.QIITA)
-        changed = self.QIITA.replace(
+        a = self.write_parquet("a.parquet", self.TRAILING_ID)
+        changed = self.TRAILING_ID.replace(
             "10.0 AS percent_covered", "10.5 AS percent_covered"
         )
         b = self.write_parquet("b.parquet", changed)
@@ -211,8 +212,8 @@ class TestAssertParquetEqual(GoldenSelfTestBase):
             assert_parquet_equal(a, b)
 
     def test_row_count_change_fails(self):
-        a = self.write_parquet("a.parquet", self.QIITA)
-        b = self.write_parquet("b.parquet", self.QIITA_TWO_ROWS)
+        a = self.write_parquet("a.parquet", self.TRAILING_ID)
+        b = self.write_parquet("b.parquet", self.TRAILING_ID_TWO_ROWS)
         with self.assertRaises(AssertionError):
             assert_parquet_equal(a, b)
 
@@ -240,8 +241,10 @@ class TestAssertParquetEqual(GoldenSelfTestBase):
             assert_parquet_equal(a, b)
 
     def test_changed_dtype_fails(self):
-        a = self.write_parquet("a.parquet", self.QIITA)
-        retyped = self.QIITA.replace("10 AS covered", "CAST(10 AS BIGINT) AS covered")
+        a = self.write_parquet("a.parquet", self.TRAILING_ID)
+        retyped = self.TRAILING_ID.replace(
+            "10 AS covered", "CAST(10 AS BIGINT) AS covered"
+        )
         b = self.write_parquet("b.parquet", retyped)
         with self.assertRaises(AssertionError):
             assert_parquet_equal(a, b)
@@ -446,73 +449,6 @@ class TestAssertKsEqual(GoldenSelfTestBase):
         b = self.write("b.ks.tsv", [KS_HEADER, KS_DETERMINISTIC[0], *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(a, b)
-
-
-class TestAssertTgzEqual(GoldenSelfTestBase):
-    """tgz member mtimes are `time.time()` (source #3); content is stable."""
-
-    def make_tgz(self, name, members, mtime):
-        path = self.tmp / name
-        with tarfile.open(path, "w:gz") as tar:
-            for member_name, payload in members.items():
-                src = self.tmp / f"_src_{member_name}"
-                src.write_bytes(payload)
-                info = tar.gettarinfo(str(src), arcname=member_name)
-                info.mtime = mtime
-                with open(src, "rb") as fp:
-                    tar.addfile(info, fp)
-        return path
-
-    def test_differing_mtimes_same_content_passes(self):
-        members = {"s1.cov": b"G1\t1\t2\n", "s2.cov": b"G1\t3\t4\n"}
-        a = self.make_tgz("a.tgz", members, mtime=1)
-        b = self.make_tgz("b.tgz", members, mtime=99999)
-        assert_tgz_equal(a, b)
-
-    def test_changed_member_content_fails(self):
-        a = self.make_tgz("a.tgz", {"s1.cov": b"G1\t1\t2\n"}, mtime=1)
-        b = self.make_tgz("b.tgz", {"s1.cov": b"G1\t1\t3\n"}, mtime=1)
-        with self.assertRaises(AssertionError):
-            assert_tgz_equal(a, b)
-
-    def test_missing_member_fails(self):
-        members = {"s1.cov": b"G1\t1\t2\n", "s2.cov": b"G1\t3\t4\n"}
-        a = self.make_tgz("a.tgz", members, mtime=1)
-        b = self.make_tgz("b.tgz", {"s1.cov": members["s1.cov"]}, mtime=1)
-        with self.assertRaises(AssertionError):
-            assert_tgz_equal(a, b)
-
-    def test_cov_member_row_order_passes(self):
-        """`artifact.cov` inside the archive inherits source #8.
-
-        Observed in the committed consolidated.tgz: that one member differs
-        in row order and nothing else.
-        """
-        header = b"genome_id\tstart\tstop\n"
-        rows = [b"G1\t1\t2\n", b"G1\t3\t4\n"]
-        a = self.make_tgz("a.tgz", {"artifact.cov": header + b"".join(rows)}, mtime=1)
-        b = self.make_tgz(
-            "b.tgz", {"artifact.cov": header + b"".join(reversed(rows))}, mtime=1
-        )
-        assert_tgz_equal(a, b)
-
-    def test_cov_member_changed_interval_fails(self):
-        header = b"genome_id\tstart\tstop\n"
-        a = self.make_tgz(
-            "a.tgz", {"artifact.cov": header + b"G1\t1\t2\n"}, mtime=1
-        )
-        b = self.make_tgz(
-            "b.tgz", {"artifact.cov": header + b"G1\t1\t3\n"}, mtime=1
-        )
-        with self.assertRaises(AssertionError):
-            assert_tgz_equal(a, b)
-
-    def test_non_cov_member_row_order_fails(self):
-        """The tolerance is scoped to `.cov`; .txt members stay exact."""
-        a = self.make_tgz("a.tgz", {"coverage_percentage.txt": b"x\ny\n"}, mtime=1)
-        b = self.make_tgz("b.tgz", {"coverage_percentage.txt": b"y\nx\n"}, mtime=1)
-        with self.assertRaises(AssertionError):
-            assert_tgz_equal(a, b)
 
 
 class TestAssertPngPlausible(GoldenSelfTestBase):
