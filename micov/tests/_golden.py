@@ -47,9 +47,11 @@ Sources of nondeterminism
       deliberately unguarded; the plotted values are guarded instead via the
       ``.tsv.gz`` position data and the ``.ks.tsv`` statistics.
 
-5. polars sort is not stable -- ``cli.py:535``
-   Ties in ``sample_hits_std`` order arbitrarily, so row order within a tie
-   block of ``stats_by_variance_of_sample_hits.tsv`` varies.
+5. Ties in an ``ORDER BY`` are broken arbitrarily
+   Row order within a tie block of ``stats_by_variance_of_sample_hits.tsv``
+   varies. Originally attributed to polars' unstable sort; it survived the
+   move to DuckDB, and **the file differs run to run on byte-identical
+   input** -- measured in M4, where three rows share one ``sample_hits_std``.
    => Sort-normalize with explicit keys before comparing.
 
 6. DuckDB parallel write
@@ -62,9 +64,11 @@ Sources of nondeterminism
    varies with ``PYTHONHASHSEED``.
    => Covered by the same explicit-key normalization as #5.
 
-8. ``group_by`` without ``maintain_order=True`` -- ``_cov.py:243``
-   ``compress()`` accumulates one frame per genome in whatever order polars
-   yields groups, so ``.cov`` row order is not stable. Content is.
+8. Genome block order in ``.cov`` is not stable
+   ``compress()`` accumulated one frame per genome in whatever order polars
+   yielded groups. That function was deleted in M4 and micov no longer writes
+   ``.cov`` at all, but ``example/coverages/*.cov.gz`` were frozen under it
+   and are still read as fixtures, so the comparator is still needed.
    => Order-insensitive ``.cov`` comparison.
    Corroboration that this was known but never written down: ``cli_test.sh``
    already pipes both sides through ``sort``.

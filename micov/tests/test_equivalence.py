@@ -577,23 +577,63 @@ class TestBinningAndPlotsFastTier(MicovCliTestCase):
         self.assertGreater(len(bins), 1)
         self.assertGreater(len(variance), 1)
 
+    #: `mini_sampleA.cov` covers exactly these two genomes.
+    POSITION_PLOT_GENOMES: ClassVar[tuple] = ("G000000001", "G000000002")
+
+    def run_position_plot(self, outdir, from_stdin=False):
+        args = ["position-plot", "--lengths", DATA / "mini_lengths.tsv",
+                "--output", outdir / "plot"]
+        cov = DATA / "mini_sampleA.cov"
+        if from_stdin:
+            return self.micov(*args, stdin_bytes=cov.read_bytes())
+        return self.micov(*args, "--positions", cov)
+
     def test_position_plot_writes_a_png_per_genome(self):
         outdir = self.tmp / "pp"
         outdir.mkdir()
-        self.micov(
-            "position-plot",
-            "--positions",
-            DATA / "mini_sampleA.cov",
-            "--lengths",
-            DATA / "mini_lengths.tsv",
-            "--output",
-            outdir / "plot",
-        )
+        self.run_position_plot(outdir)
         pngs = sorted(outdir.glob("*.png"))
         self.assertEqual(len(pngs), 2, f"expected one PNG per genome, got {pngs}")
         for png in pngs:
             with self.subTest(png=png.name):
                 assert_png_plausible(png)
+
+    def test_position_plot_names_files_after_the_genome(self):
+        """The genome ID has to appear in the filename, and only the ID.
+
+        These were written as `plot.('G000000001',).position-plot.png` -- a
+        literal Python tuple repr, because polars `group_by` yields tuple keys
+        and the name went straight into an f-string. The old test globbed
+        `*.png` and counted two, so it never saw this. Whatever writes these
+        files, the name is what a user greps for.
+        """
+        outdir = self.tmp / "pp"
+        outdir.mkdir()
+        self.run_position_plot(outdir)
+
+        self.assertEqual(
+            sorted(p.name for p in outdir.glob("*.png")),
+            [f"plot.{genome}.position-plot.png"
+             for genome in self.POSITION_PLOT_GENOMES],
+        )
+
+    def test_position_plot_reads_stdin(self):
+        """`--positions` is optional, so the stdin path is advertised.
+
+        It did not work: micov peeked at the first line to sniff a header and
+        then rewound, which a pipe cannot do, so this died with
+        `io.UnsupportedOperation: underlying stream is not seekable`. A CLI
+        that offers a path has to have one.
+        """
+        outdir = self.tmp / "pp"
+        outdir.mkdir()
+        self.run_position_plot(outdir, from_stdin=True)
+
+        self.assertEqual(
+            sorted(p.name for p in outdir.glob("*.png")),
+            [f"plot.{genome}.position-plot.png"
+             for genome in self.POSITION_PLOT_GENOMES],
+        )
 
 
 @requires_micov

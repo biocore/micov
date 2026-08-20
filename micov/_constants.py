@@ -1,137 +1,26 @@
-import polars as pl
+"""Column names, and the values micov writes into them.
+
+These names are a **frozen output contract**: they are the column headers of
+`{base}.coverage.parquet` and `{base}.covered_positions.parquet`, and released
+micov versions read files written under them.
+
+This module used to also carry polars dtypes and seven `_SCHEMA` objects
+describing frames micov passed around. Those went in M5 -- the schemas belong
+to whatever produces the data, which is now SQL, and every one of them had
+been left without a caller by an earlier milestone. `micov/tests/test_view.py`
+states the same types in DuckDB's terms, which is what they are on disk.
+"""
 
 COLUMN_GENOME_ID = "genome_id"
-COLUMN_GENOME_ID_DTYPE = str
 COLUMN_SAMPLE_ID = "sample_id"
-COLUMN_SAMPLE_ID_DTYPE = str
 COLUMN_START = "start"
-COLUMN_START_DTYPE = pl.UInt32
 COLUMN_STOP = "stop"
-COLUMN_STOP_DTYPE = pl.UInt32
-COLUMN_READ_ID = "read"
-COLUMN_READ_ID_DTYPE = str
-COLUMN_FLAG = "flag"
-COLUMN_FLAG_DTYPE = int
-COLUMN_CIGAR = "cigar"
-COLUMN_CIGAR_DTYPE = str
 COLUMN_LENGTH = "length"
-COLUMN_LENGTH_DTYPE = pl.UInt32
-COLUMN_TAXONOMY = "taxonomy"
-COLUMN_TAXONOMY_DTYPE = str
 COLUMN_COVERED = "covered"
-COLUMN_COVERED_DTYPE = pl.UInt32
 COLUMN_PERCENT_COVERED = "percent_covered"
-COLUMN_PERCENT_COVERED_DTYPE = float
 COLUMN_NAME = "name"
+COLUMN_REGION_ID = "region_id"
+
 PRESENT = "present"
 ABSENT = "absent"
 NOT_APPLICABLE = "not applicable"
-COLUMN_REGION_ID = "region_id"
-
-### should really probably just use a dataclass, and type annotations?
-
-
-class _SCHEMA:
-    def __init__(self):
-        self.dtypes_dict = dict(self.dtypes_flat)
-        self.columns = tuple([c for c, _ in self.dtypes_flat])
-
-
-class _BED_COV_SCHEMA(_SCHEMA):
-    dtypes_flat = [  # noqa: RUF012
-        (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
-        (COLUMN_START, COLUMN_START_DTYPE),
-        (COLUMN_STOP, COLUMN_STOP_DTYPE),
-    ]
-
-
-BED_COV_SCHEMA = _BED_COV_SCHEMA()
-
-
-class _BED_COV_WITH_SAMPLEID_SCHEMA(_SCHEMA):
-    dtypes_flat = [  # noqa: RUF012
-        (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
-        (COLUMN_START, COLUMN_START_DTYPE),
-        (COLUMN_STOP, COLUMN_STOP_DTYPE),
-        (COLUMN_SAMPLE_ID, COLUMN_SAMPLE_ID_DTYPE),
-    ]
-
-
-BED_COV_SAMPLEID_SCHEMA = _BED_COV_WITH_SAMPLEID_SCHEMA()
-
-
-class _SAM_SUBSET_SCHEMA(_SCHEMA):
-    # we only need specific columns, so let's disregard things we are not
-    # concerned about.
-    # for binary coverage, we don't care about the flag, but we're parsing it
-    # now so we can care in the future.
-    column_indices = [0, 1, 2, 3, 5]  # noqa: RUF012
-    dtypes_flat = [  # noqa: RUF012
-        (COLUMN_READ_ID, COLUMN_READ_ID_DTYPE),
-        (COLUMN_FLAG, COLUMN_FLAG_DTYPE),
-        (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
-        (COLUMN_START, COLUMN_START_DTYPE),
-        (COLUMN_CIGAR, COLUMN_CIGAR_DTYPE),
-    ]
-
-
-SAM_SUBSET_SCHEMA = _SAM_SUBSET_SCHEMA()
-
-
-class _SAM_SUBSET_SCHEMA_PARSED(_SCHEMA):
-    dtypes_flat = [  # noqa: RUF012
-        (COLUMN_READ_ID, COLUMN_READ_ID_DTYPE),
-        (COLUMN_FLAG, COLUMN_FLAG_DTYPE),
-        (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
-        (COLUMN_START, COLUMN_START_DTYPE),
-        (COLUMN_CIGAR, COLUMN_CIGAR_DTYPE),
-        (COLUMN_STOP, COLUMN_STOP_DTYPE),
-    ]
-
-
-SAM_SUBSET_SCHEMA_PARSED = _SAM_SUBSET_SCHEMA_PARSED()
-
-
-class _GENOME_LENGTH_SCHEMA(_SCHEMA):
-    dtypes_flat = [  # noqa: RUF012
-        (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
-        (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-    ]
-
-
-GENOME_LENGTH_SCHEMA = _GENOME_LENGTH_SCHEMA()
-
-
-class _GENOME_TAXONOMY_SCHEMA(_SCHEMA):
-    dtypes_flat = [  # noqa: RUF012
-        (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
-        (COLUMN_TAXONOMY, COLUMN_TAXONOMY_DTYPE),
-    ]
-
-
-GENOME_TAXNOMY_SCHEMA = _GENOME_TAXONOMY_SCHEMA()
-
-
-class _GENOME_COVERAGE_SCHEMA(_SCHEMA):
-    dtypes_flat = [  # noqa: RUF012
-        (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
-        (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
-        (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-        (COLUMN_PERCENT_COVERED, COLUMN_PERCENT_COVERED_DTYPE),
-    ]
-
-
-GENOME_COVERAGE_SCHEMA = _GENOME_COVERAGE_SCHEMA()
-
-
-class _GENOME_COVERAGE_WITH_SAMPLEID_SCHEMA(_SCHEMA):
-    dtypes_flat = [  # noqa: RUF012
-        (COLUMN_GENOME_ID, COLUMN_GENOME_ID_DTYPE),
-        (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
-        (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-        (COLUMN_PERCENT_COVERED, COLUMN_PERCENT_COVERED_DTYPE),
-        (COLUMN_SAMPLE_ID, COLUMN_SAMPLE_ID_DTYPE),
-    ]
-
-
-GENOME_COVERAGE_WITH_SAMPLEID_SCHEMA = _GENOME_COVERAGE_WITH_SAMPLEID_SCHEMA()

@@ -1,33 +1,31 @@
+import csv
 import shutil
 import unittest
 from tempfile import mkdtemp
 
-import polars as pl
+import duckdb
 
 from micov._constants import (
     ABSENT,
     COLUMN_COVERED,
-    COLUMN_COVERED_DTYPE,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
-    COLUMN_LENGTH_DTYPE,
     COLUMN_NAME,
     COLUMN_PERCENT_COVERED,
-    COLUMN_PERCENT_COVERED_DTYPE,
     COLUMN_REGION_ID,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
-    COLUMN_START_DTYPE,
     COLUMN_STOP,
-    COLUMN_STOP_DTYPE,
     NOT_APPLICABLE,
     PRESENT,
 )
 from micov._view import View
 
 # The View hands back DuckDB relations, so expectations are plain rows plus the
-# SQL type of each column. The types restate `_constants.py` in DuckDB's terms:
-# UINTEGER is pl.UInt32, DOUBLE is float, VARCHAR is str.
+# SQL type of each column. Since M5 these are the *only* statement of the
+# fixture types: `_constants.py` no longer carries dtypes, and `make_cov_pos`
+# below builds the parquet from these same tuples, so a type can't drift
+# between what is written and what is asserted.
 METADATA_SCHEMA = (
     (COLUMN_SAMPLE_ID, "VARCHAR"),
     ("foo", "VARCHAR"),
@@ -89,33 +87,37 @@ POSITION_ROWS = [
 ]
 
 
-def make_cov_pos(d, name):
-    (
-        pl.LazyFrame(
-            COVERAGE_ROWS,
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_SAMPLE_ID, str),
-                (COLUMN_COVERED, COLUMN_COVERED_DTYPE),
-                (COLUMN_LENGTH, COLUMN_LENGTH_DTYPE),
-                (COLUMN_PERCENT_COVERED, COLUMN_PERCENT_COVERED_DTYPE),
-            ],
-        ).sink_parquet(f"{d}/{name}.coverage.parquet")
-    )
+def _write_parquet(con, path, schema, rows):
+    """Write `rows` to parquet with exactly the types `schema` declares."""
+    columns = ", ".join(f'"{name}" {sql_type}' for name, sql_type in schema)
+    placeholders = ", ".join("?" * len(schema))
+    con.execute(f"CREATE OR REPLACE TABLE fixture ({columns})")
+    con.executemany(f"INSERT INTO fixture VALUES ({placeholders})", rows)
+    con.execute(f"COPY fixture TO '{path}' (FORMAT PARQUET)")
 
-    (
-        pl.LazyFrame(
+
+def make_cov_pos(d, name):
+    """Build the parquet pair the View reads.
+
+    Written with DuckDB since M5. It was polars, which is the library released
+    micov used to write these files with -- so nothing in the suite now
+    produces parquet the way those released versions did. R7 checked that
+    round-trip in both directions and `example/coverages/*.cov.gz` remain as
+    independent artifacts, but the loss is real and deliberate.
+    """
+    con = duckdb.connect()
+    try:
+        _write_parquet(
+            con, f"{d}/{name}.coverage.parquet", COVERAGE_SCHEMA, COVERAGE_ROWS
+        )
+        _write_parquet(
+            con,
+            f"{d}/{name}.covered_positions.parquet",
+            POSITION_SCHEMA,
             POSITION_ROWS,
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_SAMPLE_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-            ],
-        ).sink_parquet(f"{d}/{name}.covered_positions.parquet")
-    )
+        )
+    finally:
+        con.close()
 
 
 def by_sample(rows, samples):
@@ -132,19 +134,20 @@ class ViewTests(unittest.TestCase):
         self.name = "testdata"
         make_cov_pos(self.d, self.name)
 
-        self.md = pl.DataFrame(
+        # (header, rows). Metadata reaches View as a TSV on disk, so there is
+        # nothing for a dataframe to do here but hold the rows on the way out;
+        # the types below are the file's, and View re-types on read.
+        self.md = (
+            (COLUMN_SAMPLE_ID, "foo"),
             [["S1", "a"], ["S2", "b"], ["S3", "c"], ["S4", "d"], ["S5", "e"]],
-            orient="row",
-            schema=[(COLUMN_SAMPLE_ID, str), ("foo", str)],
         )
-        self.feat = pl.DataFrame(
+        self.feat = (
+            (COLUMN_GENOME_ID,),
             [["G1"], ["G2"], ["G3"], ["G4"], ["G5"], ["G6"]],
-            orient="row",
-            schema=[(COLUMN_GENOME_ID, str)],
         )
 
-    def tsv(self, df):
-        """Write a fixture frame out as a TSV and return its path.
+    def tsv(self, header, rows):
+        """Write a fixture out as a TSV and return its path.
 
         View reads its metadata straight from disk with DuckDB rather than
         accepting a parsed frame, so fixtures are materialized the same way a
@@ -152,7 +155,10 @@ class ViewTests(unittest.TestCase):
         """
         self._tsv_count = getattr(self, "_tsv_count", 0) + 1
         path = f"{self.d}/fixture{self._tsv_count}.tsv"
-        df.write_csv(path, separator="\t")
+        with open(path, "w", newline="") as fp:
+            writer = csv.writer(fp, delimiter="\t", lineterminator="\n")
+            writer.writerow(header)
+            writer.writerows(rows)
         return path
 
     def tearDown(self):
@@ -182,7 +188,7 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(observed, sorted(rows))
 
     def test_view_sample_superset(self):
-        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(self.feat))
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*self.feat))
 
         # S4 and S5 have no coverage, so they drop out of the metadata
         self.assert_relation(
@@ -192,8 +198,9 @@ class ViewTests(unittest.TestCase):
         self.assert_relation(v.positions(), POSITION_SCHEMA, POSITION_ROWS)
 
     def test_view_sample_subset(self):
-        md = self.md.filter(pl.col(COLUMN_SAMPLE_ID).is_in(["S1", "S3", "S5"]))
-        v = View(f"{self.d}/{self.name}", self.tsv(md), None)
+        header, rows = self.md
+        md = (header, [row for row in rows if row[0] in ("S1", "S3", "S5")])
+        v = View(f"{self.d}/{self.name}", self.tsv(*md), None)
 
         kept = ("S1", "S3")
         self.assert_relation(
@@ -223,9 +230,10 @@ class ViewTests(unittest.TestCase):
         )
 
     def test_view_constrain_features(self):
-        feat = self.feat.filter(pl.col(COLUMN_GENOME_ID).is_in(["G1", "G5", "G6"]))
+        header, rows = self.feat
+        feat = (header, [row for row in rows if row[0] in ("G1", "G5", "G6")])
 
-        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
 
         # G6 is requested but has no coverage, so it never appears
         kept = ("G1", "G5")
@@ -245,16 +253,11 @@ class ViewTests(unittest.TestCase):
         )
 
     def test_view_constrain_positions_full(self):
-        feat = pl.DataFrame(
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
             [["G1", 0, 1000], ["G5", 0, 1000]],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-            ],
         )
-        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
 
         self.assert_relation(
             v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
@@ -288,30 +291,20 @@ class ViewTests(unittest.TestCase):
         )
 
     def test_view_constrain_positions_none(self):
-        feat = pl.DataFrame(
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
             [["G1", 1000, 2000], ["G5", 1000, 2000]],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-            ],
         )
 
         with self.assertRaisesRegex(ValueError, "No positions left"):
-            View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
+            View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
 
     def test_view_constrain_positions_bounds_simple(self):
-        feat = pl.DataFrame(
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
             [["G1", 7, 9], ["G5", 0, 20]],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-            ],
         )
-        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
 
         self.assert_relation(
             v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
@@ -336,7 +329,8 @@ class ViewTests(unittest.TestCase):
         )
 
     def test_view_constrain_positions_bounds_complex(self):
-        feat = pl.DataFrame(
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
             [
                 ["G1", 0, 100],
                 ["G2", 40, 60],
@@ -344,14 +338,8 @@ class ViewTests(unittest.TestCase):
                 ["G4", 90, 100],
                 ["G5", 40, 60],
             ],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-            ],
         )
-        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
 
         self.assert_relation(
             v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
@@ -392,12 +380,13 @@ class ViewTests(unittest.TestCase):
         )
 
     def test_sample_presence_absence_no_regions(self):
-        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(self.feat))
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*self.feat))
         with self.assertRaisesRegex(ValueError, r"^Cannot calculate"):
             v.sample_presence_absence()
 
     def test_sample_presence_absence_single_region(self):
-        feat = pl.DataFrame(
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
             [
                 ["G1", 0, 100],
                 ["G2", 40, 60],
@@ -405,14 +394,8 @@ class ViewTests(unittest.TestCase):
                 ["G4", 90, 100],
                 ["G5", 40, 60],
             ],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-            ],
         )
-        v = View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
 
         schema = (
             (COLUMN_SAMPLE_ID, "VARCHAR"),
@@ -434,7 +417,8 @@ class ViewTests(unittest.TestCase):
         )
 
     def test_integrity_checks(self):
-        feat = pl.DataFrame(
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
             [
                 ["G1", 0, 100],
                 ["G2", 40, 60],
@@ -443,28 +427,18 @@ class ViewTests(unittest.TestCase):
                 ["G4", 90, 100],
                 ["G5", 40, 60],
             ],
-            orient="row",
-            schema=[
-                (COLUMN_GENOME_ID, str),
-                (COLUMN_START, COLUMN_START_DTYPE),
-                (COLUMN_STOP, COLUMN_STOP_DTYPE),
-            ],
         )
         with self.assertRaisesRegex(ValueError, "Region IDs are not unique"):
-            View(f"{self.d}/{self.name}", self.tsv(self.md), self.tsv(feat))
+            View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
 
     def test_feature_names(self):
-        names = pl.DataFrame(
-            [["G1", "foo"], ["G2", "bar"]],
-            orient="row",
-            schema=[(COLUMN_GENOME_ID, str), (COLUMN_NAME, str)],
-        )
+        names = ((COLUMN_GENOME_ID, COLUMN_NAME), [["G1", "foo"], ["G2", "bar"]])
 
         v = View(
             f"{self.d}/{self.name}",
-            self.tsv(self.md),
-            self.tsv(self.feat),
-            self.tsv(names),
+            self.tsv(*self.md),
+            self.tsv(*self.feat),
+            self.tsv(*names),
         )
 
         # a genome with no supplied name falls back to its own id

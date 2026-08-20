@@ -2,7 +2,6 @@
 
 import copy
 import os
-import sys
 
 import click
 
@@ -16,9 +15,9 @@ from ._constants import (
 from ._io import (
     ALIGNMENT_POSITIONS_TABLE,
     compress_alignments,
+    load_bed_cov,
     load_genome_lengths,
-    parse_bed_cov_to_df,
-    parse_genome_lengths,
+    positions_path,
     write_coverage_parquet,
 )
 from ._miint import connection
@@ -157,14 +156,13 @@ def _sample_id_from_path(path):
 )
 def position_plot(positions, output, lengths):
     """Construct a single sample coverage plot."""
-    if positions is None:
-        data = sys.stdin
-    else:
-        data = open(positions, "rb")
-
-    lengths = parse_genome_lengths(lengths)
-    df = parse_bed_cov_to_df(data)
-    single_sample_position_plot(df, lengths, output)
+    con = connection()
+    load_genome_lengths(con, lengths)
+    # stdin is spooled to a file first; DuckDB's CSV reader sniffs the dialect
+    # and cannot rewind a pipe afterwards. See `positions_path`.
+    with positions_path(positions) as path:
+        load_bed_cov(con, path)
+    single_sample_position_plot(con, output)
 
 
 @cli.command()
@@ -206,25 +204,6 @@ def cov_to_parquet(pattern, lengths, output, memory, threads):
                                   header=true,
                                   columns={columns})"""
     write_coverage_parquet(con, positions, output)
-
-    # n.b. a comparable action can be taken with polars. however, polars does
-    # not currently allow limiting memory, and in testing, the use exceeded
-    # 16gb. Running via the streaming engine may work though.
-    # (pl.scan_csv(pattern,
-    #             separator='\t',
-    #             has_header=True,
-    #             schema=pl.Schema({'genome_id': str,
-    #                               'start': pl.UInt32,
-    #                               'stop': pl.UInt32}),
-    #             include_file_paths='filename')
-    #   .with_columns(pl.col('filename')
-    #                   .str.extract(r"(.+).cov.gz$")
-    #                   .alias('sample_id'))
-    #   .drop('filename')
-    #   .sink_parquet(f"{output}.covered_positions_pl.parquet",
-    #                 compression='zstd'))
-
-
 # `cov-to-parquet` was `nonqiita-to-parquet` until micov dropped Qiita support:
 # the name only ever meant "not the Qiita one", and there is no Qiita one now.
 # The old name stays registered as a hidden alias -- it is what the README

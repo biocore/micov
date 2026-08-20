@@ -2,17 +2,14 @@ import bz2
 import lzma
 import os
 import shutil
+import sys
 import tempfile
 from contextlib import contextmanager
 
-import polars as pl
-
 from ._constants import (
-    BED_COV_SCHEMA,
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
-    COLUMN_NAME,
     COLUMN_PERCENT_COVERED,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
@@ -20,69 +17,69 @@ from ._constants import (
 )
 from ._utils import logger
 
+#: `load_bed_cov` leaves the BED3 intervals here.
+BED_POSITIONS_TABLE = "bed_positions"
 
-def parse_bed_cov_to_df(data):
-    """BED3 -> DataFrame.
+
+@contextmanager
+def positions_path(positions):
+    """Yield a filesystem path for BED3 input, spooling stdin if it must.
+
+    DuckDB's CSV reader **always** sniffs the dialect, even when every column
+    is specified, and sniffing consumes the stream. On a seekable file it
+    rewinds and parses; on a pipe there is nothing left to rewind to, and it
+    returns **zero rows without raising**. So `micov position-plot < foo.cov`
+    cannot read the pipe directly and the input has to become a file first.
+
+    That is the opposite of `micov compress`, which streams stdin the whole
+    way -- but `compress` goes through htslib, not DuckDB's CSV reader, and a
+    SAM file is orders of magnitude larger than the BED3 for one sample.
+    """
+    if positions is not None:
+        yield positions
+        return
+
+    handle, path = tempfile.mkstemp(suffix=".cov")
+    try:
+        with os.fdopen(handle, "wb") as target:
+            shutil.copyfileobj(sys.stdin.buffer, target)
+        yield path
+    finally:
+        os.unlink(path)
+
+
+def load_bed_cov(con, positions):
+    """Load a BED3 `.cov` file into DuckDB.
+
+    Columns are taken by position and renamed, so a file may carry any header
+    or none -- released micov wrote one, and hand-made files often do not.
+    Header detection is DuckDB's sniffer rather than micov's `_test_has_header`
+    because it also handles a `#`-prefixed header, which real BED files carry
+    and which `_test_has_header` only recognises by accident.
 
     Parameters
     ----------
-    data : IO-like
-        The data to parse
-
-    Returns
-    -------
-    pl.DataFrame
-        The BED3 data expressed within a DataFrame
+    con : duckdb.DuckDBPyConnection
+        A connection from `micov._miint.connection`.
+    positions : str
+        Path to a `.cov`/BED3 file. Use `positions_path` for stdin.
 
     """
-    return _parse_bed_cov(data, None, None, False)
+    source = f"read_csv('{positions}', delim='\t')"
+    described = con.sql(f"DESCRIBE FROM {source}").fetchall()
 
+    if len(described) < 3:
+        raise ValueError(
+            f"'{positions}' has {len(described)} column(s); BED3 needs three "
+            "(genome_id, start, stop). Check that it is tab-delimited."
+        )
 
-def _parse_bed_cov(data, feature_drop, feature_keep, lazy):
-    """BED3 -> DataFrame.
-
-    Parameters
-    ----------
-    data : IO-like
-        The data to parse
-    feature_drop : iterable
-        Any features to explicitly drop (all others are kept)
-    feature_keep : iterable
-        Any features to explicitly keep (all others are dropped)
-    lazy : bool
-        Return LazyFrame or DataFrame
-
-    """
-    first_line = data.readline()
-    data.seek(0)
-
-    if len(first_line) == 0:
-        return None
-
-    if _test_has_header(first_line):
-        skip_rows = 1
-    else:
-        skip_rows = 0
-
-    frame = pl.read_csv(
-        data.read(),
-        separator="\t",
-        new_columns=BED_COV_SCHEMA.columns,
-        schema_overrides=BED_COV_SCHEMA.dtypes_dict,
-        has_header=False,
-        skip_rows=skip_rows,
-    ).lazy()
-
-    if feature_drop is not None:
-        frame = frame.filter(~pl.col(COLUMN_GENOME_ID).is_in(feature_drop))
-
-    if feature_keep is not None:
-        frame = frame.filter(pl.col(COLUMN_GENOME_ID).is_in(feature_keep))
-
-    if lazy:
-        return frame
-    else:
-        return frame.collect()
+    genome_id_col, start_col, stop_col = (row[0] for row in described[:3])
+    con.sql(f"""CREATE OR REPLACE TABLE {BED_POSITIONS_TABLE} AS
+                SELECT "{genome_id_col}" AS {COLUMN_GENOME_ID},
+                       "{start_col}"::UINTEGER AS {COLUMN_START},
+                       "{stop_col}"::UINTEGER AS {COLUMN_STOP}
+                FROM {source}""")
 
 
 def _test_has_header(line):
@@ -104,37 +101,14 @@ def _test_has_header(line):
     return has_header
 
 
-def parse_genome_lengths(lengths):
-    """Parse a TSV representing feature and length information."""
-    with open(lengths) as fp:
-        first_line = fp.readline()
-
-    has_header = _test_has_header(first_line)
-    df = pl.read_csv(lengths, separator="\t", has_header=has_header)
-    genome_id_col = df.columns[0]
-    length_col = df.columns[1]
-
-    genome_ids = df[genome_id_col]
-    if len(genome_ids) != len(set(genome_ids)):
-        raise ValueError(f"'{genome_id_col}' is not unique")
-
-    if not df[length_col].dtype.is_integer():
-        raise ValueError(f"'{length_col}' is not integer'")
-
-    if df[length_col].min() <= 0:
-        raise ValueError("Lengths of zero or less cannot be used")
-
-    rename = {genome_id_col: COLUMN_GENOME_ID, length_col: COLUMN_LENGTH}
-    return df[[genome_id_col, length_col]].rename(rename)
-
-
 def load_genome_lengths(con, lengths):
     """Load a TSV of feature and length information into DuckDB.
 
-    The SQL twin of `parse_genome_lengths`, which callers still working in
-    polars continue to use. Validation and its messages are deliberately
-    identical, so either path rejects the same file the same way; the two
-    converge into one when the last polars consumer moves to SQL.
+    Was the SQL twin of a polars `parse_genome_lengths`, kept message-for-
+    message identical to it so that either path rejected the same file the
+    same way. M5 moved the last polars consumer to SQL and deleted the twin;
+    `micov/tests/test_io.py` carries the validation coverage that used to
+    live on it.
     """
     with open(lengths) as fp:
         first_line = fp.readline()
@@ -356,69 +330,3 @@ def write_coverage_parquet(con, positions, output):
               FROM covered_amount JOIN genome_lengths USING ({COLUMN_GENOME_ID}))
         TO '{output}.coverage.parquet'
             (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
-
-
-def parse_features_to_keep(path):
-    if path is None:
-        return None
-
-    df = pl.read_csv(path, separator="\t")
-    return df.rename({df.columns[0]: COLUMN_GENOME_ID})
-
-
-def parse_feature_names(path):
-    """Parse a TSV of feature names.
-
-    We assume the file has a header, and has two columns. The first is the
-    feature ID and second is the name for the feature.
-
-    If the feature name appears to be a lineage, in that it contains "; ",
-    the lineage will be split and the last name retained.
-    """
-    if path is None:
-        return None
-
-    df = pl.read_csv(path, separator="\t")
-
-    return (
-        df.lazy()
-        .rename({df.columns[0]: COLUMN_GENOME_ID, df.columns[1]: COLUMN_NAME})
-        .with_columns(
-            pl.when(pl.col(COLUMN_NAME).str.contains("; "))
-            .then(pl.col(COLUMN_NAME).str.split("; ").list.get(-1))
-            .otherwise(pl.col(COLUMN_NAME))
-            .alias(COLUMN_NAME)
-        )
-        .with_columns(pl.col(COLUMN_NAME).str.replace_all(r" |\[|\]", "_"))
-        .select([COLUMN_GENOME_ID, COLUMN_NAME])
-        .collect()
-    )
-
-
-def parse_sample_metadata(path):
-    """Naively parse sample metadata, do not infer types."""
-    df = pl.read_csv(path, separator="\t", infer_schema_length=0)
-    return df.rename({df.columns[0]: COLUMN_SAMPLE_ID})
-
-
-def _first_col_as_set(fp):
-    df = pl.read_csv(fp, separator="\t", infer_schema_length=0)
-    return set(df[df.columns[0]])
-
-
-def combine_pos_metadata_length(
-    sample_metadata, length, covered_positions, features_to_keep
-):
-    df_md = parse_sample_metadata(sample_metadata).lazy()
-    df_length = parse_genome_lengths(length).lazy()
-    df_pos = pl.scan_parquet(covered_positions)
-
-    df_pos_md = df_pos.join(df_md, on=COLUMN_SAMPLE_ID, how="left").join(
-        df_length, on=COLUMN_GENOME_ID, how="left"
-    )
-
-    if features_to_keep:
-        features_to_keep = _first_col_as_set(features_to_keep)
-        df_pos_md = df_pos_md.filter(pl.col(COLUMN_GENOME_ID).is_in(features_to_keep))
-
-    return df_pos_md

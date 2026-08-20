@@ -1,8 +1,8 @@
+import csv
 import gzip
 
 import matplotlib.pyplot as plt
 import numpy as np
-import polars as pl
 import scipy.stats as ss
 from matplotlib import collections as mc
 
@@ -21,6 +21,31 @@ from ._cov import (
     ordered_coverage,
     slice_positions,
 )
+from ._io import BED_POSITIONS_TABLE
+
+
+def _write_delimited(path, header, rows, delimiter=",", compress=False):
+    """Write `rows` as a delimited text file, optionally gzipped.
+
+    Replaces two polars `write_csv` calls, and reproduces them byte for byte
+    across all sixteen frozen files under `example/plots/`.
+
+    **Do not reach for `repr()` or an f-string to format the values here.**
+    `csv.writer` renders with `str()`, which for a float is the shortest form
+    that round-trips -- exactly what polars wrote. The values arriving here are
+    numpy scalars (`scipy.stats.ks_2samp` returns `np.float64`, and the
+    position values come from `np.histogram`), and under numpy 2 `repr()` of
+    one of those is the string `np.float64(0.3)`. That would corrupt every
+    float in every `.ks.tsv` and `.tsv.gz` micov writes, and it is the sort of
+    thing a tidy-up refactor does without noticing.
+
+    `lineterminator` is set because the csv module defaults to CRLF.
+    """
+    opener = gzip.open if compress else open
+    with opener(path, "wt", newline="") as fp:
+        writer = csv.writer(fp, delimiter=delimiter, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerows(rows)
 
 
 def per_sample_plots(
@@ -437,66 +462,107 @@ def coverage_curve(
                 ksresults.append([label_a, label_b, ks.statistic, ks.pvalue])
 
         outf = f"{output}.{target_name}.{target}.{variable}.{tag}.ks.tsv"
-        pl.DataFrame(
-            ksresults,
-            schema=[
-                ("label_A", str),
-                ("label_B", str),
-                ("ks-statistic", float),
-                ("ks-pvalue", float),
-            ],
-            orient="row",
-        ).write_csv(outf)
+        _write_delimited(
+            outf, ("label_A", "label_B", "ks-statistic", "ks-pvalue"), ksresults
+        )
 
 
-def single_sample_position_plot(positions, lengths, output, scale=None):
-    """Construct a metadata-independent position plot.
+def position_plot_segments(con):
+    """Compute normalized covered intervals per genome, ready to draw.
+
+    Split out from `single_sample_position_plot` so the numbers can be
+    asserted without rendering: `position-plot` writes only PNGs, whose bytes
+    are not comparable across matplotlib versions, so before this existed the
+    command's values were guarded by nothing at all.
+
+    Requires the `bed_positions` and `genome_lengths` tables, from
+    `_io.load_bed_cov` and `_io.load_genome_lengths`.
+
+    Returns
+    -------
+    dict of str to np.ndarray
+        Keyed by genome, each an `(n, 3)` array of `(x, start / length,
+        stop / length)` ordered by start. `x` is the constant the plot draws
+        every segment at; positions are unit-normalized against **their own**
+        genome's length.
+
+    Notes
+    -----
+    Genomes with coverage but no entry in `genome_lengths` are dropped, not
+    reported. That is an inner join and it is what micov has always done here:
+    without a length there is no denominator, and passing a length file
+    covering only the genomes of interest is an ordinary way to use this
+    command.
+
+    """
+    genomes = [
+        row[0]
+        for row in con.sql(f"""SELECT DISTINCT p.{COLUMN_GENOME_ID}
+                               FROM {BED_POSITIONS_TABLE} p
+                                   JOIN genome_lengths l
+                                       USING ({COLUMN_GENOME_ID})
+                               ORDER BY 1""").fetchall()
+    ]
+
+    segments = {}
+    for genome in genomes:
+        # ORDER BY is explicit because DuckDB's sort is not stable and these
+        # arrive in whatever order the scan produced; the polars sort this
+        # replaced was stable, so unordered output would be a silent change.
+        columns = con.execute(
+            f"""SELECT 0.5 AS x,
+                       p.{COLUMN_START} / l.{COLUMN_LENGTH} AS {COLUMN_START},
+                       p.{COLUMN_STOP} / l.{COLUMN_LENGTH} AS {COLUMN_STOP}
+                FROM {BED_POSITIONS_TABLE} p
+                    JOIN genome_lengths l USING ({COLUMN_GENOME_ID})
+                WHERE p.{COLUMN_GENOME_ID} = ?
+                ORDER BY p.{COLUMN_START}, p.{COLUMN_STOP}""",
+            [genome],
+        ).fetchnumpy()
+        segments[genome] = np.column_stack(
+            [columns["x"], columns[COLUMN_START], columns[COLUMN_STOP]]
+        )
+
+    return segments
+
+
+def single_sample_position_plot(con, output):
+    """Construct a metadata-independent position plot, one PNG per genome.
 
     Parameters
     ----------
-    positions : pl.DataFrame
-        The genome positions to plot
-    lengths : pl.DataFrame
-        The genome lengths
+    con : duckdb.DuckDBPyConnection
+        A connection carrying `bed_positions` and `genome_lengths`.
     output : str
-        A prefix to use on plotting. This can include a directory, for instance,
-        "foo/bar/theprefix"
-    scale : int, optional
-        If specified, represent the genome as `scale` number of buckets. A
-        bucket is considered represented if any position within the bucket
-        is covered
+        A prefix to use on plotting. This can include a directory, for
+        instance, "foo/bar/theprefix"
+
+    Notes
+    -----
+    The `scale` parameter this used to take was never read by the body and
+    never passed by the CLI; it went with the rewrite.
 
     """
-    positions = (
-        positions.lazy().join(lengths.lazy(), on=COLUMN_GENOME_ID).with_columns(x=0.5)
-    ).collect()
-    for name, grp in positions.group_by(COLUMN_GENOME_ID):
+    for genome, coordinates in position_plot_segments(con).items():
         plt.figure(figsize=(12, 8))
         ax = plt.gca()
-        grp = (
-            grp.lazy()
-            .sort(by=COLUMN_START)
-            .select(
-                pl.col("x"),
-                pl.col(COLUMN_START) / pl.col(COLUMN_LENGTH),
-                pl.col(COLUMN_STOP) / pl.col(COLUMN_LENGTH),
-            )
-        )
 
-        covered_positions = get_covered(grp.collect().to_numpy())
-        lc = mc.LineCollection(covered_positions, linewidths=2, alpha=0.7)
+        lc = mc.LineCollection(get_covered(coordinates), linewidths=2, alpha=0.7)
         ax.add_collection(lc)
 
         ax.set_xlim(-0.01, 1.0)
         ax.set_ylim(0, 1.0)
 
-        ax.set_title(f"Position plot: {name}", fontsize=20)
+        ax.set_title(f"Position plot: {genome}", fontsize=20)
         ax.set_ylabel("Unit normalized position", fontsize=20)
 
         ax.tick_params(axis="both", which="major", labelsize=16)
         ax.tick_params(axis="both", which="minor", labelsize=16)
         plt.tight_layout()
-        plt.savefig(f"{output}.{name}.position-plot.png")
+        # `genome` is a scalar here. It used to be the key polars `group_by`
+        # yields -- a one-element tuple -- which went straight into this
+        # f-string, so every file was named `out.('G1',).position-plot.png`.
+        plt.savefig(f"{output}.{genome}.position-plot.png")
         plt.close()
 
 
@@ -668,13 +734,17 @@ def position_plot(
         ax.set_ylabel("Genome position", fontsize=20)
         scaletag = ""
     else:
-        df = pl.DataFrame({"group": tsv_group, "x": tsv_x, "y": tsv_y})
         filename = (
             f"{output}.{target_name}.{target}.{variable}."
             f"position-plot-1_{scale}th-scale.tsv.gz"
         )
-        with gzip.open(filename, "wb") as fo:
-            df.write_csv(fo, separator="\t")
+        _write_delimited(
+            filename,
+            ("group", "x", "y"),
+            zip(tsv_group, tsv_x, tsv_y, strict=True),
+            delimiter="\t",
+            compress=True,
+        )
         ax.set_title(f"Scaled position plot: {target} ({length}bp)", fontsize=20)
         ax.set_ylabel(f"Coverage (1/{scale})th scale", fontsize=20)
         scaletag = f"-1_{scale}th-scale"

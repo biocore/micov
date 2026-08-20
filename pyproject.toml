@@ -50,10 +50,15 @@ dynamic = ["version"]
 # miint's `compress_intervals`, and a `get_covered` list comprehension that
 # never needed compiling. Verified by running the full golden suite with numba
 # uninstalled.
+#
+# polars is gone. It was micov's dataframe layer throughout; every use is now
+# either DuckDB (parsing, joins, aggregation) or the standard library (writing
+# `.ks.tsv` and the position-plot `.tsv.gz`, where the work was formatting, not
+# computation). `micov/tests/test_dependencies.py` asserts nothing imports it,
+# and the full golden suite was run with it uninstalled.
 dependencies = [
     "click",
     "scipy",
-    "polars-u64-idx<1.23.0",
     "matplotlib>=3.9.0",
     "duckdb>=1.5.4,<1.5.5",
 ]

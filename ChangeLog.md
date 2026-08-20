@@ -6,6 +6,28 @@ micov 0.0.1-dev
 
 Backward incompatible changes:
 
+* **`micov position-plot` names its output files correctly.** They were written
+  as `{output}.('G000000001',).position-plot.png` -- a literal Python tuple
+  repr, because the genome key came from a polars `group_by` and went straight
+  into the filename. They are now `{output}.{genome_id}.position-plot.png`.
+  Anything globbing the old names will not match.
+* **`micov position-plot` can read stdin.** `--positions` was already optional,
+  but omitting it raised `io.UnsupportedOperation: underlying stream is not
+  seekable`, so the documented-by-the-interface path never worked.
+
+Other changes:
+
+* **`polars` is no longer a dependency.** Every use moved to DuckDB (parsing,
+  joins, aggregation) or to the standard library (writing `.ks.tsv` and the
+  position-plot `.tsv.gz`, which was formatting rather than computation). All
+  sixteen frozen plot outputs under `example/plots/` are byte-identical, and
+  the full golden suite passes with polars uninstalled. Runtime dependencies
+  are now `click`, `scipy`, `matplotlib` and `duckdb`.
+* `micov position-plot` now accepts a `.cov` file with a `#`-prefixed header,
+  which it previously read as data.
+
+Backward incompatible changes (earlier in this release):
+
 * **Qiita support has been removed.** `micov qiita-coverage`,
   `micov qiita-to-parquet` and `micov consolidate` are gone, along with the
   reader and writer for the Qiita `coverages.tgz` layout. micov no longer

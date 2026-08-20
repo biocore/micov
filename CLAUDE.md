@@ -139,27 +139,28 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 | `cli.py` | click command surface; the only user-facing contract |
 | `_view.py` | `View` — DuckDB session with three filter modes: none, genome-level (`constrain_features`), sub-genome region (`constrain_positions`). Only the third does real work: clips intervals to region bounds, re-compresses per sample, recomputes breadth against *region* length |
 | `_cov.py` | `merge_intervals` (numpy) plus rank ordering and cumulative accumulation, all on the curve path. **Polars-free since M4**, which deleted the second merge implementation (`compress`, numba + polars) along with `coverage_percent` |
-| `_io.py` | parsers/writers. `compress_alignments` is the miint ingest; `write_coverage_parquet` is the single producer of the frozen Parquet pair. Still holds polars for BED3 and metadata parsing — that is M5 |
-| `_plot.py` | matplotlib curves and position plots, plus the KS tests (largest module, no unit tests) |
+| `_io.py` | parsers/writers, all DuckDB since M5. `load_bed_cov` and `load_genome_lengths` read input into tables; `compress_alignments` is the miint ingest; `write_coverage_parquet` is the single producer of the frozen Parquet pair |
+| `_plot.py` | matplotlib curves and position plots, plus the KS tests. Largest module; `position_plot_segments` is the only part with unit tests, added in M5 because `position-plot` writes no data file and so had no golden |
 | `_quant.py` | binning |
-| `_constants.py` | column names and dtypes |
+| `_constants.py` | column names and the three presence/absence values. The polars dtypes and seven `_SCHEMA` objects went in M5 |
 | `_miint.py` | `connection()` — the only place micov opens a DuckDB connection, **and the only place the extension's install source is named**. `cli.py` was moved behind it so that stays true |
 
 `micov/_convert.py` is **gone** — htslib computes the reference span now. `micov/_rank.py` is **dead code** — nothing imports it, and it pulls in an undeclared pandas dependency. The `--rank` flag on `micov binning` is a **no-op**; the variance ranking is written unconditionally.
 
 ## Known traps
 
-- `.ks.tsv` outputs are comma-separated despite the extension (`_plot.py` calls `write_csv` without `separator`).
+- `.ks.tsv` outputs are comma-separated despite the extension. Frozen — released micov wrote them that way, so `_plot._write_delimited` is called with the default comma.
+- **Never format micov's float outputs with `repr()` or an f-string.** `_plot._write_delimited` relies on `csv.writer` rendering via `str()`. The values are numpy scalars — `scipy.stats.ks_2samp` returns `np.float64`, `np.histogram` returns float64 — and under numpy 2 `repr(np.float64(0.3))` is the string `np.float64(0.3)`. That would corrupt every float in every `.ks.tsv` and `.tsv.gz`.
 - Bonferroni correction is described in the paper but not implemented; `_plot.py` writes raw KS p-values.
 - `ruff` runs with `fix = true`, so **`make lint` edits your files** rather than reporting. Check `git status` after linting.
-- `_test_has_header` (`_io.py`) tests *substrings*, not membership: its column-name constants are plain strings, so a column named `genome` is accepted as a header. The plural names make them read as collections. Its taxonomy twin, `_test_has_header_taxonomy`, had the same defect and was deleted in M4 with the rest of the Qiita code.
+- `_test_has_header` (`_io.py`) tests *substrings*, not membership: its column-name constants are plain strings, so a column named `genome` is accepted as a header. The plural names make them read as collections. It now has exactly one caller, `load_genome_lengths` — the BED3 path moved to DuckDB's CSV sniffer in M5, which also handles a `#`-prefixed header that this only accepts by accident.
 - `MANIFEST.in` has `graft micov`, so **any** stray file under `micov/` is packaged into the sdist — including untracked ones, which then breaks `check-manifest`. Keep scratch work in `localdocs/` (gitignored, pruned from the sdist).
-- `pyproject.toml` and `ci/conda_requirements.txt` **must declare the same duckdb floor**. They previously disagreed (`<1.3` in one, no ceiling in the other), and because CI's conda path installs with `pip install . --no-deps`, the conda and pypi paths silently tested different duckdb majors. Both now say `duckdb>=1.5.4`; change them together.
+- `pyproject.toml` and `ci/conda_requirements.txt` **must declare the same dependencies**, duckdb floor included. They previously disagreed (`<1.3` in one, no ceiling in the other), and because CI's conda path installs with `pip install . --no-deps`, the conda and pypi paths silently tested different duckdb majors. Both now say `duckdb>=1.5.4`; change them together.
 - Python 3.13 is unclaimed but no longer blocked. The blocker was `pyarrow<16.0.0`, which capped at 15.0.2 and has no cp313 wheels; pyarrow is gone. Nothing has been run on 3.13, so add it to the CI matrix before claiming it.
 
 ## In-flight work
 
-An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint). **Done so far:** every polars↔DuckDB crossing has been deleted by moving its computation into plain DuckDB SQL — `_view.py`, `_plot.py`, `_quant.py` and `cli.py` no longer cross that boundary — `pyarrow` has been dropped, the DuckDB floor is now `>=1.5.4`, and **miint is loaded on every connection** via `_miint.connection()`. **Still to do:** replace the hand-written SQL with miint's primitives, then remove polars, numba, and scipy. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
+An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint). **Done so far:** the DuckDB floor is `>=1.5.4`, **miint is loaded on every connection** via `_miint.connection()` and does the alignment ingest and interval merge, Qiita support has been dropped, and **`pyarrow`, `numba` and `polars` are all gone** — runtime dependencies are now `click`, `scipy`, `matplotlib` and `duckdb`. **Still to do:** replace the remaining hand-written SQL with miint's primitives, and remove scipy with it. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
 
 miint is a DuckDB **community extension**, not a Python package — it cannot be declared in `pyproject.toml`, and `pip index versions duckdb-miint` finds nothing. It is required at runtime instead, with no fallback: two compute paths that must agree numerically would put the frozen coverage and KS numbers at risk. `miint_version()` returns a **git short hash**, not a semantic version, so there is no orderable floor to pin; the guard that will replace it is a capability check, added with the first micov code that calls a miint primitive.
 
