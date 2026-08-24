@@ -16,6 +16,7 @@ from ._constants import (
 )
 from ._cov import (
     compute_cumulative,
+    cumulative_curves,
     get_covered,
     mask_table,
     ordered_coverage,
@@ -98,6 +99,7 @@ def per_sample_plots(
         ymax = feature_metadata[COLUMN_STOP][is_genome][0]
 
         coverage_curve(
+            view.con,
             metadata,
             all_coverage,
             all_covered_positions,
@@ -111,6 +113,7 @@ def per_sample_plots(
             False,
         )
         coverage_curve(
+            view.con,
             metadata,
             all_coverage,
             all_covered_positions,
@@ -150,6 +153,7 @@ def per_sample_plots(
 
 
 def add_monte(
+    con,
     monte_type,
     ax,
     max_x,
@@ -232,23 +236,34 @@ def add_monte(
     coverage = mask_table(coverage_full, is_target)
 
     max_x += 1  # it comes in as zero index but we need count
-    monte_y = []
     monte_x = list(range(max_x))
     rng = np.random.default_rng()
 
-    for _ in range(iters):
-        monte = rng.permutation(sample_set)[:max_x]
-        grp_monte = {COLUMN_SAMPLE_ID: sample_set[np.isin(sample_set, monte)]}
-        if accumulate:
-            _, cur_y = compute_cumulative(
-                coverage, grp_monte, target, target_positions, lengths
-            )
-        else:
-            grp_coverage = ordered_coverage(coverage, grp_monte, target, length)
-            cur_y = grp_coverage[COLUMN_PERCENT_COVERED].tolist()
-        monte_y.append(cur_y)
+    # The selection stays in numpy. Moving it into SQL would change the RNG,
+    # and with it the published Monte Carlo envelopes; only the accumulation
+    # needed to move. `np.isin` keeps `sample_set`'s order rather than the
+    # permuted one, which is deliberate -- the permutation chooses *which*
+    # samples take part, and `ordered_coverage` then ranks them by breadth.
+    groups = [
+        sample_set[np.isin(sample_set, rng.permutation(sample_set)[:max_x])]
+        for _ in range(iters)
+    ]
 
-    monte_y = np.asarray(monte_y)
+    if accumulate:
+        # every iteration accumulates in one aggregate call rather than one
+        # O(n^2) pass each -- this is where the Monte Carlo cost was
+        _, monte_y = cumulative_curves(
+            con, coverage, groups, target, target_positions, lengths
+        )
+    else:
+        # non-cumulative is a per-sample breadth lookup, not an accumulation,
+        # so there is nothing here for the aggregate to do
+        monte_y = np.asarray([
+            ordered_coverage(coverage, {COLUMN_SAMPLE_ID: grp}, target, length)[
+                COLUMN_PERCENT_COVERED
+            ]
+            for grp in groups
+        ])
     median = np.median(monte_y, axis=0)
     std = np.std(monte_y, axis=0)
 
@@ -279,6 +294,7 @@ def add_monte(
 
 
 def coverage_curve(
+    con,
     metadata_full,
     coverage_full,
     positions,
@@ -296,6 +312,8 @@ def coverage_curve(
 
     Parameters
     ----------
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension, for the accumulation.
     metadata_full : dict of np.ndarray
         The metadata for all samples with nonzero coverage to any target
     coverage_full : dict of np.ndarray
@@ -384,7 +402,7 @@ def coverage_curve(
 
         if accumulate:
             cur_x, cur_y = compute_cumulative(
-                coverage, grp, target, target_positions, lengths
+                con, coverage, grp, target, target_positions, lengths
             )
         else:
             grp_coverage = ordered_coverage(coverage, grp, target, length)
@@ -412,6 +430,7 @@ def coverage_curve(
 
     if with_monte is not None:
         label, median_curve = add_monte(
+            con,
             with_monte,
             ax,
             max_x,

@@ -1,7 +1,9 @@
 import unittest
+from unittest import mock
 
 import numpy as np
 
+from micov import _cov
 from micov._constants import (
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
@@ -14,10 +16,10 @@ from micov._constants import (
 from micov._cov import (
     compute_cumulative,
     get_covered,
-    merge_intervals,
     ordered_coverage,
     slice_positions,
 )
+from micov._miint import connection
 
 # the curve functions take the dict-of-numpy-arrays that
 # DuckDBPyRelation.fetchnumpy() returns, so strings arrive as object arrays
@@ -46,6 +48,14 @@ def table(columns, rows):
 
 
 class CovTests(unittest.TestCase):
+    def setUp(self):
+        # `compute_cumulative` accumulates with miint's `cumulative_coverage`
+        # aggregate since M7, so the curve functions need a live connection.
+        # `ordered_coverage`, `slice_positions` and `get_covered` remain pure
+        # numpy and do not use it.
+        self.con = connection()
+        self.addCleanup(self.con.close)
+
     def test_slice_positions(self):
         df = table(POSITION_COLUMNS,
                    [['S1', 'G1', 1, 10],
@@ -134,8 +144,12 @@ class CovTests(unittest.TestCase):
                      ['S3', 'foo'],
                      ['S4', 'foo'],
                      ['S5', 'foo']])
+        # G1's length is deliberately NOT G2's. `compute_cumulative` used to
+        # read `lengths[COLUMN_LENGTH][0]` -- row 0, whatever genome that is --
+        # regardless of which genome `target` named, and this fixture had 100
+        # in both rows so it could not tell the two readings apart (R22).
         lengths = table([(COLUMN_GENOME_ID, object), (COLUMN_LENGTH, np.uint32)],
-                        [['G1', 100],
+                        [['G1', 500],
                          ['G2', 100],
                          ['G3', 1000]])
         exp_x = [0, 1, 2, 3, 4]
@@ -146,9 +160,86 @@ class CovTests(unittest.TestCase):
         # the curve.
         exp_y = [0., 0., 6., 12., 25.]
 
-        obs_x, obs_y = compute_cumulative(df, grp, 'G2', pos, lengths)
+        obs_x, obs_y = compute_cumulative(self.con, df, grp, 'G2', pos, lengths)
         self.assertEqual(obs_x.tolist(), exp_x)
         self.assertEqual(obs_y, exp_y)
+
+    def test_compute_cumulative_uses_the_targets_own_length(self):
+        """R22: the denominator must follow `target`, not row 0 of `lengths`.
+
+        Asserted on the call rather than on the curve because the value is
+        *inert* in the returned data: it only fills the `length` column that
+        `ordered_coverage` back-fills for zero-coverage samples, and nothing
+        reads that. There is therefore no black-box route to this, and a
+        fixture alone cannot catch it -- which is exactly why the wrong
+        reading survived. `coverage_curve` only ever passes a single-row
+        `lengths`, so the two readings coincide in production today; this
+        pins the caller so they still agree if that ever stops being true.
+        """
+        df = table(COVERAGE_COLUMNS, [['S1', 'G2', 15, 100, 15.]])
+        pos = table(POSITION_COLUMNS, [['S1', 'G2', 1, 16]])
+        grp = table([(COLUMN_SAMPLE_ID, object)], [['S1']])
+        lengths = table([(COLUMN_GENOME_ID, object), (COLUMN_LENGTH, np.uint32)],
+                        [['G1', 500],
+                         ['G2', 100]])
+
+        with mock.patch.object(_cov, 'ordered_coverage',
+                               wraps=_cov.ordered_coverage) as spy:
+            compute_cumulative(self.con, df, grp, 'G2', pos, lengths)
+
+        self.assertEqual(int(spy.call_args.args[3]), 100)
+
+    def test_compute_cumulative_keeps_zero_coverage_samples_in_rank(self):
+        """A sample with no coverage still occupies a rank position.
+
+        This is what `ordered_coverage`'s back-fill exists for: group size has
+        to stay honest, because the x axis is "within group sample rank" and
+        the KS test compares curves of that length. Dropping the uncovered
+        samples would silently shorten the curve and shift every other sample
+        left.
+
+        The accumulation is an aggregate over interval rows, and a sample with
+        no coverage contributes no rows -- so this only holds if the ranks are
+        supplied from a roster rather than from the intervals themselves.
+        """
+        df = table(COVERAGE_COLUMNS, [['S3', 'G1', 10, 100, 10.]])
+        pos = table(POSITION_COLUMNS, [['S3', 'G1', 0, 10]])
+        grp = table([(COLUMN_SAMPLE_ID, object)],
+                    [['S1'], ['S2'], ['S3'], ['S4']])
+        lengths = table([(COLUMN_GENOME_ID, object), (COLUMN_LENGTH, np.uint32)],
+                        [['G1', 100]])
+
+        obs_x, obs_y = compute_cumulative(self.con, df, grp, 'G1', pos, lengths)
+
+        # four samples in, four points out -- three of them flat at zero
+        self.assertEqual(obs_x.tolist(), [0, 1, 2, 3])
+        self.assertEqual(obs_y, [0., 0., 0., 10.])
+
+    def test_compute_cumulative_breaks_breadth_ties_by_input_order(self):
+        """Ties keep micov's order, which is the order `coverage` arrives in.
+
+        miint offers a `cumulative_coverage_curve` macro that ranks samples
+        itself and breaks ties by `sample_id`; micov drives the aggregate with
+        its own rank instead, precisely so the tie-break does not move (R20a).
+
+        Three samples tied at 10%, of which S1 [0,10) and S2 [5,15) overlap
+        and S3 [50,60) does not. Rank order therefore changes the *middle* of
+        the curve: adjacent S1/S2 accumulate to 15, while S3 between them
+        gives 20. Under a `sample_id` tie-break every input order would
+        collapse to S1,S2,S3 and yield [10, 15, 25].
+        """
+        order = ['S2', 'S3', 'S1']
+        spans = {'S1': (0, 10), 'S2': (5, 15), 'S3': (50, 60)}
+        df = table(COVERAGE_COLUMNS,
+                   [[s, 'G1', 10, 100, 10.] for s in order])
+        pos = table(POSITION_COLUMNS,
+                    [[s, 'G1', *spans[s]] for s in order])
+        grp = table([(COLUMN_SAMPLE_ID, object)], [[s] for s in order])
+        lengths = table([(COLUMN_GENOME_ID, object), (COLUMN_LENGTH, np.uint32)],
+                        [['G1', 100]])
+
+        _, obs_y = compute_cumulative(self.con, df, grp, 'G1', pos, lengths)
+        self.assertEqual(obs_y, [10., 20., 25.])
 
     def test_get_covered(self):
         test = np.array([(1, 2, 3), (10, 20, 30)])
@@ -157,16 +248,23 @@ class CovTests(unittest.TestCase):
         self.assertEqual(obs, exp)
 
 
-class MergeIntervalsTests(unittest.TestCase):
-    """merge_intervals is now the only interval merge micov has.
+class IntervalMergeTests(unittest.TestCase):
+    """micov's interval merge, which is now entirely miint's.
 
-    It was written against `compress`, the numba+polars implementation the
-    published coverage values came from, and was checked case-for-case against
-    it until M4 deleted that path along with Qiita support. The randomized
-    check below now runs against a deliberately naive reference instead: the
-    property it defends -- that touching intervals collapse, and that breadth
-    is therefore what the paper reports -- outlived the implementation it was
-    originally cross-checked against.
+    These cases were written against `merge_intervals`, the numpy merge on the
+    accumulation path, which was itself checked case-for-case against
+    `compress` -- the numba+polars implementation the published coverage
+    values came from -- until M4 deleted that path with Qiita support. M7
+    deleted `merge_intervals` too: `cumulative_coverage` accumulates now, so
+    it had no callers left.
+
+    The cases moved onto `compress_intervals` rather than being deleted with
+    it. That is the primitive `_io.compress_alignments` and `_view`'s region
+    clip both use, so it *is* micov's merge, and it returns intervals -- which
+    matters, because `cumulative_coverage` returns only covered counts and a
+    count cannot distinguish a touching merge from no merge at all
+    (`[400,500)` + `[500,505)` is 105 bases either way). The property these
+    defend is structural, so they need the structural entry point.
     """
 
     def _reference(self, rows):
@@ -184,10 +282,26 @@ class MergeIntervalsTests(unittest.TestCase):
         return merged
 
     def _merge(self, rows):
-        starts = np.array([s for s, _ in rows], dtype=np.uint32)
-        stops = np.array([e for _, e in rows], dtype=np.uint32)
-        merged_starts, merged_stops = merge_intervals(starts, stops)
-        return list(zip(merged_starts.tolist(), merged_stops.tolist(), strict=True))
+        if rows:
+            values = ", ".join(
+                f"({start}::UINTEGER, {stop}::UINTEGER)" for start, stop in rows
+            )
+            source = f"SELECT * FROM (VALUES {values}) t(start, stop)"
+        else:
+            source = ("SELECT 0::UINTEGER AS start, 0::UINTEGER AS stop "
+                      "WHERE false")
+        merged = self.con.sql(
+            f"SELECT compress_intervals(start, stop) FROM ({source})"
+        ).fetchone()[0]
+
+        # the aggregate returns NULL rather than an empty list for no input
+        if merged is None:
+            return []
+        return [(row["start"], row["stop"]) for row in merged]
+
+    def setUp(self):
+        self.con = connection()
+        self.addCleanup(self.con.close)
 
     def test_touching_intervals_merge(self):
         # the case the docstring gets wrong, and the one breadth depends on
@@ -205,17 +319,13 @@ class MergeIntervalsTests(unittest.TestCase):
                          [(10, 30), (50, 60)])
 
     def test_empty(self):
-        starts, stops = merge_intervals(np.array([], dtype=np.uint32),
-                                        np.array([], dtype=np.uint32))
-        self.assertEqual(len(starts), 0)
-        self.assertEqual(len(stops), 0)
+        self.assertEqual(self._merge([]), [])
 
     def test_breadth_excludes_no_plus_one(self):
         # breadth is sum(stop - start) over merged intervals, with no +1 --
         # the convention the published coverage values are computed under
-        starts, stops = merge_intervals(np.array([0, 10], dtype=np.uint32),
-                                        np.array([5, 20], dtype=np.uint32))
-        self.assertEqual(int((stops - starts).sum()), 15)
+        merged = self._merge([(0, 5), (10, 20)])
+        self.assertEqual(sum(stop - start for start, stop in merged), 15)
 
     def test_matches_the_reference_on_many_random_cases(self):
         rng = np.random.default_rng(42)

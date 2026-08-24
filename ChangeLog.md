@@ -34,6 +34,14 @@ Backward incompatible changes:
 
 Other changes:
 
+* **`micov per-sample` is substantially faster on large sample groups.** The
+  cumulative curve accumulated by re-merging a growing interval set once per
+  sample, which is quadratic in group size; it is now a single aggregate.
+  Measured on the 49-sample `example/` dataset the change is modest -- 5.1s to
+  4.5s, and 9.1s to 6.5s with `--monte` -- because that is where a quadratic
+  cost is still small. On synthetic groups it is 4.7x at 100 samples, 16.7x at
+  500 and 28.1x at 1000. Curve values, KS statistics and p-values are
+  unchanged, byte for byte.
 * **A malformed region is rejected by name.** A feature file whose `start` and
   `stop` are transposed failed with `Out of Range Error: Overflow in
   subtraction of UINT32 (40 - 60)`, and a zero-width region with `No positions

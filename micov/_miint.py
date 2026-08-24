@@ -58,6 +58,7 @@ MIINT_REPOSITORY = "https://ftp.microbio.me/pub/miint"
 #: too much to do on every connection.
 REQUIRED_MIINT_FUNCTIONS = (
     "compress_intervals",  # _io.compress_alignments, _view region positions
+    "cumulative_coverage",  # _cov.cumulative_covered, the curve accumulation
     "read_alignments",  # _io.compress_alignments
     "region_coverage",  # _view region-constrained breadth
     "region_presence",  # _view.sample_presence_absence
