@@ -379,6 +379,200 @@ class ViewTests(unittest.TestCase):
             ],
         )
 
+    # A region is half-open [start, stop), so an interval beginning exactly at
+    # `stop` lies outside it. micov's overlap predicate was `pos.start <=
+    # fc.stop`, which admitted that interval, clipped it to a zero-width
+    # [stop, stop) contributing no bases, and still called the sample present.
+    # These three tests pin the corrected `<`, decided as part of adopting
+    # miint's region primitives -- the predicate lives inside them, so it was
+    # not separable from the migration.
+    #
+    # G3's region ends at 15 and S1's G3 interval starts at 15. S2 and S3 do
+    # cover the region, so it survives the SEMI JOIN and stays observable
+    # rather than vanishing along with S1.
+    ABUTTING_REGION = (
+        (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
+        [["G3", 1, 15]],
+    )
+
+    def test_abutting_interval_is_outside_the_region(self):
+        """An interval starting at the region's exclusive end must not count.
+
+        S1's only G3 intervals are [15, 30) and [75, 90); the region is
+        [1, 15). S1 covers none of it, so it must contribute neither a
+        position nor a coverage row -- previously it contributed both, with
+        `covered` of 0.
+        """
+        v = View(
+            f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*self.ABUTTING_REGION)
+        )
+
+        self.assert_relation(
+            v.positions(),
+            POSITION_SCHEMA,
+            [("G3", "S2", 1, 11), ("G3", "S3", 1, 15)],
+        )
+        self.assert_relation(
+            v.coverages(),
+            COVERAGE_SCHEMA,
+            [
+                ("G3", "S2", 10, 14, 71.42857142857143),
+                ("G3", "S3", 14, 14, 100.0),
+            ],
+        )
+
+    def test_abutting_interval_is_not_present(self):
+        """The same interval must not read as present either.
+
+        This is the user-visible half: `extract-sample-presence` reported S1
+        present in a region it covers zero bases of. `absent` rather than
+        `not applicable` because S1 does have G3 coverage -- just not here.
+        """
+        v = View(
+            f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*self.ABUTTING_REGION)
+        )
+
+        self.assert_relation(
+            v.sample_presence_absence(),
+            ((COLUMN_SAMPLE_ID, "VARCHAR"), ("G3_1_15", "VARCHAR")),
+            [("S1", ABSENT), ("S2", PRESENT), ("S3", PRESENT)],
+        )
+
+    def test_no_zero_width_intervals_reach_positions(self):
+        """Clipping must not manufacture empty intervals.
+
+        Stated separately from the row-level expectation above because it is
+        the invariant the rest of micov relies on: `_quant.py` bins these
+        intervals and `_plot.py` draws them, and a [stop, stop) segment is
+        meaningless to both.
+        """
+        v = View(
+            f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*self.ABUTTING_REGION)
+        )
+
+        # by name, not by position: the region branch emits `positions` in a
+        # different column order from the other two
+        rows = v.positions().select(f"{COLUMN_START}, {COLUMN_STOP}").fetchall()
+        self.assertTrue(rows)
+        for start, stop in rows:
+            with self.subTest(start=start, stop=stop):
+                self.assertLess(start, stop)
+
+    def test_zero_width_region_is_rejected(self):
+        """A region with no width has no denominator, and no user intent.
+
+        It reached `ValueError: No positions left after filtering.` before --
+        true, but it describes the symptom rather than the malformed row, and
+        it is the same message a perfectly good region that happens to match
+        nothing produces.
+        """
+        feat = ((COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP), [["G1", 5, 5]])
+        with self.assertRaisesRegex(ValueError, r"'G1'.*\[5, 5\)"):
+            View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
+
+    def test_inverted_region_is_rejected(self):
+        """Reversed coordinates fail today, but not in a way anyone can act on.
+
+        `feature_metadata` computes `stop - start` on UINTEGER columns, so a
+        transposed pair of columns surfaces as `Out of Range Error: Overflow in
+        subtraction of UINT32 (40 - 60)` -- from DuckDB, naming neither the
+        genome, the file, nor the fact that a region is half-open.
+        """
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
+            [["G1", 0, 100], ["G2", 60, 40]],
+        )
+        with self.assertRaisesRegex(ValueError, r"'G2'.*\[60, 40\)"):
+            View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
+
+    def test_two_regions_on_one_genome_are_scored_separately(self):
+        """Each region gets its own numerator, not the genome's total.
+
+        Two regions on one genome is an ordinary thing to ask for -- two genes,
+        say -- and micov summed the clipped intervals across *both* before
+        dividing by *each* region's length. That reported S3 as covering 21
+        bases of a 20bp region: `percent_covered` of 105.0, and S1 at 100%
+        of a region it covers a quarter of.
+
+        Every value below is hand-checkable against POSITION_ROWS, which is the
+        point -- G3 holds [15,30) and [75,90) for S1, [1,11) for S2, [1,62)
+        for S3.
+        """
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
+            [["G3", 0, 20], ["G3", 60, 100]],
+        )
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
+
+        self.assert_relation(
+            v.coverages(),
+            COVERAGE_SCHEMA,
+            [
+                # region [0, 20): S1 covers [15,20), S2 [1,11), S3 [1,20)
+                ("G3", "S1", 5, 20, 25.0),
+                ("G3", "S2", 10, 20, 50.0),
+                ("G3", "S3", 19, 20, 95.0),
+                # region [60, 100): S1 covers [75,90), S3 [60,62), S2 nothing
+                ("G3", "S1", 15, 40, 37.5),
+                ("G3", "S3", 2, 40, 5.0),
+            ],
+        )
+        # the intervals stay separate islands rather than merging across the
+        # gap between the two regions
+        self.assert_relation(
+            v.positions(),
+            POSITION_SCHEMA,
+            [
+                ("G3", "S1", 15, 20),
+                ("G3", "S1", 75, 90),
+                ("G3", "S2", 1, 11),
+                ("G3", "S3", 1, 20),
+                ("G3", "S3", 60, 62),
+            ],
+        )
+
+    def test_breadth_never_exceeds_the_region(self):
+        """The invariant the case above violated, stated on its own.
+
+        A percentage over 100 is not a rounding question -- it means the
+        numerator and the denominator are measuring different things.
+        """
+        feat = (
+            (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP),
+            [["G3", 0, 20], ["G3", 60, 100]],
+        )
+        v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
+
+        rows = v.coverages().select(
+            f"{COLUMN_SAMPLE_ID}, {COLUMN_COVERED}, {COLUMN_LENGTH}, "
+            f"{COLUMN_PERCENT_COVERED}"
+        ).fetchall()
+        self.assertTrue(rows)
+        for sample, covered, length, percent in rows:
+            with self.subTest(sample=sample):
+                self.assertLessEqual(covered, length)
+                self.assertLessEqual(percent, 100.0)
+
+    def test_presence_covers_only_the_constrained_samples(self):
+        """`extract-sample-presence` must respect the metadata it was given.
+
+        Presence was derived from the unfiltered position table, so a metadata
+        file naming one sample still produced a row for every sample in the
+        parquet -- the one constraint the user actually asked for, ignored.
+        S1 and S3 both have G3 coverage, so they are what leaked.
+        """
+        header, rows = self.md
+        md = (header, [row for row in rows if row[0] == "S2"])
+        v = View(
+            f"{self.d}/{self.name}", self.tsv(*md), self.tsv(*self.ABUTTING_REGION)
+        )
+
+        self.assert_relation(
+            v.sample_presence_absence(),
+            ((COLUMN_SAMPLE_ID, "VARCHAR"), ("G3_1_15", "VARCHAR")),
+            [("S2", PRESENT)],
+        )
+
     def test_sample_presence_absence_no_regions(self):
         v = View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*self.feat))
         with self.assertRaisesRegex(ValueError, r"^Cannot calculate"):

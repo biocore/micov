@@ -38,10 +38,65 @@ MIINT_REPOSITORY = "https://ftp.microbio.me/pub/miint"
 # There is deliberately no minimum-version check. `miint_version()` reports a
 # git short hash (e.g. 'c2e8d97'), not a semantic version, so there is nothing
 # to order a floor against, and pinning an exact hash would break micov on
-# every upstream commit. The check that will earn its keep is a capability one
-# -- assert the specific functions micov calls exist -- and it belongs with the
-# first micov code that calls a miint primitive, where the required set is
-# known rather than empty.
+# every upstream commit. The capability check below is what replaces it.
+
+#: Every miint function micov calls, checked for on each connection.
+#:
+#: This is the floor micov can actually express. An miint predating any of
+#: these otherwise fails deep inside a query, as `Catalog Error: Table Function
+#: with name region_coverage does not exist` -- which names neither micov nor
+#: the extension that has to be updated, and arrives only once the user has
+#: waited through an ingest.
+#:
+#: Keep it in step with the code: a name added here that micov does not call
+#: rejects working installs for nothing, and a call added without its name here
+#: is a failure this was written to prevent.
+#:
+#: This checks that the names resolve, not that their signatures match. A miint
+#: that renamed a parameter or changed a return column still passes here and
+#: fails in the query -- catching that would mean calling each one, which is
+#: too much to do on every connection.
+REQUIRED_MIINT_FUNCTIONS = (
+    "compress_intervals",  # _io.compress_alignments, _view region positions
+    "read_alignments",  # _io.compress_alignments
+    "region_coverage",  # _view region-constrained breadth
+    "region_presence",  # _view.sample_presence_absence
+)
+
+
+def _assert_capabilities(con):
+    """Check that `con` carries every miint function micov calls.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        A connection with the miint extension already loaded.
+
+    Raises
+    ------
+    RuntimeError
+        Naming the functions that are missing, and only those.
+    """
+    placeholders = ", ".join("?" * len(REQUIRED_MIINT_FUNCTIONS))
+    present = {
+        row[0]
+        for row in con.execute(
+            "SELECT DISTINCT function_name FROM duckdb_functions() "
+            f"WHERE function_name IN ({placeholders})",
+            list(REQUIRED_MIINT_FUNCTIONS),
+        ).fetchall()
+    }
+
+    missing = [name for name in REQUIRED_MIINT_FUNCTIONS if name not in present]
+    if missing:
+        raise RuntimeError(
+            "The installed miint extension is missing "
+            f"{len(missing)} function(s) micov requires: "
+            f"{', '.join(missing)}.\n\nmicov is built against a newer miint "
+            "than the one loaded. Remove the cached build from "
+            "~/.duckdb/extensions/ to force a re-download, or point "
+            f"{MIINT_EXTENSION_PATH_VARIABLE} at a current build."
+        )
 
 
 def connection(memory="8gb", threads=1):
@@ -117,6 +172,15 @@ def connection(memory="8gb", threads=1):
         raise RuntimeError(
             _unavailable_message(override, repository, version, exc)
         ) from exc
+
+    # after the load, and deliberately not inside the handler above: a build
+    # that loads but is too old is a different failure with a different remedy,
+    # and it is not a `duckdb.Error` to begin with.
+    try:
+        _assert_capabilities(con)
+    except Exception:
+        con.close()
+        raise
 
     return con
 

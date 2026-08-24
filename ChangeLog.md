@@ -14,8 +14,31 @@ Backward incompatible changes:
 * **`micov position-plot` can read stdin.** `--positions` was already optional,
   but omitting it raised `io.UnsupportedOperation: underlying stream is not
   seekable`, so the documented-by-the-interface path never worked.
+* **A region's end position is now exclusive when deciding overlap.** Regions
+  are half-open `[start, stop)`, but an interval beginning at exactly `stop`
+  was counted as overlapping. It contributed zero bases, so it never changed a
+  breadth value -- but it did make `micov extract-sample-presence` report the
+  sample *present* in a region it covers nothing of, and it put a zero-width
+  interval into the position output. Presence calls at an exact region
+  boundary flip from `present` to `absent`. No region in `example/` is
+  affected; the nearest interval start is 4 bases from a region edge.
+* **Regions covering more than one part of the same genome are scored
+  separately.** Coverage was summed across *all* regions on a genome and then
+  divided by *each* region's length, so a sample could be reported as covering
+  21 bases of a 20bp region -- `percent_covered` above 100. Each region now has
+  its own numerator. Feature files with one region per genome, which is what
+  `example/` and the published analyses use, are unaffected.
+* **`micov extract-sample-presence` honours the sample metadata.** Presence was
+  computed from the unfiltered coverage, so a metadata file naming a subset of
+  samples still produced a row for every sample in the Parquet.
 
 Other changes:
+
+* **A malformed region is rejected by name.** A feature file whose `start` and
+  `stop` are transposed failed with `Out of Range Error: Overflow in
+  subtraction of UINT32 (40 - 60)`, and a zero-width region with `No positions
+  left after filtering.` -- neither of which names the offending row. Both now
+  raise naming the genome and the interval.
 
 * **`polars` is no longer a dependency.** Every use moved to DuckDB (parsing,
   joins, aggregation) or to the standard library (writing `.ks.tsv` and the

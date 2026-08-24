@@ -21,6 +21,7 @@ from unittest import mock
 
 import duckdb
 
+from micov import _miint
 from micov._constants import (
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
@@ -34,6 +35,7 @@ from micov._miint import (
     MIINT_EXTENSION_PATH_VARIABLE,
     MIINT_REPOSITORY,
     MIINT_REPOSITORY_VARIABLE,
+    REQUIRED_MIINT_FUNCTIONS,
     connection,
 )
 from micov._view import View
@@ -226,6 +228,68 @@ class MiintRepositoryTests(unittest.TestCase):
         con = connection()
         self.addCleanup(con.close)
         self.assertTrue(miint_is_loaded(con))
+
+
+@requires_miint_build
+class MiintCapabilityTests(unittest.TestCase):
+    """micov names the miint functions it calls, and checks for them.
+
+    There is deliberately no *version* floor -- `miint_version()` reports a git
+    short hash, so there is nothing to order against. The check that earns its
+    keep is this one, and it only became possible to write once micov depended
+    on a known set of primitives rather than none.
+
+    Without it, an miint too old for one of these fails deep inside a query as
+    `Catalog Error: Table Function with name region_coverage does not exist`,
+    which names neither micov nor the extension the user has to update.
+    """
+
+    def test_every_required_function_is_present(self):
+        """The real assertion: the deployed build satisfies micov.
+
+        Written against the live connection rather than a stub so that an
+        upstream removal is caught here, in one obvious place, instead of as a
+        scattered set of query failures.
+        """
+        con = connection()
+        self.addCleanup(con.close)
+
+        for name in REQUIRED_MIINT_FUNCTIONS:
+            with self.subTest(function=name):
+                self.assertTrue(
+                    con.execute(
+                        "SELECT COUNT(*) FROM duckdb_functions() "
+                        "WHERE function_name = ?",
+                        [name],
+                    ).fetchone()[0]
+                )
+
+    def test_a_missing_function_is_micovs_own_error(self):
+        """An miint without one of them must fail at connect, naming it.
+
+        The required set is patched rather than the extension downgraded --
+        micov cannot install an older miint on demand, and the branch under
+        test is "a name micov needs is absent from `duckdb_functions()`",
+        which a fictional name reproduces exactly.
+        """
+        # deliberately not a superstring of a real name -- the assertion below
+        # tests substrings, and "region_coverage_that_is_absent" would contain
+        # "region_coverage" and fail against a correct message
+        absent = "no_such_miint_function"
+        with mock.patch.object(
+            _miint, "REQUIRED_MIINT_FUNCTIONS", (*REQUIRED_MIINT_FUNCTIONS, absent)
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                connection()
+
+        message = str(ctx.exception)
+        self.assertNotIsInstance(ctx.exception, duckdb.Error)
+        self.assertIn(absent, message)
+        self.assertIn("miint", message)
+        # naming only what is missing -- a message listing everything micov
+        # needs buries the one line the user has to act on
+        for present in REQUIRED_MIINT_FUNCTIONS:
+            self.assertNotIn(present, message)
 
 
 class MiintFailureTests(unittest.TestCase):

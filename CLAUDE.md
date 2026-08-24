@@ -112,6 +112,7 @@ micov is published and its outputs are in the wild. Unless a task explicitly ove
 - Breadth is `sum(stop - start)` over merged intervals — **no `+1`**.
 - Interval merging **collapses touching intervals** (`stop1 == start2` → one interval). This is intentional, holds in both implementations — miint's `compress_intervals` and `_cov.merge_intervals` — and is covered by `micov/tests/test_cov.py` and `micov/tests/test_alignments.py`. The `compress` docstring's stale case 3, which claimed the opposite, was corrected in M3.
 - `.cov` files are described as "BED-like" but carry 1-based coordinates, whereas real BED is 0-based. Breadth math is unaffected; joins against genuinely 0-based sources are not.
+- **Regions are half-open too**, so an interval starting exactly at a region's `stop` is outside it. micov's overlap predicate was `pos.start <= fc.stop`, which admitted that interval, clipped it to a zero-width `[stop, stop)`, and reported the sample present in a region it covered no bases of. M6 adopted miint's `<`. Regions with `stop <= start` are now rejected in `_feature_filters` rather than reaching the SQL, where they surfaced as a UINT32 subtraction overflow.
 - Primary *and* secondary alignments are retained deliberately, so CNVs, horizontally transferred elements, and repeats are represented rather than silently dropped.
 
 ## Architecture
@@ -137,13 +138,13 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 | Module | Role |
 |---|---|
 | `cli.py` | click command surface; the only user-facing contract |
-| `_view.py` | `View` — DuckDB session with three filter modes: none, genome-level (`constrain_features`), sub-genome region (`constrain_positions`). Only the third does real work: clips intervals to region bounds, re-compresses per sample, recomputes breadth against *region* length |
+| `_view.py` | `View` — DuckDB session with three filter modes: none, genome-level (`constrain_features`), sub-genome region (`constrain_positions`). Only the third does real work, and since M6 it is miint's: the clipped intervals are re-merged by `compress_intervals`, region-relative breadth comes from `region_coverage`, and `sample_presence_absence` is `region_presence` plus a `PIVOT` |
 | `_cov.py` | `merge_intervals` (numpy) plus rank ordering and cumulative accumulation, all on the curve path. **Polars-free since M4**, which deleted the second merge implementation (`compress`, numba + polars) along with `coverage_percent` |
 | `_io.py` | parsers/writers, all DuckDB since M5. `load_bed_cov` and `load_genome_lengths` read input into tables; `compress_alignments` is the miint ingest; `write_coverage_parquet` is the single producer of the frozen Parquet pair |
 | `_plot.py` | matplotlib curves and position plots, plus the KS tests. Largest module; `position_plot_segments` is the only part with unit tests, added in M5 because `position-plot` writes no data file and so had no golden |
 | `_quant.py` | binning |
 | `_constants.py` | column names and the three presence/absence values. The polars dtypes and seven `_SCHEMA` objects went in M5 |
-| `_miint.py` | `connection()` — the only place micov opens a DuckDB connection, **and the only place the extension's install source is named**. `cli.py` was moved behind it so that stays true |
+| `_miint.py` | `connection()` — the only place micov opens a DuckDB connection, **and the only place the extension's install source is named**. `cli.py` was moved behind it so that stays true. `REQUIRED_MIINT_FUNCTIONS` lists every miint function micov calls and is checked on each connection (names only, not signatures) |
 
 `micov/_convert.py` is **gone** — htslib computes the reference span now. `micov/_rank.py` is **dead code** — nothing imports it, and it pulls in an undeclared pandas dependency. The `--rank` flag on `micov binning` is a **no-op**; the variance ranking is written unconditionally.
 
@@ -160,7 +161,7 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 
 ## In-flight work
 
-An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint). **Done so far:** the DuckDB floor is `>=1.5.4`, **miint is loaded on every connection** via `_miint.connection()` and does the alignment ingest and interval merge, Qiita support has been dropped, and **`pyarrow`, `numba` and `polars` are all gone** — runtime dependencies are now `click`, `scipy`, `matplotlib` and `duckdb`. **Still to do:** replace the remaining hand-written SQL with miint's primitives, and remove scipy with it. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
+An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint). **Done so far:** the DuckDB floor is `>=1.5.4`, **miint is loaded on every connection** via `_miint.connection()` and does the alignment ingest and interval merge, Qiita support has been dropped, and **`pyarrow`, `numba` and `polars` are all gone** — runtime dependencies are now `click`, `scipy`, `matplotlib` and `duckdb`. M6 moved `View`'s region operations onto `region_coverage`, `region_presence` and `compress_intervals`, so micov has **one** interval merge rather than two. **Still to do:** the cumulative curves and Monte Carlo (`cumulative_coverage`), then `ks_2samp` and removing scipy with it. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
 
 miint is a DuckDB **community extension**, not a Python package — it cannot be declared in `pyproject.toml`, and `pip index versions duckdb-miint` finds nothing. It is required at runtime instead, with no fallback: two compute paths that must agree numerically would put the frozen coverage and KS numbers at risk. `miint_version()` returns a **git short hash**, not a semantic version, so there is no orderable floor to pin; the guard that will replace it is a capability check, added with the first micov code that calls a miint primitive.
 
