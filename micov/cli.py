@@ -338,7 +338,10 @@ def per_sample_group(
     "--bin-num", type=int, default=1000, help="Number of bins (default: 1000)"
 )
 @click.option(
-    "--rank", is_flag=True, default=False, help="Enable ranking (default: False)"
+    "--rank",
+    is_flag=True,
+    default=False,
+    help="Deprecated; has no effect -- the ranking is always written.",
 )
 @click.option("--memory", type=str, default="16gb", required=False)
 @click.option("--threads", type=int, default=4, required=False)

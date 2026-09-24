@@ -6,6 +6,17 @@ micov 0.0.1-dev
 
 Backward incompatible changes:
 
+* **KS results are now `.ks.csv`, not `.ks.tsv`.** The files were always
+  comma-separated; only the name was wrong. Anything globbing `*.ks.tsv` needs
+  updating. The content of the first four columns is unchanged.
+* **KS results carry a Bonferroni-corrected p-value** in a new last column,
+  `ks-pvalue-bonferroni`. The paper describes a Bonferroni correction that
+  micov previously left to the analyst. It is `min(1, p × m)`, where
+  `m` is the number of group-vs-group comparisons in the file (one file per
+  genome). Comparisons against a `--monte` curve are not counted and are left
+  blank, so `--monte` never changes a group pair's corrected value.
+  `ks-pvalue` stays uncorrected. Readers that take columns by position are
+  unaffected; readers that check the header will see five names.
 * **`micov position-plot` names its output files correctly.** They were written
   as `{output}.('G000000001',).position-plot.png` -- a literal Python tuple
   repr, because the genome key came from a polars `group_by` and went straight
@@ -34,6 +45,9 @@ Backward incompatible changes:
 
 Other changes:
 
+* `micov binning --rank` is documented as having no effect. The variance
+  ranking has always been written unconditionally; the flag is still accepted
+  so existing invocations keep working.
 * **`scipy` is no longer a dependency.** The pairwise KS tests written to
   `.ks.tsv` now use the `ks_2samp` function of the miint DuckDB extension.
   Runtime dependencies are now `click`, `matplotlib` and `duckdb`.

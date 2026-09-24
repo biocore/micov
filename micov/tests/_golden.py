@@ -27,9 +27,9 @@ Sources of nondeterminism
 
 1. Unseeded ``pl.col(...).shuffle()`` -- ``_plot.py:218``
    Randomizes the Monte Carlo sample draw, so the Monte Carlo curve and any
-   ``.ks.tsv`` row whose label begins ``Monte Carlo `` change every run.
+   ``.ks.csv`` row whose label begins ``Monte Carlo `` change every run.
    The non-Monte rows in the same file do not.
-   => Partition ``.ks.tsv`` rows on that label prefix. Exact-compare the
+   => Partition ``.ks.csv`` rows on that label prefix. Exact-compare the
       deterministic rows; assert only presence and range on the rest.
 
 2. ``gzip.open`` stores the current mtime -- ``_plot.py:672``
@@ -45,7 +45,7 @@ Sources of nondeterminism
    noticeably between matplotlib releases.
    => Existence, non-zero size, and PNG magic bytes only. PNG content is
       deliberately unguarded; the plotted values are guarded instead via the
-      ``.tsv.gz`` position data and the ``.ks.tsv`` statistics.
+      ``.tsv.gz`` position data and the ``.ks.csv`` statistics.
 
 5. Ties in an ``ORDER BY`` are broken arbitrarily
    Row order within a tie block of ``stats_by_variance_of_sample_hits.tsv``
@@ -91,7 +91,7 @@ Sources of nondeterminism
       (``TSV_FLOAT_REL_TOL``, ~20x looser than the observed drift and far
       tighter than any real defect) and every other column exactly.
 
-10. KS p-values are not scipy's bit for bit -- ``ks-pvalue`` in ``.ks.tsv``
+10. KS p-values are not scipy's bit for bit -- ``ks-pvalue`` in ``.ks.csv``
     Added in M9, when the KS tests moved from ``scipy.stats.ks_2samp`` to
     miint's ``ks_2samp``. Not run-to-run nondeterminism: miint is
     deterministic, but it derives the exact p-value independently (Hodges
@@ -102,7 +102,8 @@ Sources of nondeterminism
     -- both return the exact lattice value ``h / lcm(n1, n2)`` -- and all 6
     are bit-exact.
     => ``ks-pvalue`` on deterministic rows within ``TSV_FLOAT_REL_TOL``;
-       labels and ``ks-statistic`` exactly.
+       labels and ``ks-statistic`` exactly. ``ks-pvalue-bonferroni``, added
+       in M11a, is ``p * m`` and inherits the same tolerance.
 
 Two traps: outputs that matched by luck
 ---------------------------------------
@@ -113,7 +114,7 @@ goldens on the first run *despite being genuinely unstable*:
 - ``stats_bins.tsv`` matched exactly, but its genome block order flips with
   ``PYTHONHASHSEED`` (seeds 1 and 12345 put ``G000154205`` first; the golden
   has ``G000436435`` first). Source #7.
-- The non-percentile Monte Carlo ``.ks.tsv`` matched exactly, which flatly
+- The non-percentile Monte Carlo ``.ks.csv`` matched exactly, which flatly
   contradicts source #1. Three further runs showed the Monte Carlo rows do
   vary. The KS statistic over ~20 samples takes few distinct values, so
   collisions are common and a single match proves nothing.
@@ -128,8 +129,9 @@ Stable outputs
 
 For contrast -- these were verified stable and are compared exactly:
 
-- ``.ks.tsv`` rows that are not Monte Carlo rows, including the statistic
-  and p-value to full double precision. These are the published numbers.
+- ``.ks.csv`` rows that are not Monte Carlo rows: labels and statistic
+  exactly. These are the published numbers. (The p-value and its Bonferroni
+  correction are within ``TSV_FLOAT_REL_TOL`` since M9 -- source #10.)
 - ``.tsv.gz`` position-plot content, once decompressed.
 - ``.cov`` content as a multiset of intervals.
 - Parquet row sets and their ordered schemas.
@@ -138,9 +140,9 @@ For contrast -- these were verified stable and are compared exactly:
   contractual, and ``--monte`` alters the tag, so the fileset is a real
   assertion rather than a formality.
 
-Note that ``.ks.tsv`` files are comma-separated despite the extension
-(``_plot.py`` calls ``write_csv`` without ``separator``). That is a frozen
-output format, not a bug to fix here.
+KS results were written as ``.ks.tsv`` despite being comma-separated until
+M11a renamed them ``.ks.csv``; the committed goldens were renamed with them,
+their four original columns byte for byte.
 
 Conventions
 -----------
@@ -166,7 +168,9 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 #: values are unreproducible by construction (source #1).
 MONTE_LABEL_PREFIX = "Monte Carlo "
 
-KS_COLUMNS = ("label_A", "label_B", "ks-statistic", "ks-pvalue")
+KS_COLUMNS = (
+    "label_A", "label_B", "ks-statistic", "ks-pvalue", "ks-pvalue-bonferroni",
+)
 
 #: Relative tolerance for floats that are not reproducible bit for bit:
 #: ``sample_hits_std`` (source #9, measured drift 5.8e-16, so ~20x margin) and
@@ -483,30 +487,30 @@ def _is_monte(row):
 
 
 def _parse_ks(path):
-    """Parse a ``.ks.tsv``, which is comma-separated despite the extension."""
+    """Parse a ``.ks.csv``."""
     with open(path, newline="") as fp:
         rows = list(csv.reader(fp))
     rows = [r for r in rows if r]
     if not rows:
-        raise AssertionError(f"empty .ks.tsv, expected a header: {path}")
+        raise AssertionError(f"empty .ks.csv, expected a header: {path}")
     header = tuple(rows[0])
     if header != KS_COLUMNS:
         raise AssertionError(
-            f"unexpected .ks.tsv header in {path}\n"
+            f"unexpected .ks.csv header in {path}\n"
             f"    observed: {header}\n    expected: {KS_COLUMNS}"
         )
     body = rows[1:]
     for row in body:
         if len(row) != len(KS_COLUMNS):
             raise AssertionError(
-                f"malformed .ks.tsv row in {path}: expected "
+                f"malformed .ks.csv row in {path}: expected "
                 f"{len(KS_COLUMNS)} fields, got {len(row)}: {row}"
             )
     return header, body
 
 
 def assert_ks_equal(observed, expected):
-    """Assert two ``.ks.tsv`` files agree, tolerating Monte Carlo variance.
+    """Assert two ``.ks.csv`` files agree, tolerating Monte Carlo variance.
 
     Rows are partitioned on the ``Monte Carlo `` label prefix:
 
@@ -516,9 +520,12 @@ def assert_ks_equal(observed, expected):
       scipy that produced the goldens and agrees only to a few ULP
       (source #10). The statistic is an exact lattice value in both, so it
       gets no tolerance at all.
+      ``ks-pvalue-bonferroni`` is ``p * m`` capped at 1, so it inherits the
+      p-value's tolerance.
     - **Monte Carlo rows** are unseeded (source #1), so only their label
       pairs must match -- catching a dropped or renamed comparison -- and
-      their statistic and p-value must lie in ``[0, 1]``.
+      their statistic and p-value must lie in ``[0, 1]``. They are outside
+      the Bonferroni family, so their corrected field must be **empty**.
     """
     observed = _require_file(observed, "observed")
     expected = _require_file(expected, "expected golden")
@@ -541,20 +548,21 @@ def assert_ks_equal(observed, expected):
         )
 
     for got, want in zip(got_fixed, want_fixed, strict=True):
-        try:
-            close = math.isclose(
-                float(got[3]), float(want[3]),
-                rel_tol=TSV_FLOAT_REL_TOL, abs_tol=TSV_FLOAT_REL_TOL,
-            )
-        except ValueError:
-            close = False
-        if not close:
-            raise AssertionError(
-                f"deterministic KS p-value differs by more than "
-                f"{TSV_FLOAT_REL_TOL:g} relative -- a published number\n"
-                f"  observed: {observed}\n  expected: {expected}\n"
-                f"    observed: {got}\n    expected: {want}"
-            )
+        for offset in (3, 4):
+            try:
+                close = math.isclose(
+                    float(got[offset]), float(want[offset]),
+                    rel_tol=TSV_FLOAT_REL_TOL, abs_tol=TSV_FLOAT_REL_TOL,
+                )
+            except ValueError:
+                close = False
+            if not close:
+                raise AssertionError(
+                    f"deterministic KS {KS_COLUMNS[offset]!r} differs by more "
+                    f"than {TSV_FLOAT_REL_TOL:g} relative -- a published number\n"
+                    f"  observed: {observed}\n  expected: {expected}\n"
+                    f"    observed: {got}\n    expected: {want}"
+                )
 
     got_labels = sorted(tuple(r[:2]) for r in got_rows if _is_monte(r))
     want_labels = sorted(tuple(r[:2]) for r in want_rows if _is_monte(r))
@@ -567,9 +575,14 @@ def assert_ks_equal(observed, expected):
         )
 
     for row in (r for r in got_rows if _is_monte(r)):
+        if row[4] != "":
+            raise AssertionError(
+                f"Monte Carlo row carries a {KS_COLUMNS[4]} value in {observed}; "
+                f"Monte Carlo comparisons are outside the family (row {row})"
+            )
         # index rather than zip: _parse_ks already validated field counts,
         # and zip(strict=...) is 3.10+ while this project supports 3.9
-        for offset, name in enumerate(KS_COLUMNS[2:], start=2):
+        for offset, name in enumerate(KS_COLUMNS[2:4], start=2):
             raw = row[offset]
             try:
                 value = float(raw)
@@ -589,7 +602,7 @@ def assert_png_plausible(observed):
 
     PNG bytes are not reproducible across matplotlib versions, backends, or
     font sets (source #4), so content is deliberately unguarded -- the
-    plotted values are covered by the ``.tsv.gz`` and ``.ks.tsv`` goldens
+    plotted values are covered by the ``.tsv.gz`` and ``.ks.csv`` goldens
     instead. This checks only that a plot was actually written: the magic
     bytes plus a non-empty payload, so a truncated or empty write fails.
     """

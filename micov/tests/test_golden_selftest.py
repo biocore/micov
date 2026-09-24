@@ -42,14 +42,17 @@ COV_ROWS = [
     "G000436435\t10\t99",
 ]
 
-KS_HEADER = "label_A,label_B,ks-statistic,ks-pvalue"
+KS_HEADER = "label_A,label_B,ks-statistic,ks-pvalue,ks-pvalue-bonferroni"
+# two deterministic rows, so the Bonferroni family is m = 2; the second row's
+# p * 2 exceeds 1 and is capped
 KS_DETERMINISTIC = [
-    "No,Yes,0.3,0.24244968766417713",
-    "No,not provided,0.3,0.5691054572613793",
+    "No,Yes,0.3,0.24244968766417713,0.48489937532835425",
+    "No,not provided,0.3,0.5691054572613793,1.0",
 ]
+# Monte Carlo rows are not corrected, so their last field is empty
 KS_MONTE = [
-    "No,Monte Carlo unfocused (n=20),0.1,0.9999923931635496",
-    "Yes,Monte Carlo unfocused (n=20),0.23684210526315788,0.5351657978006094",
+    "No,Monte Carlo unfocused (n=20),0.1,0.9999923931635496,",
+    "Yes,Monte Carlo unfocused (n=20),0.23684210526315788,0.5351657978006094,",
 ]
 
 BIN_HEADER = "genome_id\tbin_idx\tbin_start\tbin_stop\tsample_hits_std"
@@ -366,15 +369,15 @@ class TestAssertKsEqual(GoldenSelfTestBase):
 
     def test_identical_passes(self):
         rows = [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE]
-        assert_ks_equal(self.write("a.ks.tsv", rows), self.write("b.ks.tsv", rows))
+        assert_ks_equal(self.write("a.ks.csv", rows), self.write("b.ks.csv", rows))
 
     def test_monte_pvalue_change_passes(self):
-        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
         drifted = [
-            "No,Monte Carlo unfocused (n=20),0.15,0.8123456789",
-            "Yes,Monte Carlo unfocused (n=20),0.2,0.4999999999",
+            "No,Monte Carlo unfocused (n=20),0.15,0.8123456789,",
+            "Yes,Monte Carlo unfocused (n=20),0.2,0.4999999999,",
         ]
-        b = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *drifted])
+        b = self.write("b.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *drifted])
         assert_ks_equal(a, b)
 
     def test_deterministic_pvalue_change_fails(self):
@@ -384,17 +387,20 @@ class TestAssertKsEqual(GoldenSelfTestBase):
         now sits *inside* ``TSV_FLOAT_REL_TOL`` by design, so the control
         moved to a difference the tolerance must not absorb.
         """
-        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
-        bad = ["No,Yes,0.3,0.2424496876642", KS_DETERMINISTIC[1]]
-        b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        bad = ["No,Yes,0.3,0.2424496876642,0.4848993753284", KS_DETERMINISTIC[1]]
+        b = self.write("b.ks.csv", [KS_HEADER, *bad, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(a, b)
 
     def test_deterministic_pvalue_ulp_drift_passes(self):
         """miint's p-value, which differs from scipy's by 1 ULP (source #10)."""
-        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
-        drifted = ["No,Yes,0.3,0.24244968766417715", KS_DETERMINISTIC[1]]
-        b = self.write("b.ks.tsv", [KS_HEADER, *drifted, *KS_MONTE])
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        drifted = [
+            "No,Yes,0.3,0.24244968766417715,0.4848993753283543",
+            KS_DETERMINISTIC[1],
+        ]
+        b = self.write("b.ks.csv", [KS_HEADER, *drifted, *KS_MONTE])
         assert_ks_equal(a, b)
 
     def test_deterministic_statistic_ulp_change_fails(self):
@@ -403,85 +409,134 @@ class TestAssertKsEqual(GoldenSelfTestBase):
         ``0.30000000000000004`` is precisely what a pre-#257 miint returns
         for this row, so this is the regression the exactness guards.
         """
-        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
-        bad = ["No,Yes,0.30000000000000004,0.24244968766417713", KS_DETERMINISTIC[1]]
-        b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        bad = [
+            "No,Yes,0.30000000000000004,0.24244968766417713,0.48489937532835425",
+            KS_DETERMINISTIC[1],
+        ]
+        b = self.write("b.ks.csv", [KS_HEADER, *bad, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(a, b)
 
     def test_deterministic_label_change_fails(self):
         """Tolerating the p-value must not decouple it from its label pair."""
-        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
-        bad = ["No,Maybe,0.3,0.24244968766417713", KS_DETERMINISTIC[1]]
-        b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        bad = [
+            "No,Maybe,0.3,0.24244968766417713,0.48489937532835425",
+            KS_DETERMINISTIC[1],
+        ]
+        b = self.write("b.ks.csv", [KS_HEADER, *bad, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(a, b)
 
     def test_deterministic_statistic_change_fails(self):
-        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
-        bad = ["No,Yes,0.4,0.24244968766417713", KS_DETERMINISTIC[1]]
-        b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        bad = [
+            "No,Yes,0.4,0.24244968766417713,0.48489937532835425",
+            KS_DETERMINISTIC[1],
+        ]
+        b = self.write("b.ks.csv", [KS_HEADER, *bad, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(a, b)
 
     def test_dropped_monte_row_fails(self):
         """Tolerating the values must not tolerate losing the comparison."""
-        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
-        b = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, KS_MONTE[0]])
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        b = self.write("b.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, KS_MONTE[0]])
         with self.assertRaises(AssertionError):
             assert_ks_equal(a, b)
 
     def test_monte_pvalue_out_of_range_fails(self):
         """The range check guards the *observed* output, so it goes first."""
         bad = [
-            "No,Monte Carlo unfocused (n=20),0.1,1.5",
+            "No,Monte Carlo unfocused (n=20),0.1,1.5,",
             KS_MONTE[1],
         ]
-        observed = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
-        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        observed = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
+        golden = self.write("b.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(observed, golden)
 
     def test_monte_statistic_out_of_range_fails(self):
         bad = [
-            "No,Monte Carlo unfocused (n=20),-0.1,0.5",
+            "No,Monte Carlo unfocused (n=20),-0.1,0.5,",
             KS_MONTE[1],
         ]
-        observed = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
-        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        observed = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
+        golden = self.write("b.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(observed, golden)
 
     def test_non_numeric_monte_value_fails(self):
         bad = [
-            "No,Monte Carlo unfocused (n=20),nan,inf",
+            "No,Monte Carlo unfocused (n=20),nan,inf,",
             KS_MONTE[1],
         ]
-        observed = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
-        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        observed = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
+        golden = self.write("b.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(observed, golden)
 
     def test_malformed_row_fails(self):
         """A short row must raise AssertionError, not ValueError from zip."""
         observed = self.write(
-            "a.ks.tsv", [KS_HEADER, "No,Yes,0.3", *KS_MONTE]
+            "a.ks.csv", [KS_HEADER, "No,Yes,0.3", *KS_MONTE]
         )
-        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        golden = self.write("b.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(observed, golden)
 
     def test_wrong_header_fails(self):
-        observed = self.write("a.ks.tsv", ["a,b,c,d", *KS_DETERMINISTIC])
-        golden = self.write("b.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC])
+        observed = self.write("a.ks.csv", ["a,b,c,d,e", *KS_DETERMINISTIC])
+        golden = self.write("b.ks.csv", [KS_HEADER, *KS_DETERMINISTIC])
         with self.assertRaises(AssertionError):
             assert_ks_equal(observed, golden)
 
     def test_dropped_deterministic_row_fails(self):
-        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
-        b = self.write("b.ks.tsv", [KS_HEADER, KS_DETERMINISTIC[0], *KS_MONTE])
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        b = self.write("b.ks.csv", [KS_HEADER, KS_DETERMINISTIC[0], *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(a, b)
+
+    def test_bonferroni_ulp_drift_passes(self):
+        """Derived from the p-value, so it inherits the p-value's tolerance."""
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        drifted = [
+            "No,Yes,0.3,0.24244968766417713,0.4848993753283543",
+            KS_DETERMINISTIC[1],
+        ]
+        b = self.write("b.ks.csv", [KS_HEADER, *drifted, *KS_MONTE])
+        assert_ks_equal(a, b)
+
+    def test_bonferroni_change_fails(self):
+        """A wrong family size is exactly this: p is right, p * m is not."""
+        a = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        # m = 4 instead of 2, as if the Monte Carlo rows had been counted
+        bad = ["No,Yes,0.3,0.24244968766417713,0.9697987506567085", KS_DETERMINISTIC[1]]
+        b = self.write("b.ks.csv", [KS_HEADER, *bad, *KS_MONTE])
+        with self.assertRaisesRegex(AssertionError, "bonferroni. differs"):
+            assert_ks_equal(a, b)
+
+    def test_corrected_monte_carlo_row_fails(self):
+        """Monte Carlo comparisons are outside the family and stay empty."""
+        bad = [
+            "No,Monte Carlo unfocused (n=20),0.1,0.2,0.4",
+            KS_MONTE[1],
+        ]
+        observed = self.write("a.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *bad])
+        golden = self.write("b.ks.csv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        with self.assertRaisesRegex(AssertionError, "Monte Carlo.*bonferroni"):
+            assert_ks_equal(observed, golden)
+
+    def test_pre_bonferroni_header_fails(self):
+        """A file written before M11a has four columns, and is not current."""
+        old = "label_A,label_B,ks-statistic,ks-pvalue"
+        observed = self.write(
+            "a.ks.csv", [old, "No,Yes,0.3,0.24244968766417713"]
+        )
+        golden = self.write("b.ks.csv", [KS_HEADER, KS_DETERMINISTIC[0]])
+        with self.assertRaisesRegex(AssertionError, "header"):
+            assert_ks_equal(observed, golden)
 
 
 class TestAssertPngPlausible(GoldenSelfTestBase):
@@ -519,11 +574,11 @@ class TestAssertFileSet(GoldenSelfTestBase):
         super().setUp()
         self.outdir = self.tmp / "out"
         self.outdir.mkdir()
-        for name in ("a.png", "b.ks.tsv"):
+        for name in ("a.png", "b.ks.csv"):
             (self.outdir / name).write_text("x")
 
     def test_exact_match_passes(self):
-        assert_file_set(self.outdir, {"a.png", "b.ks.tsv"})
+        assert_file_set(self.outdir, {"a.png", "b.ks.csv"})
 
     def test_extra_file_fails(self):
         with self.assertRaises(AssertionError):
@@ -531,7 +586,7 @@ class TestAssertFileSet(GoldenSelfTestBase):
 
     def test_missing_file_fails(self):
         with self.assertRaises(AssertionError):
-            assert_file_set(self.outdir, {"a.png", "b.ks.tsv", "c.tsv"})
+            assert_file_set(self.outdir, {"a.png", "b.ks.csv", "c.tsv"})
 
 
 class TestComparatorsRejectDirectories(GoldenSelfTestBase):

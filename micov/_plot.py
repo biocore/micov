@@ -23,6 +23,17 @@ from ._cov import (
 )
 from ._io import BED_POSITIONS_TABLE
 
+#: Header of every `.ks.csv`. The first four names are frozen; the Bonferroni
+#: column was appended in M11a so that readers taking columns by position were
+#: unaffected.
+KS_HEADER = (
+    "label_A",
+    "label_B",
+    "ks-statistic",
+    "ks-pvalue",
+    "ks-pvalue-bonferroni",
+)
+
 
 def _write_delimited(path, header, rows, delimiter=",", compress=False):
     """Write `rows` as a delimited text file, optionally gzipped.
@@ -36,7 +47,7 @@ def _write_delimited(path, header, rows, delimiter=",", compress=False):
     numpy scalars (the position values come from `np.histogram`; the KS
     values were `np.float64` too until M9 moved them from scipy to miint),
     and under numpy 2 `repr()` of one of those is the string
-    `np.float64(0.3)`. That would corrupt every float in every `.ks.tsv` and
+    `np.float64(0.3)`. That would corrupt every float in every `.ks.csv` and
     `.tsv.gz` micov writes, and it is the sort of thing a tidy-up refactor
     does without noticing.
 
@@ -81,6 +92,53 @@ def ks_2samp(con, curve_a, curve_b):
         "FROM (SELECT ks_2samp(?::DOUBLE[], ?::DOUBLE[]) AS ks)",
         [np.asarray(curve_a, dtype=np.float64), np.asarray(curve_b, dtype=np.float64)],
     ).fetchone()
+
+
+def ks_table(con, curves, monte_label=None):
+    """Compare every pair of curves by KS, Bonferroni-correcting the groups.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension.
+    curves : dict of str to sequence of float
+        Curve per label, in the order the comparisons are written.
+    monte_label : str, optional
+        The label of the Monte Carlo curve, if there is one.
+
+    Returns
+    -------
+    list of list
+        One row per pair, ordered as `KS_HEADER`.
+
+    Notes
+    -----
+    The Bonferroni family is the group-vs-group comparisons in this table,
+    so ``m`` is their count and the corrected value is ``min(1, p * m)``.
+    Comparisons against the Monte Carlo curve are a null-model check rather
+    than a hypothesis: they are left out of ``m`` and their corrected field
+    is empty. Counting them would give the same pair of groups a different
+    corrected p-value depending on whether ``--monte`` was passed.
+
+    The Monte Carlo curve is identified by `monte_label`, not by its label
+    text, so a metadata group whose value happens to start "Monte Carlo" is
+    corrected like any other group.
+    """
+    labels = list(curves)
+    pairs = [
+        (a, b) for idx, a in enumerate(labels) for b in labels[idx + 1 :]
+    ]
+    m = sum(monte_label not in pair for pair in pairs)
+
+    rows = []
+    for label_a, label_b in pairs:
+        statistic, pvalue = ks_2samp(con, curves[label_a], curves[label_b])
+        if monte_label in (label_a, label_b):
+            corrected = ""
+        else:
+            corrected = min(1.0, pvalue * m)
+        rows.append([label_a, label_b, statistic, pvalue, corrected])
+    return rows
 
 
 def per_sample_plots(
@@ -462,8 +520,9 @@ def coverage_curve(
     if not labels:
         return
 
+    monte_label = None
     if with_monte is not None:
-        label, median_curve = add_monte(
+        monte_label, median_curve = add_monte(
             con,
             with_monte,
             ax,
@@ -477,8 +536,8 @@ def coverage_curve(
             lengths,
             percentile,
         )
-        labels.append(label)
-        curves[label] = median_curve
+        labels.append(monte_label)
+        curves[monte_label] = median_curve
 
     tag = "cumulative" if accumulate else "non-cumulative"
 
@@ -506,18 +565,8 @@ def coverage_curve(
     plt.close()
 
     if accumulate:
-        ksresults = []
-        curve_items = list(curves.items())
-
-        for idx, (label_a, curve_a) in enumerate(curve_items):
-            for label_b, curve_b in curve_items[idx + 1 :]:
-                statistic, pvalue = ks_2samp(con, curve_a, curve_b)
-                ksresults.append([label_a, label_b, statistic, pvalue])
-
-        outf = f"{output}.{target_name}.{target}.{variable}.{tag}.ks.tsv"
-        _write_delimited(
-            outf, ("label_A", "label_B", "ks-statistic", "ks-pvalue"), ksresults
-        )
+        outf = f"{output}.{target_name}.{target}.{variable}.{tag}.ks.csv"
+        _write_delimited(outf, KS_HEADER, ks_table(con, curves, monte_label))
 
 
 def position_plot_segments(con):

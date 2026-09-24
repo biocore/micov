@@ -199,7 +199,9 @@ group.
 Additionally, users can specify `--percentile` to display plots with the x-axis
 representing percentile of samples instead of absolute sample counts. 
 
-Pairwise Kolmogorov-Smirnov (KS) tests between all sample groups' cumulative coverage curves are automatically conducted and results saved in `cumulative.ks.tsv`. The KS test quantifies whether two sample groups differ in the distribution of their cumulative genome coverages, with the KS statistic measuring the maximal difference between the two cumulative distributions, and the KS p-value assessing the statistical significance of the difference.
+Pairwise Kolmogorov-Smirnov (KS) tests between all sample groups' cumulative coverage curves are automatically conducted and results saved in `cumulative.ks.csv`. The KS test quantifies whether two sample groups differ in the distribution of their cumulative genome coverages, with the KS statistic measuring the maximal difference between the two cumulative distributions, and the KS p-value assessing the statistical significance of the difference.
+
+The file is comma-separated, one row per pair of curves, with columns `label_A`, `label_B`, `ks-statistic`, `ks-pvalue` and `ks-pvalue-bonferroni`. `ks-pvalue` is **uncorrected**. `ks-pvalue-bonferroni` is `min(1, p × m)`, where the family `m` is the number of group-vs-group comparisons in that file -- that is, for that genome. Comparisons against a `--monte` curve are a null-model check rather than a hypothesis: they are not counted in `m` and their corrected value is left empty, so adding `--monte` never changes a group pair's corrected p-value. Correcting across genomes, or by another method, is left to the analyst.
 
 
 ```bash

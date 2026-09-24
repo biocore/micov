@@ -1,7 +1,7 @@
 """Tests for the data `_plot.py` plots.
 
 `_plot.py` is the largest module in micov and has almost no unit tests; the
-`.tsv.gz` and `.ks.tsv` goldens guard the `per-sample` path, and that is the
+`.tsv.gz` and `.ks.csv` goldens guard the `per-sample` path, and that is the
 only reason changing it has been safe. **The `position-plot` command is not
 covered by either** -- it writes PNGs and no data file, and its only test
 asserts that two PNGs exist with valid magic bytes. PNG bytes are not
@@ -24,7 +24,7 @@ import numpy as np
 
 from micov._io import load_bed_cov, load_genome_lengths
 from micov._miint import connection
-from micov._plot import ks_2samp, position_plot_segments
+from micov._plot import KS_HEADER, ks_2samp, ks_table, position_plot_segments
 from micov.tests._golden import TSV_FLOAT_REL_TOL
 
 #: Deliberately more awkward than `mini_sampleA.cov`: several intervals per
@@ -107,8 +107,8 @@ class PositionPlotSegmentTests(unittest.TestCase):
 
 #: Two frozen curve pairs from `example/`, captured by recording what
 #: `coverage_curve` handed to the KS test when regenerating the committed
-#: `.ks.tsv` goldens. Each entry is (curve A, curve B, statistic, p-value), the
-#: last two as `example/plots/per_sample_groups/*.cumulative.ks.tsv` records
+#: `.ks.csv` goldens. Each entry is (curve A, curve B, statistic, p-value), the
+#: last two as `example/plots/per_sample_groups/*.cumulative.ks.csv` records
 #: them -- the published numbers, computed by scipy 1.17.1.
 KS_CASES = {
     # G000154205, No vs Yes: n=20 and n=19, and D is exactly 114/380. A
@@ -216,6 +216,99 @@ class KsTwoSampleTests(unittest.TestCase):
         a, b, statistic, _ = KS_CASES["G000154205 No vs Yes"]
         observed, _ = ks_2samp(self.con, np.asarray(a), np.asarray(b))
         self.assertEqual(observed, statistic)
+
+
+#: Synthetic curves for the table tests. Their KS values are irrelevant; what
+#: matters is how many comparisons each row is corrected for. `SAME` is `LOW`
+#: again, so that pair's p-value is 1 and its correction has to be capped.
+LOW = [float(x) for x in range(10)]
+MID = [x + 0.5 for x in LOW]
+HIGH = [x + 5.0 for x in LOW]
+MONTE = [x + 2.5 for x in LOW]
+
+
+class KsTableTests(unittest.TestCase):
+    """The `.ks.csv` rows, including the Bonferroni column added in M11a.
+
+    The family is **per file, excluding Monte Carlo rows**: a Monte Carlo
+    curve is a null-model check, not a hypothesis, so comparing against it
+    neither gets corrected nor inflates the correction of the real
+    comparisons. Were it counted, the same pair of groups would report a
+    different corrected p-value depending on whether ``--monte`` was passed.
+    """
+
+    def setUp(self):
+        self.con = connection()
+        self.addCleanup(self.con.close)
+
+    def table(self, curves, monte_label=None):
+        return {
+            (row[0], row[1]): row[2:]
+            for row in ks_table(self.con, curves, monte_label)
+        }
+
+    def test_header_appends_the_corrected_column(self):
+        """The first four names are frozen; the new one goes last."""
+        self.assertEqual(
+            KS_HEADER,
+            ("label_A", "label_B", "ks-statistic", "ks-pvalue",
+             "ks-pvalue-bonferroni"),
+        )
+
+    def test_every_pair_is_compared_once_in_curve_order(self):
+        rows = ks_table(self.con, {"a": LOW, "b": MID, "c": HIGH})
+        self.assertEqual(
+            [tuple(r[:2]) for r in rows], [("a", "b"), ("a", "c"), ("b", "c")]
+        )
+
+    def test_statistic_and_pvalue_are_ks_2samp(self):
+        _, (statistic, pvalue, _) = next(
+            iter(self.table({"a": LOW, "c": HIGH}).items())
+        )
+        self.assertEqual((statistic, pvalue), ks_2samp(self.con, LOW, HIGH))
+
+    def test_bonferroni_multiplies_by_the_number_of_comparisons(self):
+        table = self.table({"a": LOW, "b": MID, "c": HIGH})
+        for pair, (_, pvalue, corrected) in table.items():
+            with self.subTest(pair=pair):
+                self.assertEqual(corrected, min(1.0, pvalue * 3))
+        # the premise: at least one row is actually scaled, not capped
+        self.assertTrue(any(p * 3 < 1 for _, p, _ in table.values()))
+
+    def test_bonferroni_is_capped_at_one(self):
+        """p = 1 for identical curves; p * m would be 3, not a probability."""
+        _, pvalue, corrected = self.table(
+            {"a": LOW, "same": list(LOW), "c": HIGH}
+        )[("a", "same")]
+        self.assertEqual(pvalue, 1.0)
+        self.assertEqual(corrected, 1.0)
+
+    def test_monte_carlo_rows_are_neither_corrected_nor_counted(self):
+        """Three groups plus Monte Carlo is m = 3, not 6."""
+        monte = "Monte Carlo unfocused (n=10)"
+        curves = {"a": LOW, "b": MID, "c": HIGH, monte: MONTE}
+        table = self.table(curves, monte_label=monte)
+
+        for pair, (_, pvalue, corrected) in table.items():
+            with self.subTest(pair=pair):
+                if monte in pair:
+                    self.assertEqual(corrected, "")
+                else:
+                    self.assertEqual(corrected, min(1.0, pvalue * 3))
+
+    def test_a_group_named_like_monte_carlo_is_still_a_group(self):
+        """Identified by being the Monte Carlo curve, not by its label."""
+        curves = {"Monte Carlo lookalike": LOW, "b": MID, "c": HIGH}
+        table = self.table(curves)
+        for pair, (_, pvalue, corrected) in table.items():
+            with self.subTest(pair=pair):
+                self.assertEqual(corrected, min(1.0, pvalue * 3))
+
+    def test_one_group_and_monte_carlo_has_nothing_to_correct(self):
+        monte = "Monte Carlo unfocused (n=10)"
+        rows = ks_table(self.con, {"a": LOW, monte: MONTE}, monte)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][4], "")
 
 
 if __name__ == "__main__":

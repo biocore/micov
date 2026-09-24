@@ -196,6 +196,11 @@ class TestCliSurface(unittest.TestCase):
         params = {p.name for p in cli.commands["binning"].params}
         self.assertIn("rank", params)
 
+    def test_binning_rank_help_says_it_has_no_effect(self):
+        """Kept for compatibility, so the help must not promise anything."""
+        (rank,) = [p for p in cli.commands["binning"].params if p.name == "rank"]
+        self.assertIn("no effect", rank.help)
+
     @requires_micov
     def test_console_script_runs_every_command(self):
         for name in sorted(EXPECTED_COMMANDS):
@@ -790,7 +795,7 @@ class TestPerSampleFullCorpus(MicovCliTestCase):
     `_plot.py` is the largest module and has no unit tests, so these data
     goldens are its only guard. PNG *content* is not comparable across
     matplotlib versions, so the plotted values are covered indirectly: the
-    `.tsv.gz` position data and the `.ks.tsv` statistics.
+    `.tsv.gz` position data and the `.ks.csv` statistics.
     """
 
     VARIANTS: ClassVar[dict] = {
@@ -839,7 +844,7 @@ class TestPerSampleFullCorpus(MicovCliTestCase):
         for produced in sorted(outdir.iterdir()):
             with self.subTest(artifact=produced.name):
                 expected = golden / produced.name
-                if produced.name.endswith(".ks.tsv"):
+                if produced.name.endswith(".ks.csv"):
                     assert_ks_equal(produced, expected)
                 elif produced.name.endswith(".tsv.gz"):
                     assert_gzip_text_equal(produced, expected)
@@ -870,7 +875,7 @@ class TestPerSampleFullCorpus(MicovCliTestCase):
         pct_dir, _ = self.run_variant("percentile")
         pairs = 0
         for plain in sorted(plain_dir.iterdir()):
-            if not (plain.name.endswith(".ks.tsv") or plain.name.endswith(".tsv.gz")):
+            if not (plain.name.endswith(".ks.csv") or plain.name.endswith(".tsv.gz")):
                 continue
             counterpart = pct_dir / plain.name.replace(
                 "example.", "example_percentile.", 1
@@ -882,7 +887,7 @@ class TestPerSampleFullCorpus(MicovCliTestCase):
                 else:
                     assert_ks_equal(counterpart, plain)
                 pairs += 1
-        self.assertEqual(pairs, 4, "expected 2 .ks.tsv and 2 .tsv.gz comparisons")
+        self.assertEqual(pairs, 4, "expected 2 .ks.csv and 2 .tsv.gz comparisons")
 
     def test_monte_leaves_non_monte_ks_rows_unchanged(self):
         """Adding Monte Carlo curves must not perturb the published rows."""
@@ -894,9 +899,9 @@ class TestPerSampleFullCorpus(MicovCliTestCase):
             return [r for r in rows[1:] if "Monte Carlo " not in r]
 
         compared = 0
-        for plain in sorted(plain_dir.glob("*.cumulative.ks.tsv")):
+        for plain in sorted(plain_dir.glob("*.cumulative.ks.csv")):
             monte = monte_dir / plain.name.replace(
-                ".cumulative.ks.tsv", ".cumulative-monte-unfocused.ks.tsv"
+                ".cumulative.ks.csv", ".cumulative-monte-unfocused.ks.csv"
             )
             with self.subTest(artifact=plain.name):
                 self.assertTrue(monte.exists(), f"missing {monte.name}")
