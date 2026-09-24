@@ -20,14 +20,14 @@ from pathlib import Path
 PACKAGE = Path(__file__).resolve().parent.parent
 
 #: Removed by the migration. `numba` went in M3 with the CIGAR walker, `pyarrow`
-#: in M1 with the last polars<->DuckDB handoff, and `polars` in M5. `scipy` is
-#: still declared and still imported by `_plot.py`; it leaves in M9.
+#: in M1 with the last polars<->DuckDB handoff, `polars` in M5, and `scipy` in
+#: M9 when the KS tests moved to miint's `ks_2samp`.
 #:
 #: These are *import* names. micov depended on the distribution
 #: `polars-u64-idx`, which installs a module called `polars` -- there is no
 #: `polars_u64_idx` to import, so checking for that name would look like
 #: coverage while testing nothing.
-REMOVED_DEPENDENCIES = ("polars", "numba", "pyarrow")
+REMOVED_DEPENDENCIES = ("polars", "numba", "pyarrow", "scipy")
 
 
 def imported_modules(path):

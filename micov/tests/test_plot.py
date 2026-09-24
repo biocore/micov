@@ -15,13 +15,17 @@ implementation before M5 replaced it -- this is Milestone 0's shape, freezing a
 baseline and then changing the code underneath it.
 """
 
+import math
 import shutil
 import unittest
 from tempfile import mkdtemp
 
+import numpy as np
+
 from micov._io import load_bed_cov, load_genome_lengths
 from micov._miint import connection
-from micov._plot import position_plot_segments
+from micov._plot import ks_2samp, position_plot_segments
+from micov.tests._golden import TSV_FLOAT_REL_TOL
 
 #: Deliberately more awkward than `mini_sampleA.cov`: several intervals per
 #: genome, rows interleaved and out of order, two different genome lengths so a
@@ -99,6 +103,119 @@ class PositionPlotSegmentTests(unittest.TestCase):
 
     def test_every_genome_with_a_length_is_plotted(self):
         self.assertEqual(sorted(self.load()), ["G1", "G2"])
+
+
+#: Two frozen curve pairs from `example/`, captured by recording what
+#: `coverage_curve` handed to the KS test when regenerating the committed
+#: `.ks.tsv` goldens. Each entry is (curve A, curve B, statistic, p-value), the
+#: last two as `example/plots/per_sample_groups/*.cumulative.ks.tsv` records
+#: them -- the published numbers, computed by scipy 1.17.1.
+KS_CASES = {
+    # G000154205, No vs Yes: n=20 and n=19, and D is exactly 114/380. A
+    # merge-walk computes 19/19 - 14/20 there, which is 0.30000000000000004
+    # in floating point; the published statistic is 0.3.
+    "G000154205 No vs Yes": (
+        (0.10697629973873544, 0.6112416857125725, 1.5797914163437496,
+         2.42930909073959, 6.278379494450643, 13.667604783910628,
+         20.869171311876062, 31.62347817261852, 41.09682382725987,
+         49.6634876053475, 57.773113205248514, 64.49255541145618,
+         70.08464666569346, 75.03284610985739, 79.1538172571904,
+         81.94274384356586, 84.38605795195791, 86.62325888073849,
+         87.99439460291961, 89.2058392236686),
+        (0.8525686918571945, 1.4834724900984948, 1.9273107802405092,
+         2.7446444579433136, 3.045445116963085, 3.4468657893437706,
+         4.485758422556172, 4.679264967518317, 9.22977276064323,
+         15.490460591342273, 21.310678963679543, 27.179989054474856,
+         36.677594535458226, 46.55780608114392, 56.320850081265114,
+         63.519980032785725, 69.61735367881727, 74.42726151902109,
+         78.50231909108494),
+        0.3,
+        0.24244968766417713,
+    ),
+    # G000436435, No vs Yes: the pair whose p-value drifts furthest from
+    # scipy's, 3.8e-16 relative.
+    "G000436435 No vs Yes": (
+        (0.008376906961733242, 0.2256342328286496, 0.766019525672602,
+         1.3843960661446557, 2.2951603167966708, 3.297079526016654,
+         4.604456664091266, 6.185279979416743, 8.45637538715147,
+         11.698705842668225, 14.770375517292702, 18.81451433759982,
+         22.72398689911586, 27.321469040223363, 33.4039075279224,
+         39.310543160143276, 44.969854354009584, 49.983694948949484,
+         55.89853920205473, 62.76064708614527),
+        (0.2888537025554802, 2.3882599144807553, 4.9497796948262875,
+         8.247681952776682, 11.691263858358472, 15.271924123173442,
+         20.24962060838783, 26.840413938874008, 33.705775353793435,
+         42.52089926096234, 50.518227625992054, 57.55544652279827,
+         62.515529065249375, 68.98936357197296, 73.58448970799748,
+         76.97577204042754, 79.42743840916553, 81.06252463521187,
+         82.18882595405117),
+        0.3736842105263158,
+        0.10846042853587466,
+    ),
+}
+
+
+class KsTwoSampleTests(unittest.TestCase):
+    """The KS statistics and p-values are cited in the paper.
+
+    M9 moved them from `scipy.stats.ks_2samp` to miint's `ks_2samp`. The
+    statistic has to come out **exactly** as published; the p-value may drift
+    by a few ULP, because miint derives it independently of scipy (Hodges
+    lattice paths, computed as the mass escaping the band rather than
+    ``1 - P(inside)``), and that is the one place a tolerance is accepted.
+    """
+
+    def setUp(self):
+        self.con = connection()
+        self.addCleanup(self.con.close)
+
+    def test_statistic_is_the_published_value_exactly(self):
+        """A stale pre-#257 miint returns the raw sweep value, 1 ULP off.
+
+        The capability guard in `_miint` checks names only, so an extension
+        cached in ``~/.duckdb/extensions/`` before the fix passes it and then
+        reports different published statistics. This is the check that
+        notices.
+        """
+        for name, (a, b, statistic, _) in KS_CASES.items():
+            with self.subTest(pair=name):
+                observed, _ = ks_2samp(self.con, a, b)
+                self.assertEqual(
+                    observed,
+                    statistic,
+                    "the KS statistic is not the published value. A miint "
+                    "build predating the-miint/duckdb-miint#257 returns the "
+                    "un-snapped sweep value; run FORCE INSTALL miint to "
+                    "replace a stale cached extension.",
+                )
+
+    def test_statistic_is_the_exact_lattice_value(self):
+        """D is a multiple of 1/lcm(n1, n2): 114/380, not 19/19 - 14/20."""
+        a, b, _, _ = KS_CASES["G000154205 No vs Yes"]
+        raw_sweep = 19 / 19 - 14 / 20
+        # the premise: the two really are different doubles
+        self.assertNotEqual(raw_sweep, 114 / 380)
+        observed, _ = ks_2samp(self.con, a, b)
+        self.assertEqual(observed, 114 / 380)
+
+    def test_pvalue_is_the_published_value_within_tolerance(self):
+        for name, (a, b, _, pvalue) in KS_CASES.items():
+            with self.subTest(pair=name):
+                _, observed = ks_2samp(self.con, a, b)
+                self.assertTrue(
+                    math.isclose(
+                        observed, pvalue,
+                        rel_tol=TSV_FLOAT_REL_TOL, abs_tol=TSV_FLOAT_REL_TOL,
+                    ),
+                    f"p-value {observed!r} differs from the published "
+                    f"{pvalue!r} by more than {TSV_FLOAT_REL_TOL:g} relative",
+                )
+
+    def test_accepts_numpy_curves(self):
+        """`coverage_curve` hands over numpy arrays, not tuples."""
+        a, b, statistic, _ = KS_CASES["G000154205 No vs Yes"]
+        observed, _ = ks_2samp(self.con, np.asarray(a), np.asarray(b))
+        self.assertEqual(observed, statistic)
 
 
 if __name__ == "__main__":

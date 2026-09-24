@@ -378,8 +378,41 @@ class TestAssertKsEqual(GoldenSelfTestBase):
         assert_ks_equal(a, b)
 
     def test_deterministic_pvalue_change_fails(self):
+        """The tolerance is for ULP drift, not a moved p-value.
+
+        Was ``...799`` against ``...713`` until M9, 3.5e-15 relative. That
+        now sits *inside* ``TSV_FLOAT_REL_TOL`` by design, so the control
+        moved to a difference the tolerance must not absorb.
+        """
         a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
-        bad = ["No,Yes,0.3,0.24244968766417799", KS_DETERMINISTIC[1]]
+        bad = ["No,Yes,0.3,0.2424496876642", KS_DETERMINISTIC[1]]
+        b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(a, b)
+
+    def test_deterministic_pvalue_ulp_drift_passes(self):
+        """miint's p-value, which differs from scipy's by 1 ULP (source #10)."""
+        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        drifted = ["No,Yes,0.3,0.24244968766417715", KS_DETERMINISTIC[1]]
+        b = self.write("b.ks.tsv", [KS_HEADER, *drifted, *KS_MONTE])
+        assert_ks_equal(a, b)
+
+    def test_deterministic_statistic_ulp_change_fails(self):
+        """The statistic is exact -- the tolerance must not leak onto it.
+
+        ``0.30000000000000004`` is precisely what a pre-#257 miint returns
+        for this row, so this is the regression the exactness guards.
+        """
+        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        bad = ["No,Yes,0.30000000000000004,0.24244968766417713", KS_DETERMINISTIC[1]]
+        b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
+        with self.assertRaises(AssertionError):
+            assert_ks_equal(a, b)
+
+    def test_deterministic_label_change_fails(self):
+        """Tolerating the p-value must not decouple it from its label pair."""
+        a = self.write("a.ks.tsv", [KS_HEADER, *KS_DETERMINISTIC, *KS_MONTE])
+        bad = ["No,Maybe,0.3,0.24244968766417713", KS_DETERMINISTIC[1]]
         b = self.write("b.ks.tsv", [KS_HEADER, *bad, *KS_MONTE])
         with self.assertRaises(AssertionError):
             assert_ks_equal(a, b)

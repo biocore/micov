@@ -3,7 +3,6 @@ import gzip
 
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy.stats as ss
 from matplotlib import collections as mc
 
 from ._constants import (
@@ -34,11 +33,12 @@ def _write_delimited(path, header, rows, delimiter=",", compress=False):
     **Do not reach for `repr()` or an f-string to format the values here.**
     `csv.writer` renders with `str()`, which for a float is the shortest form
     that round-trips -- exactly what polars wrote. The values arriving here are
-    numpy scalars (`scipy.stats.ks_2samp` returns `np.float64`, and the
-    position values come from `np.histogram`), and under numpy 2 `repr()` of
-    one of those is the string `np.float64(0.3)`. That would corrupt every
-    float in every `.ks.tsv` and `.tsv.gz` micov writes, and it is the sort of
-    thing a tidy-up refactor does without noticing.
+    numpy scalars (the position values come from `np.histogram`; the KS
+    values were `np.float64` too until M9 moved them from scipy to miint),
+    and under numpy 2 `repr()` of one of those is the string
+    `np.float64(0.3)`. That would corrupt every float in every `.ks.tsv` and
+    `.tsv.gz` micov writes, and it is the sort of thing a tidy-up refactor
+    does without noticing.
 
     `lineterminator` is set because the csv module defaults to CRLF.
     """
@@ -47,6 +47,40 @@ def _write_delimited(path, header, rows, delimiter=",", compress=False):
         writer = csv.writer(fp, delimiter=delimiter, lineterminator="\n")
         writer.writerow(header)
         writer.writerows(rows)
+
+
+def ks_2samp(con, curve_a, curve_b):
+    """Two-sample Kolmogorov-Smirnov test, by miint's `ks_2samp`.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension.
+    curve_a, curve_b : sequence of float
+        The two samples.
+
+    Returns
+    -------
+    tuple of (float, float)
+        The statistic and the two-sided exact p-value.
+
+    Notes
+    -----
+    These numbers are cited in the paper, which computed them with
+    `scipy.stats.ks_2samp` (1.17.1). The statistic is reproduced exactly:
+    miint returns D as the exact lattice value ``h / lcm(n1, n2)``, as that
+    scipy did. The p-value agrees to a few ULP, not bit for bit -- miint
+    derives it independently rather than transcribing scipy.
+
+    miint implements only the exact method and raises above 10000
+    observations per sample, where scipy fell back to an approximation.
+    Here that is 10000 samples in one metadata group.
+    """
+    return con.execute(
+        "SELECT ks.statistic, ks.pvalue "
+        "FROM (SELECT ks_2samp(?::DOUBLE[], ?::DOUBLE[]) AS ks)",
+        [np.asarray(curve_a, dtype=np.float64), np.asarray(curve_b, dtype=np.float64)],
+    ).fetchone()
 
 
 def per_sample_plots(
@@ -477,8 +511,8 @@ def coverage_curve(
 
         for idx, (label_a, curve_a) in enumerate(curve_items):
             for label_b, curve_b in curve_items[idx + 1 :]:
-                ks = ss.ks_2samp(curve_a, curve_b)
-                ksresults.append([label_a, label_b, ks.statistic, ks.pvalue])
+                statistic, pvalue = ks_2samp(con, curve_a, curve_b)
+                ksresults.append([label_a, label_b, statistic, pvalue])
 
         outf = f"{output}.{target_name}.{target}.{variable}.{tag}.ks.tsv"
         _write_delimited(

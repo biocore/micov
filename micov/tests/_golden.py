@@ -91,6 +91,19 @@ Sources of nondeterminism
       (``TSV_FLOAT_REL_TOL``, ~20x looser than the observed drift and far
       tighter than any real defect) and every other column exactly.
 
+10. KS p-values are not scipy's bit for bit -- ``ks-pvalue`` in ``.ks.tsv``
+    Added in M9, when the KS tests moved from ``scipy.stats.ks_2samp`` to
+    miint's ``ks_2samp``. Not run-to-run nondeterminism: miint is
+    deterministic, but it derives the exact p-value independently (Hodges
+    lattice paths, as the mass escaping the band rather than
+    ``1 - P(inside)``), so it disagrees with the scipy 1.17.1 that wrote the
+    goldens by 1-4 ULP. Measured on the goldens: 1 of 6 deterministic
+    p-values bit-exact, worst 3.8e-16 relative. The statistic is unaffected
+    -- both return the exact lattice value ``h / lcm(n1, n2)`` -- and all 6
+    are bit-exact.
+    => ``ks-pvalue`` on deterministic rows within ``TSV_FLOAT_REL_TOL``;
+       labels and ``ks-statistic`` exactly.
+
 Two traps: outputs that matched by luck
 ---------------------------------------
 
@@ -155,9 +168,11 @@ MONTE_LABEL_PREFIX = "Monte Carlo "
 
 KS_COLUMNS = ("label_A", "label_B", "ks-statistic", "ks-pvalue")
 
-#: Relative tolerance for TSV columns whose summation order is not
-#: reproducible (source #9). The measured drift is 5.8e-16; this is ~20x
-#: looser, and still orders of magnitude tighter than any real defect.
+#: Relative tolerance for floats that are not reproducible bit for bit:
+#: ``sample_hits_std`` (source #9, measured drift 5.8e-16, so ~20x margin) and
+#: the deterministic ``ks-pvalue`` (source #10, 3.8e-16 on the goldens and
+#: at most ~1.7e-15 over randomized and heavily tied trials, so ~6x margin at
+#: worst). Either way, orders of magnitude tighter than any real defect.
 TSV_FLOAT_REL_TOL = 1e-14
 
 
@@ -495,8 +510,12 @@ def assert_ks_equal(observed, expected):
 
     Rows are partitioned on the ``Monte Carlo `` label prefix:
 
-    - **Deterministic rows** are compared exactly, statistic and p-value
-      included, to full double precision. These are the published numbers.
+    - **Deterministic rows** are the published numbers. Label pair and
+      statistic are compared exactly; the p-value within
+      ``TSV_FLOAT_REL_TOL``, because miint derives it independently of the
+      scipy that produced the goldens and agrees only to a few ULP
+      (source #10). The statistic is an exact lattice value in both, so it
+      gets no tolerance at all.
     - **Monte Carlo rows** are unseeded (source #1), so only their label
       pairs must match -- catching a dropped or renamed comparison -- and
       their statistic and p-value must lie in ``[0, 1]``.
@@ -507,15 +526,35 @@ def assert_ks_equal(observed, expected):
     _, got_rows = _parse_ks(observed)
     _, want_rows = _parse_ks(expected)
 
-    got_fixed = sorted(",".join(r) for r in got_rows if not _is_monte(r))
-    want_fixed = sorted(",".join(r) for r in want_rows if not _is_monte(r))
-    if got_fixed != want_fixed:
+    # everything but the p-value is exact, so it is also the sort key that
+    # pairs rows up for the p-value comparison
+    got_fixed = sorted(r for r in got_rows if not _is_monte(r))
+    want_fixed = sorted(r for r in want_rows if not _is_monte(r))
+    got_exact = [r[:3] for r in got_fixed]
+    want_exact = [r[:3] for r in want_fixed]
+    if got_exact != want_exact:
         raise AssertionError(
             f"deterministic KS rows differ -- these are published numbers\n"
             f"  observed: {observed}\n  expected: {expected}\n"
-            f"  only in observed: {sorted(set(got_fixed) - set(want_fixed))}\n"
-            f"  only in expected: {sorted(set(want_fixed) - set(got_fixed))}"
+            f"    observed (labels, statistic): {got_exact}\n"
+            f"    expected (labels, statistic): {want_exact}"
         )
+
+    for got, want in zip(got_fixed, want_fixed, strict=True):
+        try:
+            close = math.isclose(
+                float(got[3]), float(want[3]),
+                rel_tol=TSV_FLOAT_REL_TOL, abs_tol=TSV_FLOAT_REL_TOL,
+            )
+        except ValueError:
+            close = False
+        if not close:
+            raise AssertionError(
+                f"deterministic KS p-value differs by more than "
+                f"{TSV_FLOAT_REL_TOL:g} relative -- a published number\n"
+                f"  observed: {observed}\n  expected: {expected}\n"
+                f"    observed: {got}\n    expected: {want}"
+            )
 
     got_labels = sorted(tuple(r[:2]) for r in got_rows if _is_monte(r))
     want_labels = sorted(tuple(r[:2]) for r in want_rows if _is_monte(r))

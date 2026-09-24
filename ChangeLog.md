@@ -34,6 +34,29 @@ Backward incompatible changes:
 
 Other changes:
 
+* **`scipy` is no longer a dependency.** The pairwise KS tests written to
+  `.ks.tsv` now use the `ks_2samp` function of the miint DuckDB extension.
+  Runtime dependencies are now `click`, `matplotlib` and `duckdb`.
+
+  The **KS statistics are unchanged**, byte for byte, in every frozen output
+  under `example/plots/`. The **p-values agree to within a few units in the
+  last place** -- at most 3.8e-16 relative on `example/`, e.g.
+  `0.24244968766417713` is now written `0.24244968766417715` -- because miint
+  computes the exact p-value independently rather than transcribing scipy's.
+  No p-value moves by an amount that matters to any test of significance, but
+  the printed digits differ in 20 of the 24 deterministic rows.
+
+  miint raises for a metadata group of more than 10000 samples, where scipy
+  switched to an approximate p-value. micov has not been run on groups that
+  large.
+* **Refresh a cached miint extension when upgrading.** DuckDB caches extensions
+  in `~/.duckdb/extensions/` and never replaces a cached build on its own, so
+  anyone who ran micov before 2026-09-11 has a miint whose `ks_2samp` returns
+  the KS statistic unrounded -- `0.30000000000000004` where the published value
+  is `0.3`. micov cannot detect this. Run
+  `FORCE INSTALL miint FROM 'https://ftp.microbio.me/pub/miint'` in DuckDB, or
+  delete the cached `miint.duckdb_extension`, before producing `.ks.tsv`
+  output.
 * **`micov per-sample` is substantially faster on large sample groups.** The
   cumulative curve accumulated by re-merging a growing interval set once per
   sample, which is quadratic in group size; it is now a single aggregate.

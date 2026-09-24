@@ -56,9 +56,12 @@ dynamic = ["version"]
 # `.ks.tsv` and the position-plot `.tsv.gz`, where the work was formatting, not
 # computation). `micov/tests/test_dependencies.py` asserts nothing imports it,
 # and the full golden suite was run with it uninstalled.
+#
+# scipy is gone. Its one live use was `ks_2samp` for the pairwise curve
+# comparisons, now miint's. The published statistics reproduce exactly; the
+# p-values to a few ULP, which is the tolerance on `ks-pvalue` in the goldens.
 dependencies = [
     "click",
-    "scipy",
     "matplotlib>=3.9.0",
     "duckdb>=1.5.4,<1.5.5",
 ]
