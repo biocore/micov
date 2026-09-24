@@ -24,12 +24,6 @@ tier gets its inputs from here instead.
   It carries a header, which also exercises the header-detection branch in
   `_test_has_header`.
 
-- **`taxonomy.tsv`** — **orphaned.** Synthetic lineages (`s__Testus
-  <genome_id>`) for the same 232 genomes. Nothing reads it: `compress
-  --taxonomy` went in M3 and `_io.parse_taxonomy` / `set_taxonomy_as_id` went
-  in M4 with micov's Qiita support. Kept only because deleting a fixture needs
-  a decision; it is a removal candidate.
-
 - **`feature_metadata_regions.tsv`** — sub-genome regions for the two genomes
   in `example/parquet/`, for `extract-sample-presence` (which raises
   `Cannot calculate presence/absence without positions.` without them). The
@@ -103,6 +97,6 @@ micov extract-sample-presence --parquet-coverage example/parquet/example \
 `example_presence.tsv` needs `example/`, which `MANIFEST.in` prunes from
 sdists, so it can only be regenerated from a git checkout.
 
-`lengths.tsv` and `taxonomy.tsv` are derived from `test.sam.xz` rather than
-produced by a micov command; see the notes above on how their values are
-computed.
+`lengths.tsv` is derived from `test.sam.xz` rather than produced by a micov
+command; see the note above on how its values are computed. (`taxonomy.tsv`,
+its orphaned sibling, was removed in M11b.)

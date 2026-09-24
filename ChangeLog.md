@@ -45,6 +45,14 @@ Backward incompatible changes:
 
 Other changes:
 
+* **Paths and sample IDs containing `'` work.** Every command failed with a
+  DuckDB `Parser Error` when a path -- or `compress --sample-id` -- contained a
+  single quote, which is common in home directories (`/Users/o'brien`). They
+  are now escaped everywhere micov builds SQL.
+* **A lengths file no longer loses its first genome to header detection.** A
+  headerless file whose first genome ID was a substring of `genome_id` -- such
+  as `id` or `genome` -- was read as having a header, and that genome silently
+  had no length. Headers are unaffected.
 * `micov binning --rank` is documented as having no effect. The variance
   ranking has always been written unconditionally; the flag is still accepted
   so existing invocations keep working.

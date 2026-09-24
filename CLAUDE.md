@@ -78,16 +78,18 @@ pip install -e ".[test]"
 
 `-c conda-forge` on `conda create` is required on hosts with no configured
 channels. `[test]` installs `pytest`, which `make test` needs — it is an extra,
-not a runtime dependency. Lint tools come from `ci/requirements.lint.txt` and
-are **not** installed by the above; `make lint` otherwise silently uses
-whatever `ruff` is on `PATH`.
+not a runtime dependency. Lint tools are pinned in `ci/requirements.lint.txt`
+and are **not** installed by the above — run
+`pip install -r ci/requirements.lint.txt`, or `make lint` silently uses
+whatever `ruff` is on `PATH` and which rules fire depends on the machine.
 
 ```bash
 make test     # pytest micov + bash cli_test.sh (stdin-vs-file compress equivalence)
-make lint     # ruff check micov + check-manifest
+make lint     # ruff check micov + check-manifest; reports only
+make lint-fix # ruff check --fix micov; the only target that edits files
 ```
 
-Ruff is configured in `pyproject.toml` with `fix = true`, line length 88, numpy docstring convention. `micov/tests/*` is exempt from `D` and `PT` rules.
+Ruff is configured in `pyproject.toml` with `fix = false`, line length 88, numpy docstring convention. `micov/tests/*` is exempt from `D` and `PT` rules.
 
 If a test produces an **incorrect expected value**: DO NOT change the expected value without permission.
 
@@ -145,6 +147,7 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 | `_quant.py` | binning |
 | `_constants.py` | column names and the three presence/absence values. The polars dtypes and seven `_SCHEMA` objects went in M5 |
 | `_miint.py` | `connection()` — the only place micov opens a DuckDB connection, **and the only place the extension's install source is named**. `cli.py` was moved behind it so that stays true. `REQUIRED_MIINT_FUNCTIONS` lists every miint function micov calls and is checked on each connection (names only, not signatures) |
+| `_utils.py` | the `micov` logger, and `sql_string` — the one way a value enters a SQL string literal |
 
 `micov/_convert.py` is **gone** — htslib computes the reference span now. `micov/_rank.py`, dead code that pulled in an undeclared pandas dependency, was deleted in M9. The `--rank` flag on `micov binning` is a **no-op**; the variance ranking is written unconditionally.
 
@@ -155,16 +158,16 @@ The two-file Parquet split is load-bearing: `coverage.parquet` is one row per sa
 - **A stale cached miint passes the capability guard and changes published numbers.** DuckDB caches extensions in `~/.duckdb/extensions/` and `INSTALL` never replaces a cached build. `REQUIRED_MIINT_FUNCTIONS` checks names, not behaviour, so a build predating the-miint/duckdb-miint#257 resolves `ks_2samp` fine and returns the un-snapped KS statistic (`0.30000000000000004` for a published `0.3`). This happened on the maintainer's machine in M9. `test_plot.KsTwoSampleTests` is what notices; the remedy is `FORCE INSTALL miint FROM 'https://ftp.microbio.me/pub/miint'`.
 - KS p-values are miint's, not scipy's, and differ from the scipy-generated goldens by a few ULP. `assert_ks_equal` compares `ks-pvalue` within `TSV_FLOAT_REL_TOL` and `ks-statistic` **exactly** (determinism source #10). Do not widen the tolerance onto the statistic.
 - `ks-pvalue` is **raw**; Bonferroni lives only in its own column, added in M11a. Never correct `ks-pvalue` in place — it is a published number.
-- `ruff` runs with `fix = true`, so **`make lint` edits your files** rather than reporting. Check `git status` after linting.
-- `_test_has_header` (`_io.py`) tests *substrings*, not membership: its column-name constants are plain strings, so a column named `genome` is accepted as a header. The plural names make them read as collections. It now has exactly one caller, `load_genome_lengths` — the BED3 path moved to DuckDB's CSV sniffer in M5, which also handles a `#`-prefixed header that this only accepts by accident.
+- `_test_has_header` (`_io.py`) guesses whether a lengths file has a header: a `#` prefix, a first field **equal** to `genome_id`, or a non-numeric second field. It was a *substring* test until M11b — `COLUMN_GENOME_ID` is a plain string, so `x in COLUMN_GENOME_ID` matched `id` or `genome` — and a headerless file whose first genome had such a name silently lost that row. Its one caller is `load_genome_lengths`; the BED3 path uses DuckDB's CSV sniffer.
+- **Every value interpolated into a SQL string literal goes through `_utils.sql_string`**, which doubles single quotes. Paths and `--sample-id` are user input, and `/Users/o'brien` is an ordinary home directory. Bound parameters are not an alternative at most sites: the literals live in SQL fragments spliced into larger statements, several of them `CREATE VIEW`, which DuckDB refuses to prepare. `micov/tests/test_quoting.py` drives every site with an apostrophe path. Identifiers built from file headers (`"{column}"`) are *not* escaped — a header containing `"` still breaks.
 - `MANIFEST.in` has `graft micov`, so **any** stray file under `micov/` is packaged into the sdist — including untracked ones, which then breaks `check-manifest`. Keep scratch work in `localdocs/` (gitignored, pruned from the sdist).
 - `pyproject.toml` and `ci/conda_requirements.txt` **must declare the same dependencies**, duckdb floor included. They previously disagreed (`<1.3` in one, no ceiling in the other), and because CI's conda path installs with `pip install . --no-deps`, the conda and pypi paths silently tested different duckdb majors. Both now say `duckdb>=1.5.4`; change them together.
 - Python 3.13 is unclaimed but no longer blocked. The blocker was `pyarrow<16.0.0`, which capped at 15.0.2 and has no cp313 wheels; pyarrow is gone. Nothing has been run on 3.13, so add it to the CI matrix before claiming it.
 
-## In-flight work
+## The duckdb-miint migration (complete)
 
-An in-progress migration replaces micov's compute internals with [duckdb-miint](https://github.com/the-miint/duckdb-miint). **Done so far:** the DuckDB floor is `>=1.5.4`, **miint is loaded on every connection** via `_miint.connection()` and does the alignment ingest and interval merge, Qiita support has been dropped, and **`pyarrow`, `numba`, `polars` and `scipy` are all gone** — runtime dependencies are now `click`, `matplotlib` and `duckdb`. M6 moved `View`'s region operations onto `region_coverage`, `region_presence` and `compress_intervals`, and M7 moved the cumulative curves and Monte Carlo onto the `cumulative_coverage` aggregate — retiring micov's last hand-written interval merge and the O(n²) accumulation loop with it. M9 moved the KS tests onto miint's `ks_2samp` and dropped scipy. **Still to do:** M11, disposing of the deferred fixes. Plan and milestone gating live in **`MIGRATE-TO-MIINT.md`** (local, uncommitted). Blocking upstream capabilities: the-miint/duckdb-miint#214, #215, #216, #217, #218.
+micov's compute internals were migrated onto [duckdb-miint](https://github.com/the-miint/duckdb-miint), finishing with M11b. The DuckDB floor is `>=1.5.4`; **miint is loaded on every connection** via `_miint.connection()` and does the alignment ingest (`read_alignments`), every interval merge (`compress_intervals`), region breadth and presence (`region_coverage`, `region_presence`), the cumulative curves (`cumulative_coverage`) and the KS tests (`ks_2samp`). Qiita support was dropped, and **`pyarrow`, `numba`, `polars` and `scipy` are gone** — runtime dependencies are `click`, `matplotlib` and `duckdb`. The running record is **`MIGRATE-TO-MIINT.md`** (local, uncommitted); what remains deferred is in its §8 and §17 (managing per-sample Parquet).
 
-miint is a DuckDB **community extension**, not a Python package — it cannot be declared in `pyproject.toml`, and `pip index versions duckdb-miint` finds nothing. It is required at runtime instead, with no fallback: two compute paths that must agree numerically would put the frozen coverage and KS numbers at risk. `miint_version()` returns a **git short hash**, not a semantic version, so there is no orderable floor to pin; the guard that will replace it is a capability check, added with the first micov code that calls a miint primitive.
+miint is a DuckDB **community extension**, not a Python package — it cannot be declared in `pyproject.toml`, and `pip index versions duckdb-miint` finds nothing. It is required at runtime instead, with no fallback: two compute paths that must agree numerically would put the frozen coverage and KS numbers at risk. `miint_version()` returns a **git short hash**, not a semantic version, so there is no orderable floor to pin; `_miint.REQUIRED_MIINT_FUNCTIONS` is checked on every connection instead — by name only, which is why a stale cached build is a trap (above).
 
 `_plot.py` and `_cov.py`'s curve functions now carry **`dict`s of numpy arrays** — the shape `DuckDBPyRelation.fetchnumpy()` returns — rather than polars frames. `_cov.mask_table(table, keep)` applies a boolean mask or index array to every column. Watch for numpy's `uint64 + int` promoting to `float64`; the rank columns cast deliberately to avoid it.

@@ -1,2 +1,2 @@
-ruff
-check-manifest
+ruff==0.16.9
+check-manifest==0.51

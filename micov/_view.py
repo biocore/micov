@@ -12,6 +12,7 @@ from micov._constants import (
     COLUMN_STOP,
 )
 from micov._miint import connection
+from micov._utils import sql_string
 
 
 class View:
@@ -58,7 +59,7 @@ class View:
         larger statement.
         """
         varchar = ", all_varchar=true" if all_varchar else ""
-        source = f"read_csv('{path}', delim='\t', header=true{varchar})"
+        source = f"read_csv({sql_string(path)}, delim='\t', header=true{varchar})"
         columns = [row[0] for row in self.con.sql(f"DESCRIBE FROM {source}").fetchall()]
         # not strict: `rename` covers only the leading columns, and the file
         # carries however many more it likes
@@ -82,7 +83,7 @@ class View:
                              SELECT DISTINCT {COLUMN_GENOME_ID},
                                     NULL AS {COLUMN_START},
                                     NULL AS {COLUMN_STOP}
-                             FROM '{coverage}'""")
+                             FROM {sql_string(coverage)}""")
             return
 
         query = self._read_tsv(self.features_to_keep, [COLUMN_GENOME_ID])
@@ -159,14 +160,16 @@ class View:
         self.con.sql(f"""CREATE TABLE metadata AS
                          SELECT md.*
                          FROM ({metadata}) md
-                             SEMI JOIN '{coverage}' cov
+                             SEMI JOIN {sql_string(coverage)} cov
                                  ON md.{COLUMN_SAMPLE_ID}=cov.{COLUMN_SAMPLE_ID}""")
 
         self._feature_filters()
 
         # views are "free". Let's establish a common reference point for unmodified
         # position data'
-        self.con.sql(f"CREATE VIEW unconstrained_positions AS FROM '{positions}'")
+        self.con.sql(
+            f"CREATE VIEW unconstrained_positions AS FROM {sql_string(positions)}"
+        )
 
         if self.constrain_positions:
             # `region_coverage` and `region_presence` are table macros built on
@@ -279,14 +282,14 @@ class View:
             # express start/stop of the genomes as the full genome
             self.con.sql(f"""CREATE VIEW coverage AS
                              SELECT cov.*
-                             FROM '{coverage}' cov
+                             FROM {sql_string(coverage)} cov
                                  JOIN feature_constraint fc
                                      ON cov.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
                                  JOIN metadata md
                                      ON cov.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
             self.con.sql(f"""CREATE VIEW positions AS
                              SELECT pos.*
-                             FROM '{positions}' pos
+                             FROM {sql_string(positions)} pos
                                  JOIN feature_constraint fc
                                      ON pos.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
                                  JOIN metadata md
@@ -314,12 +317,12 @@ class View:
             # limit the samples considered
             self.con.sql(f"""CREATE VIEW coverage AS
                              SELECT cov.*
-                             FROM '{coverage}' cov
+                             FROM {sql_string(coverage)} cov
                                  JOIN metadata md
                                      ON cov.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
             self.con.sql(f"""CREATE VIEW positions AS
                              SELECT pos.*
-                             FROM '{positions}' pos
+                             FROM {sql_string(positions)} pos
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
 

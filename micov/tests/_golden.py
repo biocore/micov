@@ -25,7 +25,8 @@ at the end.
 Sources of nondeterminism
 -------------------------
 
-1. Unseeded ``pl.col(...).shuffle()`` -- ``_plot.py:218``
+1. Unseeded ``rng.permutation`` in ``_plot.add_monte`` (was polars'
+   ``shuffle()`` until M10')
    Randomizes the Monte Carlo sample draw, so the Monte Carlo curve and any
    ``.ks.csv`` row whose label begins ``Monte Carlo `` change every run.
    The non-Monte rows in the same file do not.
@@ -194,8 +195,7 @@ def _first_difference(observed_lines, expected_lines):
     """Return (index, observed, expected) of the first differing line.
 
     Indexes explicitly rather than using ``zip``: the two may legitimately
-    have different lengths (the caller reports counts separately), and
-    ``zip(strict=...)`` is 3.10+ while this project supports 3.9.
+    have different lengths (the caller reports counts separately).
     """
     for i in range(min(len(observed_lines), len(expected_lines))):
         if observed_lines[i] != expected_lines[i]:
@@ -580,8 +580,6 @@ def assert_ks_equal(observed, expected):
                 f"Monte Carlo row carries a {KS_COLUMNS[4]} value in {observed}; "
                 f"Monte Carlo comparisons are outside the family (row {row})"
             )
-        # index rather than zip: _parse_ks already validated field counts,
-        # and zip(strict=...) is 3.10+ while this project supports 3.9
         for offset, name in enumerate(KS_COLUMNS[2:4], start=2):
             raw = row[offset]
             try:

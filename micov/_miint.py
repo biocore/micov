@@ -20,6 +20,8 @@ import platform
 
 import duckdb
 
+from ._utils import sql_string
+
 #: Points at a miint build on disk, bypassing the repository entirely. This is
 #: the escape hatch for local miint development and for deployments with no
 #: outbound network -- micov reaches the network on first use otherwise.
@@ -143,13 +145,13 @@ def connection(memory="8gb", threads=1):
     con = duckdb.connect(":memory:", config=config)
     try:
         if override:
-            con.sql(f"LOAD '{override}'")
+            con.sql(f"LOAD {sql_string(override)}")
         else:
             # INSTALL is a no-op when the extension is already present, so the
             # network is only reached on first use; seeding
             # ~/.duckdb/extensions/ ahead of time makes this work offline
             try:
-                con.sql(f"INSTALL miint FROM '{repository}'")
+                con.sql(f"INSTALL miint FROM {sql_string(repository)}")
             except duckdb.Error:
                 # A cache holding a build from a *different* origin makes
                 # INSTALL fail outright ("the origin is different ... rerun
@@ -162,7 +164,7 @@ def connection(memory="8gb", threads=1):
                 # message: a corrupt or partial cache needs the same fix, and
                 # if FORCE INSTALL fails too the error is raised below anyway.
                 # The re-download happens once, not per connection.
-                con.sql(f"FORCE INSTALL miint FROM '{repository}'")
+                con.sql(f"FORCE INSTALL miint FROM {sql_string(repository)}")
             con.sql("LOAD miint")
     except duckdb.Error as exc:
         # asked of the connection rather than read from `duckdb.__version__`:

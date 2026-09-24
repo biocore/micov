@@ -21,3 +21,9 @@ global-exclude .DS_Store
 global-exclude .gitignore
 global-exclude *.sh
 global-exclude Makefile
+
+# after the global-excludes, which would otherwise drop them: `make test` runs
+# `pytest micov` and then `bash cli_test.sh`, so an unpacked sdist needs both
+# to be testable at all
+include Makefile
+include cli_test.sh

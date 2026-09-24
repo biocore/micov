@@ -15,7 +15,7 @@ from ._constants import (
     COLUMN_START,
     COLUMN_STOP,
 )
-from ._utils import logger
+from ._utils import logger, sql_string
 
 #: `load_bed_cov` leaves the BED3 intervals here.
 BED_POSITIONS_TABLE = "bed_positions"
@@ -65,7 +65,7 @@ def load_bed_cov(con, positions):
         Path to a `.cov`/BED3 file. Use `positions_path` for stdin.
 
     """
-    source = f"read_csv('{positions}', delim='\t')"
+    source = f"read_csv({sql_string(positions)}, delim='\t')"
     described = con.sql(f"DESCRIBE FROM {source}").fetchall()
 
     if len(described) < 3:
@@ -87,11 +87,12 @@ def _test_has_header(line):
     if isinstance(line, bytes):
         line = line.decode("utf-8")
 
-    genome_id_columns = COLUMN_GENOME_ID
-
+    # `==`, not `in`: COLUMN_GENOME_ID is a plain string, so `in` was a
+    # substring test, and a headerless file whose first genome was `id` or
+    # `genome` lost that genome's row to being read as a header
     if (
         line.startswith("#")
-        or line.split("\t")[0] in genome_id_columns
+        or line.split("\t")[0] == COLUMN_GENOME_ID
         or not line.split("\t")[1].strip().isdigit()
     ):
         has_header = True
@@ -114,7 +115,7 @@ def load_genome_lengths(con, lengths):
         first_line = fp.readline()
 
     header = "true" if _test_has_header(first_line) else "false"
-    source = f"read_csv('{lengths}', delim='\t', header={header})"
+    source = f"read_csv({sql_string(lengths)}, delim='\t', header={header})"
 
     # the columns are identified by position, so report problems using
     # whatever the file happened to call them
@@ -222,7 +223,7 @@ def compress_alignments(con, sam, sample_id, disable_compression=False):
                     SELECT reference,
                            {intervals} AS intervals,
                            COUNT(*) AS aligned_reads
-                    FROM read_alignments('{readable}',
+                    FROM read_alignments({sql_string(readable)},
                                          reference_lengths := genome_lengths)
                     GROUP BY reference""")
 
@@ -248,7 +249,7 @@ def compress_alignments(con, sam, sample_id, disable_compression=False):
                 SELECT reference AS {COLUMN_GENOME_ID},
                        interval.start::UINTEGER AS {COLUMN_START},
                        interval.stop::UINTEGER AS {COLUMN_STOP},
-                       '{sample_id}' AS {COLUMN_SAMPLE_ID}
+                       {sql_string(sample_id)} AS {COLUMN_SAMPLE_ID}
                 FROM (SELECT reference, UNNEST(intervals) AS interval
                       FROM alignment_groups
                       WHERE reference != '*')""")
@@ -306,8 +307,11 @@ def write_coverage_parquet(con, positions, output):
         Base path; the two suffixes are appended to it.
 
     """
+    covered_positions = sql_string(f"{output}.covered_positions.parquet")
+    coverage = sql_string(f"{output}.coverage.parquet")
+
     con.sql(f"""COPY ({positions})
-                TO '{output}.covered_positions.parquet'
+                TO {covered_positions}
                     (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
 
     # `(covered / length) * 100`, not `covered * 100 / length`. The two differ
@@ -319,7 +323,7 @@ def write_coverage_parquet(con, positions, output):
                          {COLUMN_GENOME_ID},
                          SUM({COLUMN_STOP} - {COLUMN_START})::UINTEGER
                              AS {COLUMN_COVERED}
-                  FROM read_parquet('{output}.covered_positions.parquet')
+                  FROM read_parquet({covered_positions})
                   GROUP BY {COLUMN_SAMPLE_ID}, {COLUMN_GENOME_ID})
               SELECT {COLUMN_SAMPLE_ID},
                      {COLUMN_GENOME_ID},
@@ -328,5 +332,5 @@ def write_coverage_parquet(con, positions, output):
                      ({COLUMN_COVERED} / {COLUMN_LENGTH}) * 100
                          AS {COLUMN_PERCENT_COVERED}
               FROM covered_amount JOIN genome_lengths USING ({COLUMN_GENOME_ID}))
-        TO '{output}.coverage.parquet'
+        TO {coverage}
             (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")

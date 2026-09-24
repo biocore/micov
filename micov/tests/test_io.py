@@ -68,6 +68,31 @@ class GenomeLengthsTests(unittest.TestCase):
         load_genome_lengths(self.con, self.name)
         self.assertEqual(self.loaded(), [("a", 10), ("b", 20), ("c", 30)])
 
+    def test_a_genome_whose_id_is_part_of_genome_id_is_not_a_header(self):
+        """`id` is a substring of `genome_id`, and that is all it has in common.
+
+        Header detection used to test ``first_field in "genome_id"`` -- a
+        substring test on a plain string -- so a headerless file whose first
+        genome was `id`, `genome` or `e` read as having a header, and that
+        genome's row was silently dropped from every denominator.
+        """
+        for genome in ("id", "genome", "e"):
+            with self.subTest(first_genome=genome):
+                self.con.sql("DROP TABLE IF EXISTS genome_lengths")
+                self.write(f"{genome}\t10\nb\t20\n")
+                load_genome_lengths(self.con, self.name)
+                self.assertEqual(self.loaded(), sorted([(genome, 10), ("b", 20)]))
+
+    def test_the_canonical_header_is_a_header(self):
+        self.write("genome_id\tlength\na\t10\nb\t20\n")
+        load_genome_lengths(self.con, self.name)
+        self.assertEqual(self.loaded(), [("a", 10), ("b", 20)])
+
+    def test_a_commented_header_is_a_header(self):
+        self.write("#genome_id\tlength\na\t10\nb\t20\n")
+        load_genome_lengths(self.con, self.name)
+        self.assertEqual(self.loaded(), [("a", 10), ("b", 20)])
+
     def test_renames_to_the_canonical_columns(self):
         """Everything downstream joins on `genome_id` and divides by `length`."""
         self.write("foo\tbar\tbaz\na\t10\txyz\n")

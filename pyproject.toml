@@ -87,7 +87,7 @@ micov = "micov.cli:cli"
 [tool.setuptools_scm]
 
 [tool.ruff]
-fix = true
+fix = false
 line-length = 88
 # Must track requires-python. When these disagreed (py310 vs >=3.9), ruff
 # advised a 3.10-only construct for code that had to run on 3.9.

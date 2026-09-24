@@ -23,6 +23,7 @@ from ._io import (
 from ._miint import connection
 from ._plot import per_sample_plots, single_sample_position_plot
 from ._quant import pos_to_bins
+from ._utils import sql_string
 from ._view import View
 
 
@@ -198,7 +199,7 @@ def cov_to_parquet(pattern, lengths, output, memory, threads):
                            regexp_extract(filename,
                                           '^(.*/)?(.+).cov(.gz)?$', 2)
                                AS {COLUMN_SAMPLE_ID}
-                    FROM read_csv('{pattern}',
+                    FROM read_csv({sql_string(pattern)},
                                   delim='\t',
                                   filename=true,
                                   header=true,
