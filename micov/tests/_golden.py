@@ -1,164 +1,91 @@
 """Golden-artifact comparators for the micov equivalence suite.
 
-Every comparator in this module exists because some micov output is *not*
-byte-stable. Comparing bytes would give flaky tests; comparing too loosely
-would let a real regression through. This docstring records which is which,
-so the next person does not have to rediscover it.
-
-Why this matters for the miint migration: the whole compute layer is being
-replaced, and the only thing standing between that and a silent change to
-published numbers is this suite. A comparator that is too loose is worse
-than no comparator, because it reads as coverage.
-
-Provenance of the classification
---------------------------------
-
-Verified empirically on 2026-08-06 against the committed ``example/`` corpus,
-on macOS-15.7.7-arm64 with python 3.12.13, micov 2025.3.dev39+g7a6629dd4,
-click 8.4.2, duckdb 1.2.2, polars-u64-idx 1.22.0, numba 0.66.0, scipy 1.17.1,
-pyarrow 13.0.0, matplotlib 3.11.1.
-
-Each source below was confirmed by *observing it vary across runs*, not by
-reading the source alone. That distinction is load-bearing -- see the warning
-at the end.
+micov's outputs are frozen contracts -- the coverage values and KS statistics
+are cited in the paper -- and `test_equivalence.py` checks them against
+committed goldens. Not every output is byte-stable, so each comparator here
+encodes exactly how much variation one artifact is allowed: too strict and
+the suite flakes, too loose and a real regression reads as coverage.
+`test_golden_selftest.py` proves each one both passes what it must tolerate
+and fails what it must catch.
 
 Sources of nondeterminism
 -------------------------
 
-1. Unseeded ``rng.permutation`` in ``_plot.add_monte`` (was polars'
-   ``shuffle()`` until M10')
-   Randomizes the Monte Carlo sample draw, so the Monte Carlo curve and any
-   ``.ks.csv`` row whose label begins ``Monte Carlo `` change every run.
-   The non-Monte rows in the same file do not.
-   => Partition ``.ks.csv`` rows on that label prefix. Exact-compare the
-      deterministic rows; assert only presence and range on the rest.
+Each was confirmed by *observing it vary across runs*, not by reading code
+(the classification dates from 2026-08-06; its environment is in this file's
+git history). Numbers are stable because other modules cite them; #3 and #8
+are retired.
 
-2. ``gzip.open`` stores the current mtime -- ``_plot.py:672``
-   ``.tsv.gz`` bytes differ run to run even when the data is identical.
-   => Decompress first, then compare content.
+1. Unseeded ``rng.permutation`` in ``_plot.add_monte``. The Monte Carlo curve,
+   and every ``.ks.csv`` row whose label begins ``Monte Carlo ``, change
+   every run; the other rows do not.
+   => Partition on that prefix; compare deterministic rows, and only check
+      presence, range and an empty Bonferroni field on the Monte Carlo ones.
 
-3. ``ti.mtime = int(time.time())`` -- the Qiita ``coverages.tgz`` writer
-   Archive bytes differed run to run. **Retired in M4**: micov no longer
-   writes tar archives, and ``assert_tgz_equal`` went with the format.
+2. ``gzip.open`` stores the current mtime, so ``.tsv.gz`` bytes differ.
+   => Decompress, then compare content.
 
-4. matplotlib version, backend, and font availability
-   PNG bytes are not reproducible across environments, and sizes drift
-   noticeably between matplotlib releases.
-   => Existence, non-zero size, and PNG magic bytes only. PNG content is
-      deliberately unguarded; the plotted values are guarded instead via the
-      ``.tsv.gz`` position data and the ``.ks.csv`` statistics.
+4. matplotlib version, backend and fonts make PNG bytes non-reproducible.
+   => Existence, non-zero size and PNG magic only. The plotted values are
+      guarded through the ``.tsv.gz`` and ``.ks.csv`` data instead.
 
-5. Ties in an ``ORDER BY`` are broken arbitrarily
-   Row order within a tie block of ``stats_by_variance_of_sample_hits.tsv``
-   varies. Originally attributed to polars' unstable sort; it survived the
-   move to DuckDB, and **the file differs run to run on byte-identical
-   input** -- measured in M4, where three rows share one ``sample_hits_std``.
-   => Sort-normalize with explicit keys before comparing.
+5. Ties in an ``ORDER BY`` are broken arbitrarily -- row order within a tie
+   block of ``stats_by_variance_of_sample_hits.tsv`` differs run to run on
+   identical input.
+   => Sort-normalize on explicit keys.
 
-6. DuckDB parallel write
-   Parquet row order varies between runs.
-   => Compare as a row set (bidirectional ``EXCEPT``), plus an ordered
-      schema check, since column order is itself part of the contract.
+6. DuckDB writes Parquet in parallel, so row order varies.
+   => Compare as a row set (bidirectional ``EXCEPT``), plus the ordered
+      schema, since column order is itself part of the contract.
 
-7. ``set(length_map)`` iteration order -- ``cli.py:516``
-   Genome block order in the binning outputs follows set iteration, which
-   varies with ``PYTHONHASHSEED``.
-   => Covered by the same explicit-key normalization as #5.
+7. ``set(length_map)`` iteration order puts binning genome blocks in an
+   order that follows ``PYTHONHASHSEED``.
+   => The same explicit-key normalization as #5.
 
-8. Genome block order in ``.cov`` is not stable
-   ``compress()`` accumulated one frame per genome in whatever order polars
-   yielded groups. That function was deleted in M4 and micov no longer writes
-   ``.cov`` at all, but ``example/coverages/*.cov.gz`` were frozen under it
-   and are still read as fixtures, so the comparator is still needed.
-   => Order-insensitive ``.cov`` comparison.
-   Corroboration that this was known but never written down: ``cli_test.sh``
-   already pipes both sides through ``sort``.
+9. ``sample_hits_std`` cannot be reproduced bit for bit outside polars, which
+   produced the golden: its ``std()`` matches no summation order SQL can
+   express. 103 of 1999 rows differ by at most 3 ULP (5.8e-16 relative), in
+   both directions -- float noise, not drift.
+   => That column within ``TSV_FLOAT_REL_TOL``; every other column exactly.
 
-9. Summation order inside a standard deviation -- ``sample_hits_std`` in
-   ``stats_by_variance_of_sample_hits.tsv``
-   Added 2026-08-14 while moving binning into SQL. polars' ``std()`` cannot be
-   reproduced bit-for-bit outside polars: over 18 hand-checked cases it matches
-   neither ``numpy.std(ddof=1)``, DuckDB's ``stddev_samp``, sum-of-squares,
-   mean-corrected sum-of-squares, two-pass, nor Welford -- and on ``[2, 3, 3]``
-   *none* of the six agree with it. It looks like a chunked SIMD reduction,
-   whose summation order no SQL expression fixes.
-   Measured against the committed golden: 103 of 1999 rows differ, by at most
-   **3 ULP** (5.8e-16 relative), in *both* directions -- the same golden value
-   drifts up in one row and down in another, which is the signature of float
-   noise rather than a systematic change. Every ranking swap it causes is
-   between bins whose golden values differ by <= 8.9e-16, in a column whose
-   largest value is 6.8.
-   => Compare that one column with a tight relative tolerance
-      (``TSV_FLOAT_REL_TOL``, ~20x looser than the observed drift and far
-      tighter than any real defect) and every other column exactly.
+10. KS p-values come from miint, the goldens from scipy 1.17.1. miint derives
+    the exact p-value independently, so they disagree by 1-4 ULP (worst
+    3.8e-16 on the goldens). The statistic is an exact lattice value in both
+    and matches bit for bit.
+    => ``ks-pvalue`` and ``ks-pvalue-bonferroni`` (``p * m``) within
+       ``TSV_FLOAT_REL_TOL``; labels and ``ks-statistic`` exactly.
 
-10. KS p-values are not scipy's bit for bit -- ``ks-pvalue`` in ``.ks.csv``
-    Added in M9, when the KS tests moved from ``scipy.stats.ks_2samp`` to
-    miint's ``ks_2samp``. Not run-to-run nondeterminism: miint is
-    deterministic, but it derives the exact p-value independently (Hodges
-    lattice paths, as the mass escaping the band rather than
-    ``1 - P(inside)``), so it disagrees with the scipy 1.17.1 that wrote the
-    goldens by 1-4 ULP. Measured on the goldens: 1 of 6 deterministic
-    p-values bit-exact, worst 3.8e-16 relative. The statistic is unaffected
-    -- both return the exact lattice value ``h / lcm(n1, n2)`` -- and all 6
-    are bit-exact.
-    => ``ks-pvalue`` on deterministic rows within ``TSV_FLOAT_REL_TOL``;
-       labels and ``ks-statistic`` exactly. ``ks-pvalue-bonferroni``, added
-       in M11a, is ``p * m`` and inherits the same tolerance.
+Outputs that matched by luck
+----------------------------
 
-Two traps: outputs that matched by luck
----------------------------------------
+Two artifacts compared byte-identical on the first run despite being
+unstable: ``stats_bins.tsv`` (its genome order flips with
+``PYTHONHASHSEED``, #7) and a Monte Carlo ``.ks.csv`` (a KS statistic over
+~20 samples takes few values, so collisions are common, #1). A comparator
+calibrated on one observed run will be wrong; that is why every one here has
+negative controls.
 
-During the audit, two artifacts compared byte-identical to their committed
-goldens on the first run *despite being genuinely unstable*:
+Compared exactly
+----------------
 
-- ``stats_bins.tsv`` matched exactly, but its genome block order flips with
-  ``PYTHONHASHSEED`` (seeds 1 and 12345 put ``G000154205`` first; the golden
-  has ``G000436435`` first). Source #7.
-- The non-percentile Monte Carlo ``.ks.csv`` matched exactly, which flatly
-  contradicts source #1. Three further runs showed the Monte Carlo rows do
-  vary. The KS statistic over ~20 samples takes few distinct values, so
-  collisions are common and a single match proves nothing.
-
-The lesson, and the reason ``test_golden_selftest.py`` exists: a comparator
-calibrated by observing one run of the code it is meant to guard will be
-wrong. Each comparator must be shown to fail on a perturbed input, not just
-to pass on a real one.
-
-Stable outputs
---------------
-
-For contrast -- these were verified stable and are compared exactly:
-
-- ``.ks.csv`` rows that are not Monte Carlo rows: labels and statistic
-  exactly. These are the published numbers. (The p-value and its Bonferroni
-  correction are within ``TSV_FLOAT_REL_TOL`` since M9 -- source #10.)
+- ``.ks.csv`` deterministic rows: labels and statistic.
 - ``.tsv.gz`` position-plot content, once decompressed.
-- ``.cov`` content as a multiset of intervals.
-- Parquet row sets and their ordered schemas.
+- Parquet row sets and ordered schemas.
 - Output filename sets. The
   ``{output}.{target_name}.{target}.{variable}.{tag}.png`` scheme is
-  contractual, and ``--monte`` alters the tag, so the fileset is a real
-  assertion rather than a formality.
-
-KS results were written as ``.ks.tsv`` despite being comma-separated until
-M11a renamed them ``.ks.csv``; the committed goldens were renamed with them,
-their four original columns byte for byte.
+  contractual, and ``--monte`` changes the tag.
 
 Conventions
 -----------
 
 Every comparator takes ``(observed, expected)`` in that order and raises
-``AssertionError`` on mismatch, so they compose with ``unittest.TestCase``
-without needing a ``self``. Messages name both paths and the first concrete
-difference, because a failure here will most often be read by someone
-bisecting a migration milestone.
+``AssertionError`` naming both paths and the first concrete difference, so
+they compose with ``unittest.TestCase`` without needing a ``self``.
 """
 
 import csv
 import gzip
 import math
-from collections import Counter
 from pathlib import Path
 
 import duckdb
@@ -241,65 +168,6 @@ def assert_gzip_text_equal(observed, expected):
     with gzip.open(expected, "rt") as fp:
         expected_text = fp.read()
     _assert_text_content_equal(observed, expected, observed_text, expected_text)
-
-
-def _cov_mismatch(got, want):
-    """Compare two lists of ``.cov`` lines.
-
-    Returns None if they agree, else a message. Header is compared exactly;
-    the body is compared as a **multiset**, because ``compress()`` emits
-    genome blocks in nondeterministic order (source #8). A multiset rather
-    than a set, so a duplicated interval is still caught.
-
-    Used by :func:`assert_cov_equal`. It also backed ``assert_tgz_equal``,
-    whose ``.cov`` archive members inherited the same instability, until M4
-    removed micov's Qiita support and that helper with it.
-    """
-    if not got or not want:
-        return "empty .cov content, expected a header"
-
-    if got[0] != want[0]:
-        return (
-            f"header differs\n"
-            f"    observed: {got[0]!r}\n    expected: {want[0]!r}"
-        )
-
-    got_body, want_body = Counter(got[1:]), Counter(want[1:])
-    if got_body == want_body:
-        return None
-
-    only_observed = got_body - want_body
-    only_expected = want_body - got_body
-    return (
-        f"interval sets differ (order-insensitive)\n"
-        f"  {len(got) - 1} observed rows, {len(want) - 1} expected rows\n"
-        f"  {sum(only_observed.values())} rows only in observed, "
-        f"{sum(only_expected.values())} only in expected\n"
-        f"  sample observed-only: {sorted(only_observed)[:3]}\n"
-        f"  sample expected-only: {sorted(only_expected)[:3]}"
-    )
-
-
-def assert_cov_equal(observed, expected):
-    """Assert two ``.cov`` files describe the same intervals.
-
-    Order-insensitive in the body -- see :func:`_cov_mismatch`. Accepts
-    plain or gzipped input, since micov writes both.
-    """
-    observed = _require_file(observed, "observed")
-    expected = _require_file(expected, "expected golden")
-
-    def read_lines(path):
-        if path.suffix == ".gz":
-            with gzip.open(path, "rt") as fp:
-                return fp.read().splitlines()
-        return path.read_text().splitlines()
-
-    problem = _cov_mismatch(read_lines(observed), read_lines(expected))
-    if problem is not None:
-        raise AssertionError(
-            f"{problem}\n  observed: {observed}\n  expected: {expected}"
-        )
 
 
 def assert_parquet_equal(observed, expected):

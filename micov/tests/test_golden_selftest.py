@@ -24,7 +24,6 @@ import unittest
 from pathlib import Path
 
 from micov.tests._golden import (
-    assert_cov_equal,
     assert_file_set,
     assert_gzip_text_equal,
     assert_ks_equal,
@@ -34,13 +33,6 @@ from micov.tests._golden import (
 )
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-
-COV_HEADER = "genome_id\tstart\tstop"
-COV_ROWS = [
-    "G000154205\t71\t1503",
-    "G000154205\t1630\t1924",
-    "G000436435\t10\t99",
-]
 
 KS_HEADER = "label_A,label_B,ks-statistic,ks-pvalue,ks-pvalue-bonferroni"
 # two deterministic rows, so the Bonferroni family is m = 2; the second row's
@@ -96,45 +88,6 @@ class GoldenSelfTestBase(unittest.TestCase):
         finally:
             con.close()
         return path
-
-
-class TestAssertCovEqual(GoldenSelfTestBase):
-    """`.cov` row order is unstable (source #8); content is not."""
-
-    def test_identical_passes(self):
-        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
-        b = self.write("b.cov", [COV_HEADER, *COV_ROWS])
-        assert_cov_equal(a, b)
-
-    def test_shuffled_body_passes(self):
-        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
-        b = self.write("b.cov", [COV_HEADER, *reversed(COV_ROWS)])
-        assert_cov_equal(a, b)
-
-    def test_changed_interval_fails(self):
-        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
-        bad = [COV_ROWS[0], COV_ROWS[1], "G000436435\t10\t100"]
-        b = self.write("b.cov", [COV_HEADER, *bad])
-        with self.assertRaises(AssertionError):
-            assert_cov_equal(a, b)
-
-    def test_duplicated_row_fails(self):
-        """Multiset, not set -- a duplicated interval is a real difference."""
-        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
-        b = self.write("b.cov", [COV_HEADER, *COV_ROWS, COV_ROWS[0]])
-        with self.assertRaises(AssertionError):
-            assert_cov_equal(a, b)
-
-    def test_changed_header_fails(self):
-        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
-        b = self.write("b.cov", ["genome\tstart\tstop", *COV_ROWS])
-        with self.assertRaises(AssertionError):
-            assert_cov_equal(a, b)
-
-    def test_missing_file_fails(self):
-        a = self.write("a.cov", [COV_HEADER, *COV_ROWS])
-        with self.assertRaises(AssertionError):
-            assert_cov_equal(self.tmp / "absent.cov", a)
 
 
 class TestAssertGzipTextEqual(GoldenSelfTestBase):
