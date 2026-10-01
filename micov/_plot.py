@@ -23,6 +23,9 @@ from ._cov import (
 )
 from ._io import BED_POSITIONS_TABLE
 
+#: `per_sample_plots`' genome-sorted copy of the positions, sliced per genome.
+PLOT_POSITIONS_TABLE = "plot_positions"
+
 #: Header of every `.ks.csv`. The first four names are frozen; the Bonferroni
 #: column was appended in M11a so that readers taking columns by position were
 #: unaffected.
@@ -169,8 +172,30 @@ def per_sample_plots(
     monte_iters : int
         The number of Monte Carlo iterations to perform.
     """
-    all_covered_positions = view.positions().fetchnumpy()
+    # Positions stay in DuckDB and only one genome's rows are fetched at a
+    # time. Fetching the whole table and masking it per genome was four full
+    # numpy string scans per genome: on 9,388 genomes and 29.7M intervals
+    # that alone was ~2 h, and `per-sample` ran 2.5x slower than the polars
+    # release it replaced. Sorted by genome, each genome's rows sit in a
+    # row group or two, so `WHERE genome_id = ?` reads only those.
+    view.con.sql(f"""CREATE OR REPLACE TEMP TABLE {PLOT_POSITIONS_TABLE} AS
+                     SELECT * FROM ({view.positions().sql_query()})
+                     ORDER BY {COLUMN_GENOME_ID}""")
+
+    # Coverage is one row per sample x genome, small enough to hold, but its
+    # row order is load-bearing: `ordered_coverage` breaks breadth ties by
+    # input order. A stable sort groups it by genome without disturbing that.
     all_coverage = view.coverages().fetchnumpy()
+    by_genome = np.argsort(all_coverage[COLUMN_GENOME_ID], kind="stable")
+    genomes, firsts = np.unique(
+        all_coverage[COLUMN_GENOME_ID][by_genome], return_index=True
+    )
+    bounds = np.append(firsts, len(by_genome))
+
+    # "unfocused" Monte Carlo draws from every sample with any coverage, which
+    # no single genome's rows can tell it
+    sample_universe = np.unique(all_coverage[COLUMN_SAMPLE_ID])
+
     metadata = view.metadata().fetchnumpy()
     feature_metadata = view.feature_metadata().fetchnumpy()
     target_lookup = dict(view.feature_names().fetchall())
@@ -184,7 +209,12 @@ def per_sample_plots(
                 "Plotting does not yet support desribing multiple regions."
             )
 
-    for genome in np.unique(all_coverage[COLUMN_GENOME_ID]):
+    for genome, lo, hi in zip(genomes, bounds[:-1], bounds[1:], strict=True):
+        target_coverage = mask_table(all_coverage, by_genome[lo:hi])
+        target_positions = view.con.execute(
+            f"SELECT * FROM {PLOT_POSITIONS_TABLE} WHERE {COLUMN_GENOME_ID} = ?",
+            [genome],
+        ).fetchnumpy()
         target_name = target_lookup[genome]
         is_genome = feature_metadata[COLUMN_GENOME_ID] == genome
         ymin = feature_metadata[COLUMN_START][is_genome][0]
@@ -193,8 +223,8 @@ def per_sample_plots(
         coverage_curve(
             view.con,
             metadata,
-            all_coverage,
-            all_covered_positions,
+            target_coverage,
+            target_positions,
             genome,
             sample_metadata_column,
             output,
@@ -203,12 +233,13 @@ def per_sample_plots(
             monte_iters,
             monte,
             False,
+            sample_universe=sample_universe,
         )
         coverage_curve(
             view.con,
             metadata,
-            all_coverage,
-            all_covered_positions,
+            target_coverage,
+            target_positions,
             genome,
             sample_metadata_column,
             output,
@@ -217,11 +248,12 @@ def per_sample_plots(
             monte_iters,
             monte,
             True,
+            sample_universe=sample_universe,
         )
         position_plot(
             metadata,
-            all_coverage,
-            all_covered_positions,
+            target_coverage,
+            target_positions,
             genome,
             sample_metadata_column,
             output,
@@ -232,8 +264,8 @@ def per_sample_plots(
         )
         position_plot(
             metadata,
-            all_coverage,
-            all_covered_positions,
+            target_coverage,
+            target_positions,
             genome,
             sample_metadata_column,
             output,
@@ -253,10 +285,11 @@ def add_monte(
     metadata_full,
     target,
     target_positions,
-    coverage_full,
+    coverage,
     accumulate,
     lengths,
     percentile,
+    sample_universe,
 ):
     """Perform a Monte Carlo simulation over coverage.
 
@@ -279,8 +312,8 @@ def add_monte(
         The genome of iterest
     target_positions : dict of np.ndarray
         The per sample per genome regions covered for the target of interest
-    coverage_full : dict of np.ndarray
-        The per sample per genome coverage for all samples and genomes
+    coverage : dict of np.ndarray
+        The per sample coverage of the target
     accumulate : bool
         If true, construct a cumulative curve. If false, construct a non
         cumulative curve.
@@ -288,6 +321,8 @@ def add_monte(
         genome to length data
     percentile : bool
         If true, use percentiles (0-100) on x-axis instead of sample counts.
+    sample_universe : np.ndarray
+        Every sample with coverage of any genome: the "unfocused" pool.
 
     Notes
     -----
@@ -307,25 +342,25 @@ def add_monte(
     line_alpha = 0.6
     fill_alpha = 0.1
 
-    is_target = coverage_full[COLUMN_GENOME_ID] == target
+    is_target = coverage[COLUMN_GENOME_ID] == target
 
     if monte_type == "focused":
         ls_median = "dotted"
         ls_bound = "--"
 
         # constrain to the target
-        sample_set = coverage_full[COLUMN_SAMPLE_ID][is_target]
+        sample_set = coverage[COLUMN_SAMPLE_ID][is_target]
 
     elif monte_type == "unfocused":
         ls_median = "dashed"
         ls_bound = "-."
 
         # take all samples
-        sample_set = np.unique(coverage_full[COLUMN_SAMPLE_ID])
+        sample_set = sample_universe
     else:
         raise ValueError(f"Unknown monte_type='{monte_type}'")
 
-    coverage = mask_table(coverage_full, is_target)
+    coverage = mask_table(coverage, is_target)
 
     max_x += 1  # it comes in as zero index but we need count
     monte_x = list(range(max_x))
@@ -388,7 +423,7 @@ def add_monte(
 def coverage_curve(
     con,
     metadata_full,
-    coverage_full,
+    coverage,
     positions,
     target,
     variable,
@@ -399,6 +434,8 @@ def coverage_curve(
     with_monte=None,
     accumulate=False,
     min_group_size=10,
+    *,
+    sample_universe,
 ):
     """Construct coverage curves.
 
@@ -408,10 +445,12 @@ def coverage_curve(
         A connection carrying the miint extension, for the accumulation.
     metadata_full : dict of np.ndarray
         The metadata for all samples with nonzero coverage to any target
-    coverage_full : dict of np.ndarray
-        The per sample per genome coverage for all samples and genomes
+    coverage : dict of np.ndarray
+        The per sample coverage of the target. Only the target's rows: callers
+        slice per genome, since filtering the whole table here for every genome
+        was the cost that made `per-sample` slow on studies with many genomes.
     positions : dict of np.ndarray
-        The per sample per genome regions covered
+        The per sample regions covered on the target, likewise only its rows
     target : str
         The genome of interest
     variable : str
@@ -429,6 +468,8 @@ def coverage_curve(
     accumulate : bool
         If true, construct a cumulative curve. If false, construct a non
         cumulative curve.
+    sample_universe : np.ndarray
+        Every sample with coverage of any genome, for "unfocused" Monte Carlo.
     min_group_size : int, optional
         The minimum number of samples to have coverage against the target
         in order to be plotted
@@ -456,7 +497,7 @@ def coverage_curve(
     curves = {}
 
     target_positions = mask_table(positions, positions[COLUMN_GENOME_ID] == target)
-    coverage = mask_table(coverage_full, coverage_full[COLUMN_GENOME_ID] == target)
+    coverage = mask_table(coverage, coverage[COLUMN_GENOME_ID] == target)
     cov_samples = np.unique(coverage[COLUMN_SAMPLE_ID])
     metadata = mask_table(
         metadata_full, np.isin(metadata_full[COLUMN_SAMPLE_ID], cov_samples)
@@ -518,6 +559,10 @@ def coverage_curve(
         curves[name] = cur_y
 
     if not labels:
+        # no group reached `min_group_size`. Most genomes of a large study
+        # land here, and an unclosed figure stays alive until the process
+        # exits -- thousands of them, before this close.
+        plt.close()
         return
 
     monte_label = None
@@ -531,10 +576,11 @@ def coverage_curve(
             metadata_full,
             target,
             target_positions,
-            coverage_full,
+            coverage,
             accumulate,
             lengths,
             percentile,
+            sample_universe,
         )
         labels.append(monte_label)
         curves[monte_label] = median_curve
@@ -687,9 +733,9 @@ def position_plot(
     metadata : dict of np.ndarray
         The metadata for all samples with nonzero coverage to any target
     coverage : dict of np.ndarray
-        The per sample per genome coverage for all samples and genomes
+        The per sample coverage of the target; only its rows
     positions : dict of np.ndarray
-        The per sample per genome regions covered
+        The per sample regions covered on the target; only its rows
     target : str
         The genome of interest
     variable : str

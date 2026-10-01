@@ -19,12 +19,16 @@ import math
 import shutil
 import unittest
 from tempfile import mkdtemp
+from unittest import mock
 
+import duckdb
 import numpy as np
 
+from micov import _plot
 from micov._io import load_bed_cov, load_genome_lengths
 from micov._miint import connection
 from micov._plot import KS_HEADER, ks_2samp, ks_table, position_plot_segments
+from micov._view import View
 from micov.tests._golden import TSV_FLOAT_REL_TOL
 
 #: Deliberately more awkward than `mini_sampleA.cov`: several intervals per
@@ -309,6 +313,132 @@ class KsTableTests(unittest.TestCase):
         rows = ks_table(self.con, {"a": LOW, monte: MONTE}, monte)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][4], "")
+
+
+class PerSamplePlotsPerGenomeTests(unittest.TestCase):
+    """Each genome's plots see that genome's rows, and only those.
+
+    `per_sample_plots` used to hand every plotting call the *whole* positions
+    table, and each call then filtered it for its one genome with a numpy
+    string comparison. On a real study -- 9,388 genomes, 29.7M intervals --
+    that was four full scans per genome, and `per-sample` ran 2.5x slower than
+    the polars release it replaced (6.1 h against 2.5 h). `example/` has two
+    genomes, so nothing in the golden suite could see it.
+    """
+
+    #: G2 is covered by every sample but the last; G1 by all of them. Twelve
+    #: samples in one group clears `coverage_curve`'s minimum of ten, so the
+    #: Monte Carlo path actually runs.
+    N = 12
+
+    def setUp(self):
+        self.d = mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+        rows = []
+        for i in range(self.N):
+            sid = f"S{i:02d}"
+            rows.append(("G1", 10 + i, 500 + i, sid))
+            if i < self.N - 1:
+                rows.append(("G2", 100 + i, 900 + i, sid))
+        con = duckdb.connect()
+        con.sql("CREATE TABLE p (genome_id VARCHAR, start UINTEGER, "
+                "stop UINTEGER, sample_id VARCHAR)")
+        con.executemany("INSERT INTO p VALUES (?, ?, ?, ?)", rows)
+        base = f"{self.d}/db"
+        con.sql(f"COPY p TO '{base}.covered_positions.parquet' (FORMAT PARQUET)")
+        con.sql(f"""COPY (SELECT sample_id, genome_id,
+                                 SUM(stop - start)::UINTEGER AS covered,
+                                 1000::BIGINT AS length,
+                                 (SUM(stop - start)::UINTEGER / 1000::BIGINT) * 100
+                                     AS percent_covered
+                          FROM p GROUP BY ALL)
+                    TO '{base}.coverage.parquet' (FORMAT PARQUET)""")
+        con.close()
+        with open(f"{self.d}/md.tsv", "w") as fp:
+            fp.write("sample_id\tgrp\n")
+            fp.writelines(f"S{i:02d}\tx\n" for i in range(self.N))
+        with open(f"{self.d}/features.tsv", "w") as fp:
+            fp.write("genome_id\nG1\nG2\n")
+        self.view = View(base, f"{self.d}/md.tsv", f"{self.d}/features.tsv")
+        self.addCleanup(self.view.close)
+
+    def run_plots(self, monte=None):
+        _plot.per_sample_plots(self.view, "grp", f"{self.d}/out", monte, 5, False)
+
+    def test_each_plot_receives_only_its_genomes_positions(self):
+        seen = []
+
+        def record(name):
+            def spy(*args, **kwargs):
+                positions, target = args[3], args[4]
+                if name == "position_plot":
+                    positions, target = args[2], args[3]
+                seen.append((name, target, set(positions["genome_id"])))
+            return spy
+
+        with mock.patch.object(_plot, "coverage_curve", record("coverage_curve")), \
+             mock.patch.object(_plot, "position_plot", record("position_plot")):
+            self.run_plots()
+
+        self.assertEqual(len(seen), 8, "2 genomes x (2 curves + 2 position plots)")
+        for name, target, genomes in seen:
+            with self.subTest(call=name, target=target):
+                self.assertEqual(genomes, {target})
+
+    def test_unfocused_monte_carlo_draws_from_samples_of_any_genome(self):
+        """S11 covers only G1, and must still be in G2's unfocused pool.
+
+        "unfocused" means *any* sample with coverage of *any* genome. Handing
+        each genome only its own rows must not narrow that to the samples
+        covering the target -- which is what "focused" means -- and the
+        envelope is unseeded, so nothing else would notice.
+        """
+        pools = []
+        real_rng = np.random.default_rng
+
+        class Recording:
+            def __init__(self):
+                self.rng = real_rng(0)
+
+            def permutation(self, values):
+                pools.append(set(values))
+                return self.rng.permutation(values)
+
+        with mock.patch.object(_plot.np.random, "default_rng", Recording):
+            self.run_plots(monte="unfocused")
+
+        everyone = {f"S{i:02d}" for i in range(self.N)}
+        self.assertTrue(pools, "the Monte Carlo path never ran")
+        for pool in pools:
+            self.assertEqual(pool, everyone)
+
+    def test_a_genome_with_no_large_group_leaves_no_figure_open(self):
+        """Most genomes in a real study have no group of ten samples.
+
+        `coverage_curve` opened a figure and then returned early for those
+        without closing it. On 9,337 genomes, 7,056 took that path, twice
+        each, and every figure stayed in memory until the process ended.
+        """
+        import matplotlib.pyplot as plt
+
+        plt.close("all")
+        coverage = self.view.coverages().fetchnumpy()
+        positions = self.view.positions().fetchnumpy()
+        _plot.coverage_curve(
+            self.view.con,
+            self.view.metadata().fetchnumpy(),
+            coverage,
+            positions,
+            "G1",
+            "grp",
+            f"{self.d}/out",
+            "G1",
+            False,
+            accumulate=True,
+            min_group_size=self.N + 1,
+            sample_universe=np.unique(coverage["sample_id"]),
+        )
+        self.assertEqual(plt.get_fignums(), [])
 
 
 if __name__ == "__main__":

@@ -45,6 +45,15 @@ Backward incompatible changes:
 
 Other changes:
 
+* **`micov per-sample` no longer slows down with the number of genomes.** Every
+  plotting step filtered the whole positions table for its one genome, four
+  times per genome. On a 100-sample study with 9,388 genomes and 29.7M
+  intervals that filtering alone was about 2 hours, and `per-sample` took 6.1 h
+  against 2.5 h for the previous release. Positions now stay in DuckDB and are
+  fetched one genome at a time (~8 s of filtering for the same study). A
+  plotting figure was also left open for every genome with no group of at
+  least 10 samples, so memory grew with the number of genomes; it is now
+  closed.
 * **Paths and sample IDs containing `'` work.** Every command failed with a
   DuckDB `Parser Error` when a path -- or `compress --sample-id` -- contained a
   single quote, which is common in home directories (`/Users/o'brien`). They
