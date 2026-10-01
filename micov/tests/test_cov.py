@@ -1,3 +1,4 @@
+import itertools
 import unittest
 from unittest import mock
 
@@ -215,31 +216,35 @@ class CovTests(unittest.TestCase):
         self.assertEqual(obs_x.tolist(), [0, 1, 2, 3])
         self.assertEqual(obs_y, [0., 0., 0., 10.])
 
-    def test_compute_cumulative_breaks_breadth_ties_by_input_order(self):
-        """Ties keep micov's order, which is the order `coverage` arrives in.
+    def test_compute_cumulative_breaks_breadth_ties_by_sample_id(self):
+        """Ties are broken by `sample_id`, so the curve ignores input order.
 
-        miint offers a `cumulative_coverage_curve` macro that ranks samples
-        itself and breaks ties by `sample_id`; micov drives the aggregate with
-        its own rank instead, precisely so the tie-break does not move (R20a).
+        Row order is not stable on real data: `View.coverages()` comes from a
+        parallel Parquet scan and arrives in a different order run to run, so a
+        row-order tie-break made identical invocations disagree (R20a). On a
+        100-sample study, 995 of 9,337 position files and 26 KS files moved
+        between runs for this reason alone.
 
         Three samples tied at 10%, of which S1 [0,10) and S2 [5,15) overlap
         and S3 [50,60) does not. Rank order therefore changes the *middle* of
         the curve: adjacent S1/S2 accumulate to 15, while S3 between them
-        gives 20. Under a `sample_id` tie-break every input order would
-        collapse to S1,S2,S3 and yield [10, 15, 25].
+        gives 20. Ranked S1,S2,S3 the curve is [10, 15, 25] for every input
+        order.
         """
-        order = ['S2', 'S3', 'S1']
         spans = {'S1': (0, 10), 'S2': (5, 15), 'S3': (50, 60)}
-        df = table(COVERAGE_COLUMNS,
-                   [[s, 'G1', 10, 100, 10.] for s in order])
-        pos = table(POSITION_COLUMNS,
-                    [[s, 'G1', *spans[s]] for s in order])
-        grp = table([(COLUMN_SAMPLE_ID, object)], [[s] for s in order])
         lengths = table([(COLUMN_GENOME_ID, object), (COLUMN_LENGTH, np.uint32)],
                         [['G1', 100]])
+        for order in itertools.permutations(spans):
+            with self.subTest(order=order):
+                df = table(COVERAGE_COLUMNS,
+                           [[s, 'G1', 10, 100, 10.] for s in order])
+                pos = table(POSITION_COLUMNS,
+                            [[s, 'G1', *spans[s]] for s in order])
+                grp = table([(COLUMN_SAMPLE_ID, object)], [[s] for s in order])
 
-        _, obs_y = compute_cumulative(self.con, df, grp, 'G1', pos, lengths)
-        self.assertEqual(obs_y, [10., 20., 25.])
+                _, obs_y = compute_cumulative(self.con, df, grp, 'G1', pos,
+                                              lengths)
+                self.assertEqual(obs_y, [10., 15., 25.])
 
     def test_get_covered(self):
         test = np.array([(1, 2, 3), (10, 20, 30)])

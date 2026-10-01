@@ -6,6 +6,13 @@ micov 0.0.1-dev
 
 Backward incompatible changes:
 
+* **Samples with equal breadth are ranked by `sample_id`.** They were ranked in
+  whatever order the coverage rows arrived, which changes between runs because
+  the Parquet is scanned in parallel. Running `per-sample` twice on the same
+  input could therefore write different cumulative curves, position files and
+  KS statistics for any genome where two samples in one group had identical
+  breadth -- about one genome in ten on a real 100-sample study. Outputs are
+  now reproducible, and genomes without such ties are unaffected.
 * **Sample metadata and feature files must have a header.** The first column of
   `--sample-metadata` must be named `sample_id` or `sample_name`, and the first
   column of `--features-to-keep` and `--target-names` must be named

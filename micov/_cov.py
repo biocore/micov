@@ -89,10 +89,11 @@ def ordered_coverage(coverage, grp, target, length):
         if column != COLUMN_SAMPLE_ID:
             ordered[column] = np.concatenate([values[on_rows], values[off_rows]])
 
-    # stable, so samples tied on coverage keep covered-then-absent order. That
-    # is what the polars sort did, and the plot goldens were frozen with it.
+    # ties on coverage are broken by sample_id, never by row order: the rows
+    # come from a parallel Parquet scan whose order changes run to run (R20a)
     ordered = mask_table(
-        ordered, np.argsort(ordered[COLUMN_PERCENT_COVERED], kind="stable")
+        ordered,
+        np.lexsort((ordered[COLUMN_SAMPLE_ID], ordered[COLUMN_PERCENT_COVERED])),
     )
 
     n = len(ordered[COLUMN_SAMPLE_ID])

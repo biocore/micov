@@ -182,9 +182,9 @@ def per_sample_plots(
                      SELECT * FROM ({view.positions().sql_query()})
                      ORDER BY {COLUMN_GENOME_ID}""")
 
-    # Coverage is one row per sample x genome, small enough to hold, but its
-    # row order is load-bearing: `ordered_coverage` breaks breadth ties by
-    # input order. A stable sort groups it by genome without disturbing that.
+    # Coverage is one row per sample x genome, small enough to hold in memory.
+    # Its row order does not matter: `ordered_coverage` breaks breadth ties by
+    # sample_id.
     all_coverage = view.coverages().fetchnumpy()
     by_genome = np.argsort(all_coverage[COLUMN_GENOME_ID], kind="stable")
     genomes, firsts = np.unique(
