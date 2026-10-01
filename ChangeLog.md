@@ -6,6 +6,14 @@ micov 0.0.1-dev
 
 Backward incompatible changes:
 
+* **Sample metadata and feature files must have a header.** The first column of
+  `--sample-metadata` must be named `sample_id` or `sample_name`, and the first
+  column of `--features-to-keep` and `--target-names` must be named
+  `genome_id`; micov stops with an error naming the file otherwise. These files
+  were read as having a header whether or not they did, so a headerless one --
+  a taxonomy `lineages.txt`, for example -- silently lost its first genome or
+  sample, which then appeared in no output. Files whose first column has some
+  other name need renaming.
 * **KS results are now `.ks.csv`, not `.ks.tsv`.** The files were always
   comma-separated; only the name was wrong. Anything globbing `*.ks.tsv` needs
   updating. The content of the first four columns is unchanged.

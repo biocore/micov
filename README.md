@@ -182,9 +182,13 @@ required. The genomes to examine can optionally be constrained using
 specified within the `features-to-keep` but limited to a single region per
 genome currently.
 
-`micov` expects the first column of a sample metadata file to be the sample ID
-under the header `sample_id`. Similarly, the first column of a feature metadata
-file should be the feature ID under the header `genome_id`.
+Both files **must have a header line**. The first column of a sample metadata
+file is the sample ID, under the header `sample_id` or `sample_name`; the first
+column of a feature metadata file (and of a `--target-names` file) is the
+genome ID, under the header `genome_id`. `micov` stops with an error naming the
+file otherwise. A file without a header -- a taxonomy `lineages.txt`, say --
+would have its first row taken as column names, and that genome or sample
+silently dropped.
 
 The `--output` parameter specified a prefix for the output files.
 

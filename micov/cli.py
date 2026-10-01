@@ -234,7 +234,10 @@ cli.add_command(_nonqiita_alias)
     "--sample-metadata",
     type=click.Path(exists=True),
     required=True,
-    help="A metadata file with the sample metadata",
+    help=(
+        "Sample metadata, with a header; the first column is "
+        "`sample_id` or `sample_name`"
+    ),
 )
 @click.option(
     "--sample-metadata-column",
@@ -246,7 +249,7 @@ cli.add_command(_nonqiita_alias)
     "--features-to-keep",
     type=click.Path(exists=True),
     required=True,
-    help="A metadata file with the features to keep",
+    help="Features to keep, with a header; the first column is `genome_id`",
 )
 @click.option("--output", type=click.Path(exists=False), required=True)
 @click.option(
@@ -268,7 +271,12 @@ cli.add_command(_nonqiita_alias)
 )
 @click.option("--memory", type=str, default="16gb", required=False)
 @click.option("--threads", type=int, default=4, required=False)
-@click.option("--target-names", type=str, required=False)
+@click.option(
+    "--target-names",
+    type=str,
+    required=False,
+    help="Genome names, with a header; columns `genome_id` then the name",
+)
 @click.option("--percentile", is_flag=True, default=False, help="Use percentile")
 def per_sample_group(
     parquet_coverage,
@@ -315,13 +323,16 @@ def per_sample_group(
     "--sample-metadata",
     type=click.Path(exists=True),
     required=True,
-    help="A metadata file with the sample metadata",
+    help=(
+        "Sample metadata, with a header; the first column is "
+        "`sample_id` or `sample_name`"
+    ),
 )
 @click.option(
     "--features-to-keep",
     type=click.Path(exists=True),
     required=False,
-    help="A file with the features to keep. Must have header",
+    help="Features to keep, with a header; the first column is `genome_id`",
 )
 @click.option(
     "--metadata-variable",
@@ -420,13 +431,16 @@ def binning(
     "--sample-metadata",
     type=click.Path(exists=True),
     required=True,
-    help="A metadata file with the sample metadata",
+    help=(
+        "Sample metadata, with a header; the first column is "
+        "`sample_id` or `sample_name`"
+    ),
 )
 @click.option(
     "--features-to-keep",
     type=click.Path(exists=True),
     required=False,
-    help="A metadata file with the features to keep",
+    help="Features to keep, with a header; the first column is `genome_id`",
 )
 @click.option("--output", type=click.Path(exists=False), required=True)
 @click.option("--memory", type=str, default="16gb", required=False)

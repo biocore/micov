@@ -649,5 +649,62 @@ class ViewTests(unittest.TestCase):
         )
 
 
+    def headerless(self, rows):
+        """Write rows with no header line, the way a lineages file comes."""
+        self._tsv_count = getattr(self, "_tsv_count", 0) + 1
+        path = f"{self.d}/headerless{self._tsv_count}.tsv"
+        with open(path, "w", newline="") as fp:
+            csv.writer(fp, delimiter="\t", lineterminator="\n").writerows(rows)
+        return path
+
+    def test_headerless_features_are_rejected_not_truncated(self):
+        """The first genome must not be silently eaten as a column name.
+
+        A taxonomy-style `lineages.txt` -- genome, then lineage, no header --
+        was read with its first row as the header, so that genome vanished
+        from every plot and table with no error. Found on a real study, where
+        `G000005825` had coverage in 10 samples and was never plotted.
+        """
+        feat = self.headerless([["G1"], ["G2"], ["G3"]])
+        with self.assertRaisesRegex(ValueError, "genome_id") as ctx:
+            View(f"{self.d}/{self.name}", self.tsv(*self.md), feat)
+        self.assertIn(feat, str(ctx.exception))
+        self.assertIn("'G1'", str(ctx.exception))
+
+    def test_features_must_name_genome_id_first(self):
+        feat = (("feature_id",), [["G1"], ["G2"]])
+        with self.assertRaisesRegex(ValueError, "genome_id"):
+            View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
+
+    def test_regions_must_name_genome_id_first(self):
+        feat = (("gid", COLUMN_START, COLUMN_STOP), [["G1", 1, 10]])
+        with self.assertRaisesRegex(ValueError, "genome_id"):
+            View(f"{self.d}/{self.name}", self.tsv(*self.md), self.tsv(*feat))
+
+    def test_feature_names_must_name_genome_id_first(self):
+        names = self.headerless([["G1", "foo"], ["G2", "bar"]])
+        with self.assertRaisesRegex(ValueError, "genome_id"):
+            View(
+                f"{self.d}/{self.name}",
+                self.tsv(*self.md),
+                self.tsv(*self.feat),
+                names,
+            ).feature_names()
+
+    def test_headerless_sample_metadata_is_rejected(self):
+        """Same failure for metadata: the first sample would go missing."""
+        md = self.headerless([["S1", "a"], ["S2", "b"], ["S3", "c"]])
+        with self.assertRaisesRegex(ValueError, "sample_id.*sample_name") as ctx:
+            View(f"{self.d}/{self.name}", md, self.tsv(*self.feat))
+        self.assertIn(md, str(ctx.exception))
+
+    def test_sample_metadata_may_use_sample_name(self):
+        """Qiita's exports, and example/, call the column `sample_name`."""
+        md = (("sample_name", "foo"), [["S1", "a"], ["S2", "b"], ["S3", "c"]])
+        v = View(f"{self.d}/{self.name}", self.tsv(*md), self.tsv(*self.feat))
+        self.assert_relation(
+            v.metadata(), METADATA_SCHEMA, [("S1", "a"), ("S2", "b"), ("S3", "c")]
+        )
+
 if __name__ == "__main__":
     unittest.main()
