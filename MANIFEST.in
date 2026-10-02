@@ -3,6 +3,8 @@ include LICENSE
 include ChangeLog.md
 include CLAUDE.md
 include pyproject.toml
+# CLAUDE.md points here, so the two ship together
+graft docs
 prune example
 # local-only working files; setuptools otherwise sweeps loose .py files in
 # here into the sdist even though the directory is gitignored

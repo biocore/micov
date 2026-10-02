@@ -319,10 +319,10 @@ def compute_cumulative(con, coverage, grp, target, target_positions, lengths):
     was O(n^2) in group size -- 13.2s for 1000 samples against the aggregate's
     0.5s, and bit-identical.
 
-    micov supplies the rank rather than using miint's
-    `cumulative_coverage_curve` macro, which ranks samples itself and breaks
-    breadth ties by `sample_id`. micov breaks them by input order, and with
-    three or more tied samples the two disagree on the middle of the curve.
+    micov supplies the rank itself, from `ordered_coverage`, rather than
+    using miint's `cumulative_coverage_curve` macro. Both break breadth ties
+    by `sample_id`; whether the macro could replace the ranking outright has
+    not been checked.
 
     """
     ordered, curves = cumulative_curves(
