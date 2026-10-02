@@ -1,13 +1,9 @@
-import numba
-import polars as pl
+import numpy as np
 
 from ._constants import (
-    BED_COV_SCHEMA,
     COLUMN_COVERED,
-    COLUMN_COVERED_DTYPE,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
-    COLUMN_LENGTH_DTYPE,
     COLUMN_PERCENT_COVERED,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
@@ -15,252 +11,14 @@ from ._constants import (
 )
 
 
-def coverage_percent_per_sample(coverages, lengths):
-    """Compute coverage percent per sample."""
-    frames = []
-    for (sample,), sample_df in coverages.group_by(
-        [
-            COLUMN_SAMPLE_ID,
-        ]
-    ):
-        cov = coverage_percent(sample_df, lengths)
-        cov = cov.with_columns(pl.lit(sample).alias(COLUMN_SAMPLE_ID))
-        frames.append(cov)
+def mask_table(table, keep):
+    """Select rows of a table with a boolean mask or an array of row indices.
 
-    if frames:
-        return pl.concat(frames).collect()
-    else:
-        return pl.DataFrame()
-
-
-def coverage_percent(coverages, lengths):
-    """Compute the percent coverage per genome.
-
-    Parameters
-    ----------
-    coverages : pl.DataFrame
-        Compressed covered region data
-    lengths : pl.DataFrame
-        The corresponding genome lengths
-
-    Returns
-    -------
-    pl.LazyFrame
-        The genome coverages
-
+    A "table" here is a `dict` of equal length numpy arrays -- the shape
+    `DuckDBPyRelation.fetchnumpy()` hands back, and what the plotting path
+    carries now that it holds no polars frames.
     """
-    missing = set(coverages[COLUMN_GENOME_ID]) - set(lengths[COLUMN_GENOME_ID])
-    if len(missing) > 0:
-        raise ValueError(
-            f"{len(missing)} genome(s) appear unrepresented in "
-            f"the length information, examples: "
-            f"{sorted(missing)[:5]}"
-        )
-
-    return (
-        coverages.lazy()
-        .with_columns(
-            (pl.col(COLUMN_STOP) - pl.col(COLUMN_START)).alias(COLUMN_COVERED)
-        )
-        .group_by(
-            [
-                COLUMN_GENOME_ID,
-            ]
-        )
-        .agg(pl.col(COLUMN_COVERED).sum())
-        .join(lengths.lazy(), on=COLUMN_GENOME_ID)
-        .with_columns(
-            ((pl.col(COLUMN_COVERED) / pl.col(COLUMN_LENGTH)) * 100).alias(
-                COLUMN_PERCENT_COVERED
-            )
-        )
-    )
-
-
-# TODO: replace compression logic with a duckdb query
-# we should obtain benefit of parallelization natively
-# code was generated and then minorly adapted using chatgpt 4o
-# by firsts providing the "_compress" function below and requesting
-# it be expressed as duckdb compatible SQL. The resulting code
-# passes the current unit tests (without having provided them)
-# NOTE: operation _including_ sample_id has only been loosely checked
-# NOTE: this needs to be checked on _large_ data. while the query
-#   engine is good, it is not perfect and could trigger large
-#   use of tmp
-#
-# WITH sorted_ranges AS (
-#     SELECT
-#         *,
-#         LAG(stop) OVER (ORDER BY start) AS prev_stop
-#     FROM ranges
-# ),
-# grouped_ranges AS (
-#     SELECT
-#         *,
-#         CASE
-#             WHEN prev_stop IS NULL OR start > prev_stop THEN 1
-#             ELSE 0
-#         END AS new_group_flag
-#     FROM sorted_ranges
-# ),
-# cumulative_groups AS (
-#     SELECT
-#         *,
-#         SUM(new_group_flag) OVER (ORDER BY start
-#                                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-#                                  AS group_id
-#     FROM grouped_ranges
-# )
-# SELECT
-#     sample_id,
-#     genome_id,
-#     MIN(start) AS merged_start,
-#     MAX(stop) AS merged_stop
-# FROM cumulative_groups
-# GROUP BY sample_id, genome_id, group_id
-# ORDER BY sample_id, genome_id, merged_start;
-@numba.jit(nopython=True)
-def _compress(rows):
-    # derived from zebra
-    # https://github.com/biocore/zebra_filter/blob/master/cover.py#L14
-
-    new_ranges = []
-    start_val = None
-    end_val = None
-
-    # case 1: no active range, start active range.
-    start_val, end_val = rows[0]
-    for start, stop in rows[1:]:
-        if end_val >= start:
-            # case 2: active range continues through this range
-            # extend active range
-            end_val = max(end_val, stop)
-        else:  # if end_val < r[0] - 1:
-            # case 3: active range ends before this range begins
-            # write new range out, then start new active range
-            new_range = (start_val, end_val)
-            new_ranges.append(new_range)
-            start_val = start
-            end_val = stop
-
-    if end_val is not None:
-        new_range = (start_val, end_val)
-        new_ranges.append(new_range)
-
-    return new_ranges
-
-
-def compress_per_sample(df):
-    """Compress data per sample."""
-    frames = []
-    for (sample,), sample_df in df.group_by(
-        [
-            COLUMN_SAMPLE_ID,
-        ]
-    ):
-        compressed = compress(sample_df).with_columns(
-            pl.lit(sample).alias(COLUMN_SAMPLE_ID)
-        )
-        frames.append(compressed)
-
-    if frames:
-        return pl.concat(frames)
-    else:
-        return pl.DataFrame([], schema=df.collect_schema())
-
-
-def compress(df):
-    """Compress overlapping intervals into contiguous intervals.
-
-    Parameters
-    ----------
-    df : pl.DataFrame:
-        Genome regions covered
-
-    Notes
-    -----
-    Intervals are start inclusive and stop exclusive. We currently require
-    at least one position of overlap to collapse an interval. The purpose of
-    the collapse is to reduce the number of regions tracked to reduce the
-    amount of memory to describe coverage.
-
-    1) intervals which overlap are collapsed
-
-        [1, 10) and [5, 15) become [1, 15)
-
-    2) intervals which are nested are collapsed
-
-        [1, 10) and [5, 8) become [1, 10)
-
-    3) immediately adjacent intervals are not collapsed
-
-        [1, 10) and [10, 20) remain unchanged
-
-    A visual depiction:
-
-    123456789012345678901234567890
-    ---
-       ----
-        --
-            ---
-                 ----
-                   -----
-
-                         ---
-                           ---
-                              ---
-
-    Would reduce to
-
-    123456789012345678901234567890
-    -------
-            ---
-                 -------
-                         -----
-                              ---
-
-    Returns
-    -------
-    pl.DataFrame
-        The covered genome regions such that overlapping regions, and regions
-        represented by another region, are described by a single interval.
-
-    """
-
-    def make_frame(data, genome):
-        frame = pl.LazyFrame(
-            data,
-            schema=[BED_COV_SCHEMA.dtypes_flat[1], BED_COV_SCHEMA.dtypes_flat[2]],
-            orient="row",
-        )
-        return (
-            frame.with_columns(pl.lit(genome).cast(str).alias(COLUMN_GENOME_ID))
-            .select(BED_COV_SCHEMA.columns)
-            .collect()
-        )
-
-    compressed = []
-    for (genome,), grp in df.group_by(
-        [
-            COLUMN_GENOME_ID,
-        ]
-    ):
-        rows = (
-            grp.lazy()
-            .select([COLUMN_START, COLUMN_STOP])
-            .sort(COLUMN_START)
-            .collect()
-            .to_numpy(order="c")
-        )
-
-        grp_compressed = _compress(rows)
-        grp_compressed_df = make_frame(grp_compressed, genome)
-        compressed.append(grp_compressed_df)
-
-    if not compressed:
-        return make_frame([], None)
-    else:
-        return pl.concat(compressed)
+    return {column: values[keep] for column, values in table.items()}
 
 
 def ordered_coverage(coverage, grp, target, length):
@@ -268,9 +26,9 @@ def ordered_coverage(coverage, grp, target, length):
 
     Parameters
     ----------
-    coverage : pl.DataFrame
-        A frame that describes the per sample per genome coverage.
-    grp : pl.DataFrame
+    coverage : dict of np.ndarray
+        A table that describes the per sample per genome coverage.
+    grp : dict of np.ndarray
         Sample metadata
     target : str
         The target genome to gather coverage against.
@@ -284,40 +42,64 @@ def ordered_coverage(coverage, grp, target, length):
 
     Returns
     -------
-    pl.DataFrame
+    dict of np.ndarray
         The coverage data sorted by coverage, and augmented with rank values
 
     """
-    coverage = coverage.lazy()
-    grp = grp.lazy()
-
-    on_target = (
-        coverage.join(grp, on=COLUMN_SAMPLE_ID)
-        .filter(pl.col(COLUMN_GENOME_ID) == target)
-        .collect()
+    grp_samples = grp[COLUMN_SAMPLE_ID]
+    on_target = mask_table(
+        coverage,
+        (coverage[COLUMN_GENOME_ID] == target)
+        & np.isin(coverage[COLUMN_SAMPLE_ID], grp_samples),
     )
 
-    on_target_sids = on_target[COLUMN_SAMPLE_ID]
-
-    off_target = (
-        grp.filter(~(pl.col(COLUMN_SAMPLE_ID).is_in(on_target_sids)))
-        .with_columns(
-            pl.lit(0.0).alias(COLUMN_PERCENT_COVERED),
-            pl.lit(0).cast(COLUMN_COVERED_DTYPE).alias(COLUMN_COVERED),
-            pl.lit(length).cast(COLUMN_LENGTH_DTYPE).alias(COLUMN_LENGTH),
-            pl.lit(target).alias(COLUMN_GENOME_ID),
-        )
-        .select(on_target.columns)
+    # the join this replaces carried `grp`'s columns onto each covered sample,
+    # so index back into `grp` rather than dropping them
+    grp_row = {sample: row for row, sample in enumerate(grp_samples)}
+    on_rows = np.array(
+        [grp_row[sample] for sample in on_target[COLUMN_SAMPLE_ID]], dtype=np.intp
+    )
+    covered_samples = set(on_target[COLUMN_SAMPLE_ID].tolist())
+    off_rows = np.array(
+        [
+            row
+            for row, sample in enumerate(grp_samples)
+            if sample not in covered_samples
+        ],
+        dtype=np.intp,
     )
 
-    return (
-        pl.concat([on_target.lazy(), off_target])
-        .sort(COLUMN_PERCENT_COVERED)
-        .with_row_index()
-        .with_columns(x=pl.col("index") / pl.len(), x_unscaled=pl.col("index"))
-        .drop(pl.col("index"))
-        .collect()
+    fill = {
+        COLUMN_GENOME_ID: target,
+        COLUMN_COVERED: 0,
+        COLUMN_LENGTH: length,
+        COLUMN_PERCENT_COVERED: 0.0,
+    }
+
+    ordered = {}
+    for column, values in on_target.items():
+        if column == COLUMN_SAMPLE_ID:
+            absent = grp_samples[off_rows]
+        else:
+            # KeyError rather than a silent gap if `coverage` grows a column
+            absent = np.full(len(off_rows), fill[column], dtype=values.dtype)
+        ordered[column] = np.concatenate([values, absent])
+
+    for column, values in grp.items():
+        if column != COLUMN_SAMPLE_ID:
+            ordered[column] = np.concatenate([values[on_rows], values[off_rows]])
+
+    # ties on coverage are broken by sample_id, never by row order: the rows
+    # come from a parallel Parquet scan whose order changes run to run (R20a)
+    ordered = mask_table(
+        ordered,
+        np.lexsort((ordered[COLUMN_SAMPLE_ID], ordered[COLUMN_PERCENT_COVERED])),
     )
+
+    n = len(ordered[COLUMN_SAMPLE_ID])
+    ordered["x_unscaled"] = np.arange(n, dtype=np.uint64)
+    ordered["x"] = np.arange(n, dtype=np.float64) / n
+    return ordered
 
 
 def slice_positions(positions, id_):
@@ -325,74 +107,235 @@ def slice_positions(positions, id_):
 
     Parameters
     ----------
-    positions : pl.DataFrame
+    positions : dict of np.ndarray
         The per sample per genome covered regions
     id_ : str
         The sample ID to constrain
 
     Returns
     -------
-    pl.LazyFrame
+    dict of np.ndarray
         The subset of positions
 
     """
-    return (
-        positions.lazy()
-        .filter(pl.col(COLUMN_SAMPLE_ID) == id_)
-        .select(pl.col(COLUMN_GENOME_ID), pl.col(COLUMN_START), pl.col(COLUMN_STOP))
+    keep = positions[COLUMN_SAMPLE_ID] == id_
+    return {
+        column: positions[column][keep]
+        for column in (COLUMN_GENOME_ID, COLUMN_START, COLUMN_STOP)
+    }
+
+
+#: Name the accumulation input is registered under. `View`'s catalog already
+#: holds `positions`, `coverage`, `metadata` and `regions`, and `_cov` may be
+#: handed that same connection, so this is deliberately prefixed.
+CURVE_INPUT_RELATION = "micov_curve_input"
+
+
+def cumulative_covered(con, n_iterations, n_ranks, iterations, ranks, starts, stops):
+    """Accumulate covered bases per rank, for one or more iterations.
+
+    Ranks accumulate from 0 upward: the value at rank *k* is the breadth of
+    every interval belonging to ranks 0..k merged together, which is what makes
+    the curve a curve rather than a sorted list of per-sample breadths.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension.
+    n_iterations, n_ranks : int
+        The shape of the result. Every (iteration, rank) pair is accounted for
+        whether or not any interval was supplied for it.
+    iterations, ranks, starts, stops : np.ndarray
+        One row per covered interval, concatenated across iterations.
+
+    Returns
+    -------
+    np.ndarray
+        Covered base counts, shape `(n_iterations, n_ranks)`.
+
+    Notes
+    -----
+    The roster is generated in SQL and LEFT JOINed to the intervals rather than
+    supplied from `ranks`, so a sample with no coverage still gets its rank.
+    miint requires ranks to be contiguous `0..N-1` and a sample contributing no
+    intervals would otherwise leave a hole -- and, more importantly, silently
+    shorten the curve.
+
+    """
+    con.register(
+        CURVE_INPUT_RELATION,
+        {
+            "iteration": iterations,
+            "rank": ranks,
+            COLUMN_START: starts,
+            COLUMN_STOP: stops,
+        },
+    )
+    try:
+        rows = con.sql(f"""
+            SELECT iteration, c.rank AS rank, c.covered AS covered
+            FROM (
+                SELECT r.iteration AS iteration,
+                       UNNEST(cumulative_coverage(r.rank::INTEGER,
+                                                  p.{COLUMN_START},
+                                                  p.{COLUMN_STOP})) AS c
+                FROM (SELECT i.iteration, k.rank
+                      FROM range(0, {n_iterations}) i(iteration),
+                           range(0, {n_ranks}) k(rank)) r
+                    LEFT JOIN {CURVE_INPUT_RELATION} p
+                        ON p.iteration = r.iteration AND p.rank = r.rank
+                GROUP BY r.iteration
+            )
+            ORDER BY iteration, rank
+        """).fetchall()
+    finally:
+        con.unregister(CURVE_INPUT_RELATION)
+
+    # ordered by (iteration, rank) above, so the reshape is positional. Asked
+    # for explicitly rather than trusting UNNEST to preserve list order.
+    covered = np.array([row[2] for row in rows], dtype=np.int64)
+    return covered.reshape(n_iterations, n_ranks)
+
+
+def _rank_intervals(grp_coverage, target_positions):
+    """Map each interval onto the rank of the sample it belongs to.
+
+    Intervals for samples outside `grp_coverage` are dropped; samples in it
+    with no intervals simply contribute none, and get their rank from the
+    roster in `cumulative_covered`.
+    """
+    rank_of = dict(
+        zip(
+            grp_coverage[COLUMN_SAMPLE_ID],
+            grp_coverage["x_unscaled"],
+            strict=True,
+        )
+    )
+    keep = np.array(
+        [sample in rank_of for sample in target_positions[COLUMN_SAMPLE_ID]],
+        dtype=bool,
+    )
+    ranks = np.array(
+        [rank_of[sample] for sample in target_positions[COLUMN_SAMPLE_ID][keep]],
+        dtype=np.int32,
+    )
+    return ranks, target_positions[COLUMN_START][keep], \
+        target_positions[COLUMN_STOP][keep]
+
+
+def cumulative_curves(con, coverage, groups, target, target_positions, lengths):
+    """Accumulate a cumulative coverage curve for each of several groups.
+
+    Every group is ranked independently and all of them accumulate in a single
+    aggregate call, which is what makes Monte Carlo affordable: the simulation
+    runs hundreds of iterations, and each was previously its own O(n^2) pass.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension.
+    coverage : dict of np.ndarray
+        The total per sample per target coverage data
+    groups : list of np.ndarray
+        Sample IDs per group. Groups must be the same size as each other.
+    target : str
+        The target genome to accumulate coverage over
+    target_positions : dict of np.ndarray
+        The per sample per target regions covered
+    lengths : dict of np.ndarray
+        Per target lengths
+
+    Returns
+    -------
+    (list of dict, np.ndarray)
+        The ranked coverage per group, and a `(len(groups), n)` array of
+        percentages -- one curve per group.
+
+    """
+    target_length = lengths[COLUMN_LENGTH][lengths[COLUMN_GENOME_ID] == target][0]
+
+    ordered = [
+        ordered_coverage(coverage, {COLUMN_SAMPLE_ID: samples}, target, target_length)
+        for samples in groups
+    ]
+    sizes = {len(grp_coverage[COLUMN_SAMPLE_ID]) for grp_coverage in ordered}
+    if len(sizes) > 1:
+        # the roster is generated once, for one width, so a group of a
+        # different size would be silently truncated or silently padded flat
+        # rather than raising. Both callers pass equal-sized groups today.
+        raise ValueError(f"Groups must be the same size, got sizes {sorted(sizes)}")
+
+    n_ranks = sizes.pop()
+    if n_ranks == 0:
+        return ordered, np.empty((len(groups), 0), dtype=np.float64)
+
+    iterations, ranks, starts, stops = [], [], [], []
+    for iteration, grp_coverage in enumerate(ordered):
+        grp_ranks, grp_starts, grp_stops = _rank_intervals(
+            grp_coverage, target_positions
+        )
+        iterations.append(np.full(len(grp_ranks), iteration, dtype=np.int32))
+        ranks.append(grp_ranks)
+        starts.append(grp_starts)
+        stops.append(grp_stops)
+
+    covered = cumulative_covered(
+        con,
+        len(groups),
+        n_ranks,
+        np.concatenate(iterations),
+        np.concatenate(ranks),
+        np.concatenate(starts),
+        np.concatenate(stops),
     )
 
+    # `(covered / length) * 100`, not `covered * 100 / length`: the two are
+    # different doubles, and the frozen plot goldens carry the former.
+    return ordered, (covered / target_length) * 100
 
-def compute_cumulative(coverage, grp, target, target_positions, lengths):
+
+def compute_cumulative(con, coverage, grp, target, target_positions, lengths):
     """Accumulate coverage, from samples with the least to most coverage.
 
     Parameters
     ----------
-    coverage : pl.DataFrame
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension.
+    coverage : dict of np.ndarray
         The total per sample per target coverage data
-    grp : pl.DataFrame
+    grp : dict of np.ndarray
         Sample metadata
     target : str
         The target genome to accumulae coverage over
-    target_positions : pl.DataFrame
+    target_positions : dict of np.ndarray
         The per sample per target regions covered
-    lengths : pl.DataFrame
+    lengths : dict of np.ndarray
         Per target lengths
 
     Notes
     -----
-    The general approach is to stack all regions covered from samples
-    [x, ..., x_n], compress and calculate coverage. This is repeated with
-    [x, ..., x_n, x_n + 1].
+    The accumulation is miint's `cumulative_coverage` aggregate. It replaced a
+    Python loop that re-merged a growing interval set once per sample, which
+    was O(n^2) in group size -- 13.2s for 1000 samples against the aggregate's
+    0.5s, and bit-identical.
+
+    micov supplies the rank itself, from `ordered_coverage`, rather than
+    using miint's `cumulative_coverage_curve` macro. Both break breadth ties
+    by `sample_id`; whether the macro could replace the ranking outright has
+    not been checked.
 
     """
-    length = lengths[COLUMN_LENGTH].item(0)
+    ordered, curves = cumulative_curves(
+        con, coverage, [grp[COLUMN_SAMPLE_ID]], target, target_positions, lengths
+    )
 
-    current = pl.DataFrame([], schema=BED_COV_SCHEMA.dtypes_flat)
-    grp_coverage = ordered_coverage(coverage, grp, target, length)
-
-    if len(grp_coverage) == 0:
+    if len(ordered[0][COLUMN_SAMPLE_ID]) == 0:
         return None, None
 
-    cur_y = []
-    cur_x = grp_coverage["x_unscaled"]
-    for id_ in grp_coverage[COLUMN_SAMPLE_ID]:
-        next_ = slice_positions(target_positions, id_).collect()
-        current = compress(pl.concat([current, next_]))
-        per_cov = coverage_percent(current, lengths).collect()
-
-        # no observed coverage can occur in the unfocused monte carlo simulation
-        # in which case the coverage is zero
-        if len(per_cov) == 0:
-            val = 0.0
-        else:
-            val = per_cov[COLUMN_PERCENT_COVERED].item(0)
-
-        cur_y.append(val)
-    return cur_x, cur_y
+    # a list of np.float64, which is what the loop this replaced returned
+    return ordered[0]["x_unscaled"], list(curves[0])
 
 
-@numba.jit(nopython=True)
 def get_covered(x_start_stop):
     """Remap (x, y1, y1) into [(x, y1), (x, y2)]."""
     return [[(x, start), (x, stop)] for (x, start, stop) in x_start_stop]

@@ -4,36 +4,66 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "micov"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
+# 3.13 is still not claimed. The blocker used to be `pyarrow<16.0.0`, which
+# capped at 15.0.2 and publishes no cp313 wheels; pyarrow is gone now, but
+# nothing has been run on 3.13, so claiming it would be a guess. Revisit by
+# adding 3.13 to the CI matrix first.
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: BSD License",
-    "Operating System :: OS Independent",
+    # not OS Independent any more: micov requires the miint DuckDB extension,
+    # which is published only for Linux (x86_64, aarch64) and macOS on Apple
+    # silicon. Windows and Intel macOS have no build.
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
 ]
 dynamic = ["version"]
 
-# click < 8.2, due to merge of https://github.com/pallets/click/pull/2604
-# which implicitly removes "_group" suffixes in command line names
-
-# duckdb < 1.3 as jemalloc fails to compile on (very) old linux systems.
-# no issue yet. 
+# The old `duckdb<1.3` ceiling existed because jemalloc failed to compile on
+# very old linux. It is dropped deliberately: duckdb-miint requires >=1.5.4,
+# so the ceiling was unholdable, and those systems need a wheel rather than a
+# pin. Keep this floor in step with ci/conda_requirements.txt -- the two files
+# previously disagreed, which made the conda and pypi CI paths test different
+# duckdb majors.
+#
+# pyarrow was removed here, not merely unpinned. It was never imported by
+# micov; it came in as the polars<->DuckDB handoff, and no such handoff is
+# left. Verified by running the full golden suite with pyarrow uninstalled.
+#
+# miint is deliberately absent, and cannot be added: it is a DuckDB *extension*,
+# not a Python distribution, so there is nothing here to depend on. micov
+# requires it all the same -- `micov/_miint.py` installs and loads it, and
+# raises if it cannot.
+#
+# The duckdb CEILING is a repository-coverage artifact, not a technical limit.
+# miint is published per DuckDB version at https://ftp.microbio.me/pub/miint,
+# which carries v1.5.4 and no v1.5.5 tree, so micov cannot run on a DuckDB it
+# has no extension build for. Drop the ceiling once v1.5.5 is published.
+#
+# numba is gone: it backed the interval merge in `_cov.py`, which is now
+# miint's `compress_intervals`, and a `get_covered` list comprehension that
+# never needed compiling. Verified by running the full golden suite with numba
+# uninstalled.
+#
+# polars is gone. It was micov's dataframe layer throughout; every use is now
+# either DuckDB (parsing, joins, aggregation) or the standard library (writing
+# `.ks.tsv` and the position-plot `.tsv.gz`, where the work was formatting, not
+# computation). `micov/tests/test_dependencies.py` asserts nothing imports it,
+# and the full golden suite was run with it uninstalled.
+#
+# scipy is gone. Its one live use was `ks_2samp` for the pairwise curve
+# comparisons, now miint's. The published statistics reproduce exactly; the
+# p-values to a few ULP, which is the tolerance on `ks-pvalue` in the goldens.
 dependencies = [
-    "click<8.2",
-    "scipy",
-    "pyarrow<16.0.0",
-    "polars-u64-idx<1.23.0",
-    "numba",
+    "click",
     "matplotlib>=3.9.0",
-    "duckdb (>=1.2.0,<1.3)",
-    "pytest",
+    "duckdb>=1.5.4,<1.5.5",
 ]
 
 readme = "README.md"
@@ -45,6 +75,11 @@ authors = [
 license = { file = "LICENSE" }
 keywords = ["microbiome", "bioinformatics"]
 
+# pytest was previously listed as a runtime dependency, so every user install
+# pulled it in. It is a test dependency only.
+[project.optional-dependencies]
+test = ["pytest"]
+
 [project.scripts]
 micov = "micov.cli:cli"
 
@@ -52,9 +87,11 @@ micov = "micov.cli:cli"
 [tool.setuptools_scm]
 
 [tool.ruff]
-fix = true
+fix = false
 line-length = 88
-target-version = "py310"
+# Must track requires-python. When these disagreed (py310 vs >=3.9), ruff
+# advised a 3.10-only construct for code that had to run on 3.9.
+target-version = "py311"
 
 [tool.check-manifest]
 ignore = [

@@ -1,7 +1,0 @@
-label_A,label_B,ks-statistic,ks-pvalue
-No,Yes,0.3736842105263158,0.10846042853587466
-No,not provided,0.2,0.9490959481963978
-No,Monte Carlo unfocused (n=20),0.15,0.9831368772656193
-Yes,not provided,0.5263157894736842,0.038719701088516675
-Yes,Monte Carlo unfocused (n=20),0.22631578947368422,0.607506212066835
-not provided,Monte Carlo unfocused (n=20),0.3,0.5691054572613793

@@ -10,9 +10,11 @@ on:
 
 env:
   latest_python: "3.12"
-  supported_pythons: '["3.9", "3.10", "3.11", "3.12"]'
-  miniforge_version: "23.11.0-0"
-  miniforge_variant: "Mambaforge"
+  supported_pythons: '["3.11", "3.12"]'
+  # Mambaforge was retired by conda-forge; Miniforge3 is the supported
+  # variant and already bundles mamba.
+  miniforge_version: "latest"
+  miniforge_variant: "Miniforge3"
 
 jobs:
   conf:
@@ -35,7 +37,7 @@ jobs:
     runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v2
+      - uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
           python-version: ${{ env.latest_python }}
@@ -58,15 +60,22 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: ["ubuntu-latest", "macos-13", "windows-latest"]
+        # micov requires the miint DuckDB community extension, which upstream
+        # publishes for linux_amd64, linux_arm64 and osx_arm64 only. macos-13
+        # (Intel) and windows-latest have no build, so they were dropped rather
+        # than carried as a second, silently-diverging compute path.
+        # macos-latest is arm64, so macOS stays covered.
+        os: ["ubuntu-latest", "macos-latest"]
         python_version: ${{ fromJSON(needs.conf.outputs.supported_pythons) }}
         use_conda: [true, false]
     steps:
       - uses: actions/checkout@v4
-      - uses: conda-incubator/setup-miniconda@v2
+      - uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
-          python-version: ${{ env.latest_python }}
+          # was env.latest_python, which made the whole version matrix
+          # decorative -- every cell silently tested only the latest Python
+          python-version: ${{ matrix.python_version }}
           miniforge-version: ${{ env.miniforge_version }}
           miniforge-variant: ${{ env.miniforge_variant }}
           environment-file: ci/conda_host_env.yml
@@ -81,8 +90,16 @@ jobs:
         if: ${{ !matrix.use_conda }}
         shell: bash -l {0}
         run: |
-          pip install .
+          pip install .[test]
           conda list
+      # Done as its own step so a community-repository outage reads as an
+      # install failure rather than as a wall of confusing test failures. It
+      # also warms ~/.duckdb/extensions once, instead of every test process
+      # racing to fetch the same file.
+      - name: Install the miint extension
+        shell: bash -l {0}
+        run: |
+          python -c "import duckdb; duckdb.sql('INSTALL miint FROM community')"
       - name: Run unit tests
         shell: bash -l {0}
         run: |
