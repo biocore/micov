@@ -129,8 +129,9 @@ Called twice per genome: `scale=None`, then `scale=10000`.
    the letters.
 3. Groups are laid out **smallest first**, with ties kept in value order.
    With `sort_by_value` (`--sort-by-metadata-value`) they are laid out by
-   value instead: values that parse as numbers, numerically, then other text
-   in sorted order, then blanks. Colours do not change, so a group keeps the
+   value instead: values that parse as finite numbers, numerically, then
+   other text in sorted order (`nan` and `-inf` parse, but count as text),
+   then blanks. Colours do not change, so a group keeps the
    colour it has in the curve plots.
 4. Within a group, samples are ranked by `ordered_coverage`. With **exactly
    two groups** the second is drawn in reverse, so the two mirror each other.
@@ -151,12 +152,20 @@ overlaps.
   holding `start` to the last one whose left edge is before `stop`. Fractional
   edges can fall inside an interval's last base, so asking which bucket holds
   `stop - 1` would drop a bucket the interval overlaps.
-- **An interval past `ymax`** is plotted up to `ymax`. `example/` has one,
-  1bp past the end of G000436435.
-- Before 0.0.1-dev, buckets were always 1/10,000 of the genome and only the
-  buckets holding an interval's `start` and `stop` were marked. On a 145kb
-  genome that is 15bp buckets, and half the covered buckets went unmarked.
-  The `example/` goldens gained 836 and 130 rows, and lost none.
+- **An interval reaching outside `[ymin, ymax)`** is plotted only where it
+  overlaps. `example/` has one, 1bp past the end of G000436435. In region
+  mode `View` has already clipped intervals to the region.
+- **A zero-length span** (`ymax <= ymin`) has no buckets, and raises a
+  `ValueError` naming the genome.
+- Before 0.0.1-dev, buckets were always 1/10,000 of the genome, and only the
+  buckets holding an interval's `start` and its exclusive `stop` were marked.
+  On a 145kb genome that is 15bp buckets, and half the covered buckets went
+  unmarked. Binning `stop` also marked the bucket starting exactly at `stop`,
+  which overlap does not, so genomes whose edges land on whole positions lose
+  those rows. The `example/` goldens gained 836 and 130 rows and lost none.
+- **Size.** A sample can mark every bucket, so one genome's `.tsv.gz` can
+  reach samples x 10,000 rows. On a 100-sample, 9,388-genome study the
+  total grew 1.35x, and the worst genome 3.1x (221k to 683k rows).
 - `test_plot.ScaledPositionPlotTests` pins all of this.
 
 **Group size.** There is no minimum, so every genome gets position plots.

@@ -36,6 +36,10 @@ test that guards it.
 
 ## Performance
 
+- **Keep the scaled position plot's marks in numpy arrays.** Overlap
+  marking can write samples x 10,000 rows for one genome (683k on a
+  100-sample study). Python lists of per-mark scalars made that genome's plot
+  take 3.0s; arrays take 2.0s for byte-identical output.
 - **Never hand a plotting function the whole positions table.**
   `per_sample_plots` keeps positions in the genome-sorted temp table
   `plot_positions` and fetches one genome at a time. `coverage_curve`,

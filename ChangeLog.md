@@ -8,17 +8,24 @@ Backward incompatible changes:
 
 * **The scaled position plot is now `position-plot-scaled.{png,tsv.gz}`,** not
   `position-plot-1_10000th-scale.*`, for every genome. Anything globbing the
-  old name needs updating. Its buckets are 1/10,000 of the genome as before,
-  but never narrower than 100bp: 10,000 buckets on a 145kb chloroplast were
-  15bp, narrower than the intervals being plotted, and a genome or region
-  under 10kb had buckets of less than a base. Genomes and regions of 1Mb or
-  more keep their 10,000 buckets and their `y` values. Shorter ones now have
-  100bp buckets from their start.
+  old name needs updating. Genomes and regions of 1Mb or more keep their
+  10,000 buckets and their bucket edges. Shorter ones now have 100bp buckets
+  from their start, the last holding whatever remains: 10,000 buckets on a
+  145kb chloroplast were 15bp, narrower than the intervals being plotted, and
+  a genome or region under 10kb had buckets of less than a base. A
+  zero-length genome now stops with an error naming it, where it previously
+  plotted nothing.
 * **The scaled position plot marks every bucket an interval overlaps.** It
   marked only the buckets holding an interval's start and stop, so a bucket in
   the middle of a long interval was left blank. On a 145kb genome with 15bp
-  buckets that was half the covered buckets. On the `example/` genomes it adds
-  836 and 130 rows to the `.tsv.gz` (0.48% and 0.10%), and removes none.
+  buckets that was half the covered buckets. It also marked the bucket
+  beginning exactly at an interval's end, which the interval does not cover;
+  that bucket is no longer marked. This removes rows only where a bucket edge
+  falls on a whole position, which depends on the genome length, so the
+  `example/` genomes gained 836 and 130 rows (0.48% and 0.10%) and lost none.
+  On a 100-sample study of 9,388 genomes the `.tsv.gz` rows grew 1.35x
+  overall: the median genome is unchanged, the 99th percentile doubles, and
+  no genome can exceed samples x 10,000 rows.
 * **Samples with equal breadth are ranked by `sample_id`.** They were ranked in
   whatever order the coverage rows arrived, which changes between runs because
   the Parquet is scanned in parallel. Running `per-sample` twice on the same
@@ -147,8 +154,8 @@ Other changes:
 * `micov position-plot` now accepts a `.cov` file with a `#`-prefixed header,
   which it previously read as data.
 * **`micov per-sample --sort-by-metadata-value`** lays position plot groups out
-  by metadata value, comparing numbers numerically, then other text, then
-  blanks. Groups are otherwise laid out smallest first, with ties in text
+  by metadata value: finite numbers numerically, then other text (`nan` and
+  `inf` included), then blanks. Groups are otherwise laid out smallest first, with ties in text
   order, so equal-sized depth groups read 270, 30, 5. Without the flag nothing
   changes, and the coverage curves are unaffected either way.
 

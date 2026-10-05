@@ -337,12 +337,15 @@ class PositionPlotGroupOrderTests(unittest.TestCase):
     def setUp(self):
         self.d = mkdtemp()
         self.addCleanup(shutil.rmtree, self.d)
-        n = len(self.GROUPS)
+        self.build(self.GROUPS)
+
+    def build(self, groups):
+        n = len(groups)
         samples = np.array([f"S{i}" for i in range(n)], dtype=object)
         self.metadata = {
             "sample_id": samples,
             "grp": np.ma.array(
-                self.GROUPS, mask=[g is None for g in self.GROUPS], dtype=object
+                groups, mask=[g is None for g in groups], dtype=object
             ),
         }
         self.coverage = {
@@ -378,6 +381,16 @@ class PositionPlotGroupOrderTests(unittest.TestCase):
     def test_sort_by_value_puts_numbers_in_numeric_order_then_text(self):
         self.assertEqual(self.groups_left_to_right(sort_by_value=True),
                          ["5", "30", "270", "not applicable", "--"])
+
+    def test_non_finite_values_sort_as_text(self):
+        """`float()` accepts "-inf" and "NaN", but neither is a depth.
+
+        As numbers, "-inf" led the axis, and NaN -- which compares false both
+        ways -- had no defined place among the numbers at all.
+        """
+        self.build(("5", "-inf", "NaN", "missing"))
+        self.assertEqual(self.groups_left_to_right(sort_by_value=True),
+                         ["5", "-inf", "NaN", "missing"])
 
 
 class ScaledPositionPlotTests(unittest.TestCase):
@@ -442,6 +455,22 @@ class ScaledPositionPlotTests(unittest.TestCase):
         """`example/` has one: G000436435 is 5,348,036bp, an interval ends 5,348,037."""
         self.assertEqual(self.marked([(850, 1001)]), [800.0, 900.0])
 
+    def test_an_interval_starting_before_the_region_marks_from_its_start(self):
+        """`View` clips to the region, so the CLI cannot reach this today.
+
+        It was a silent wipe-out all the same: a start below `ymin` fell
+        outside the buckets and cancelled every other mark for the sample.
+        """
+        self.assertEqual(
+            self.marked([(10, 40), (50, 150), (300, 450)], 100, 1000),
+            [100.0, 300.0, 400.0],
+        )
+
+    def test_a_zero_length_genome_is_rejected_by_name(self):
+        """It has no buckets; this died on an IndexError in the axis label."""
+        with self.assertRaisesRegex(ValueError, "G1"):
+            self.plot([(0, 1)], 0, 0)
+
     def test_region_buckets_start_at_the_region(self):
         self.assertEqual(self.marked([(1060, 1100), (1150, 1151)], 1050, 1500),
                          [1050.0, 1150.0])
@@ -466,6 +495,16 @@ class ScaledPositionPlotTests(unittest.TestCase):
         _, edges = np.histogram([], bins=10000, range=(0, length))
         self.assertEqual(self.marked([(900, 944)], ymax=length),
                          [edges[1], edges[2]])
+
+    def test_a_bucket_starting_at_stop_is_not_marked_on_a_long_genome(self):
+        """[0, 200) covers nothing at 200.
+
+        On a 2Mb genome the edges are whole 200bp steps, and the old rule,
+        which binned `stop` itself, marked the bucket starting at 200. Such
+        genomes lose those rows; `example/`'s edges are never whole, so its
+        goldens only gained rows.
+        """
+        self.assertEqual(self.marked([(0, 200)], ymax=2_000_000), [0.0])
 
 
 class PerSamplePlotsPerGenomeTests(unittest.TestCase):

@@ -187,8 +187,8 @@ label_A,label_B,ks-statistic,ks-pvalue,ks-pvalue-bonferroni
 - `x`: the sample's rank within the whole plot.
 - `y`: the left edge of each bucket the sample has any coverage in. A
   genome of 1Mb or more has 10,000 buckets, with `np.histogram`'s fractional
-  edges; a shorter genome or region has 100bp buckets from its start. See
-  [curves-and-ks.md](curves-and-ks.md).
+  edges; a shorter genome or region has 100bp buckets from its start, the
+  last holding whatever remains. See [curves-and-ks.md](curves-and-ks.md).
 - Until 0.0.1-dev these files were `position-plot-1_10000th-scale.*`, with
   10,000 buckets on every genome and only the buckets holding an interval's
   ends marked.
