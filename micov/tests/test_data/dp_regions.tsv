@@ -1,0 +1,6 @@
+genome_id	length	is_circular	start	stop
+GC	3000	true	1001	1501
+GC	3000	true	2501	2901
+GL	2000	false		
+GX	1000	false		
+GB	1000	false		

@@ -101,14 +101,14 @@ pre-miint implementation produced.
 ### Sample metadata (`--sample-metadata`)
 
 A tab-separated file with a **required header**. The first column must be
-named `sample_id` or `sample_name` (`_view.SAMPLE_ID_COLUMNS`), and is renamed
+named `sample_id` or `sample_name` (`_io.SAMPLE_ID_COLUMNS`), and is renamed
 to `sample_id`. Every column is read as VARCHAR. Rows whose sample has no
 coverage at all are dropped (`SEMI JOIN` against `coverage.parquet`).
 
 ### Features (`--features-to-keep`, `--target-names`)
 
 Both files need a header. **The first column must be named `genome_id`**
-(`_view.FEATURE_ID_COLUMNS`). `View._read_tsv` enforces this, so that a
+(`_io.FEATURE_ID_COLUMNS`). `_io.read_tsv_with_header` enforces this, so that a
 headerless file is rejected instead of losing its first row.
 
 - **Genome mode:** `genome_id` alone, with any extra columns ignored.
@@ -118,6 +118,39 @@ headerless file is rejected instead of losing its first row.
 - **`--target-names`:** the columns are `genome_id`, then a name. A
   lineage-style name keeps only the text after its last `"; "`. Spaces and
   square brackets become `_`. Genomes without a name fall back to their id.
+
+### `depth-plot` inputs
+
+`depth-plot` is being built; these are its readers in `_io`, which
+`_depth.intersect_layers` then reconciles.
+
+- **Alignments (`--depth`, and `--breadth`, which defaults to it):** Parquet
+  holding `read_alignments`' columns plus a `sample_id` column, which
+  `read_alignments` does not produce. `load_alignment_layer` checks for
+  `sample_id`, `reference`, `position`, `stop_position` and `cigar`, and says
+  how to add `sample_id` if it is missing.
+- **Features (`--features-to-keep`):** the header rule as above, then a
+  **required `length`** (the alignments carry no lengths), an optional
+  `is_circular` (missing or empty is linear), and optional `start`/`stop`.
+  A row with a region is a detail panel, and one without only names the
+  genome. `load_depth_features` reads every column as text and converts it
+  explicitly. It rejects a non-positive length, an `is_circular` that is not
+  true or false, half a region, an empty region, a region outside
+  `[1, length + 1)`, a genome with two lengths, and a repeated region.
+- **Sample metadata:** as above. The stratifying column is read as text, so
+  `Yes` stays `Yes`. A sample with no value in it is left out and reported.
+- **ORFs (`--orfs`):** `read_gff` output saved as Parquet. Only `CDS`,
+  `rRNA`, `tRNA`, `tmRNA` and `ncRNA` are kept (`_io.ORF_TYPES`). `gene`
+  repeats its CDS, and `region` is the whole sequence. Coordinates stay as
+  `read_gff` wrote them, already half-open. Every ORF needs an `ID`; its
+  label is `gene`, else `locus_tag`, else `ID`; a missing strand becomes `.`.
+- **Which samples and genomes are used:** a sample needs metadata and an
+  aligned read in both layers. A genome needs a features row and an aligned
+  read in both layers. An aligned read is one with
+  `stop_position > position` (`_io.ALIGNED_ROWS`). Everything the metadata
+  or features name but this leaves out is reported by name. No sample or no
+  genome left, more than 10 groups, a read starting beyond its genome's
+  length, or ORFs on none of the genomes is an error.
 
 ## Outputs
 

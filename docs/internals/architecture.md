@@ -68,11 +68,12 @@ join and filter predicates.
 |---|---|
 | `cli.py` | The click command surface: argument parsing and glue only. `compress` input-source logic, plus the hidden `nonqiita-to-parquet` alias (a `copy.copy` of the command object) |
 | `_miint.py` | `connection()`, **the only place micov opens a DuckDB connection** and the only place the extension's install source (`MIINT_REPOSITORY`) is named. `REQUIRED_MIINT_FUNCTIONS` is checked on every connection |
-| `_io.py` | Input parsers (`load_genome_lengths`, `load_bed_cov`, `_test_has_header`), the SAM/BAM ingest (`compress_alignments`), and `write_coverage_parquet` |
+| `_io.py` | Input parsers (`load_genome_lengths`, `load_bed_cov`, `_test_has_header`, and the header rule `read_tsv_with_header`), the SAM/BAM ingest (`compress_alignments`), `write_coverage_parquet`, and `depth-plot`'s readers (`load_alignment_layer`, `load_depth_features`, `load_sample_groups`, `load_orfs`) |
 | `_view.py` | `View`: loads the Parquet pair, metadata and feature constraints into one connection, and exposes `coverages()`, `positions()`, `metadata()`, `feature_metadata()`, `feature_names()`, `sample_presence_absence()` as relations |
 | `_cov.py` | Ranking (`ordered_coverage`) and accumulation (`cumulative_covered`, `cumulative_curves`, `compute_cumulative`). Operates on dict-of-numpy tables; the accumulation itself is miint SQL |
 | `_plot.py` | `per_sample_plots` (the per-genome loop), `coverage_curve`, `add_monte`, `position_plot`, `ks_2samp`/`ks_table`, the single-sample `position-plot`, and `_write_delimited` |
 | `_quant.py` | `binning`'s SQL: `bin_list_sql`, `pos_to_bins`, `create_bin_list` |
+| `_depth.py` | `depth-plot`'s computation. So far `intersect_layers`: which samples and genomes are used, and the report of those left out. The command itself is not wired yet |
 | `_constants.py` | Frozen column names (`COLUMN_*`) and the three presence states |
 | `_utils.py` | The `micov` logger, and `sql_string`, the one way a value enters a SQL string literal |
 
@@ -106,6 +107,10 @@ that connection choose names that cannot collide:
 - `_io` uses `genome_lengths`, `alignment_groups`, `alignment_positions` and
   `bed_positions`, but on its own connection (`compress`, `cov-to-parquet`,
   `position-plot`), never on a `View`'s.
+- `depth-plot` never builds a `View`, because its inputs are not the Parquet
+  pair. On its own connection it uses the views `depth_layer` and
+  `breadth_layer`, and the tables `depth_features`, `sample_groups`, `orfs`,
+  `depth_roster` and `depth_genomes`.
 
 ## Platform
 

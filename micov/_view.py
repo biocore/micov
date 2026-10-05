@@ -11,17 +11,9 @@ from micov._constants import (
     COLUMN_START,
     COLUMN_STOP,
 )
+from micov._io import FEATURE_ID_COLUMNS, SAMPLE_ID_COLUMNS, read_tsv_with_header
 from micov._miint import connection
 from micov._utils import sql_string
-
-#: What the first column of a feature file (`--features-to-keep`,
-#: `--target-names`) must be called. Region files already had their `start`
-#: and `stop` matched by name; this makes the id column consistent with them.
-FEATURE_ID_COLUMNS = (COLUMN_GENOME_ID,)
-
-#: What the first column of `--sample-metadata` may be called: micov's own
-#: name, and `sample_name`, which Qiita exports and `example/` use.
-SAMPLE_ID_COLUMNS = (COLUMN_SAMPLE_ID, "sample_name")
 
 
 class View:
@@ -57,41 +49,6 @@ class View:
         if getattr(self, "con", None) is not None:
             self.close()
 
-    def _read_tsv(self, path, rename, first_column, all_varchar=False):
-        """Build a SELECT over a TSV, renaming its leading columns.
-
-        The leading columns are renamed to micov's canonical names -- for
-        feature names the second column too -- but the file must have a
-        header, and its first column must be one of `first_column`.
-
-        That requirement is the fix for a silent loss. A headerless file, such
-        as a taxonomy `lineages.txt`, had its first *row* read as column names,
-        so that genome or sample disappeared from every output with no error.
-        Insisting on the name is what makes a missing header detectable at
-        all: a data row's first field is not `genome_id`.
-
-        Returns SQL rather than a relation so callers can compose it into a
-        larger statement.
-        """
-        varchar = ", all_varchar=true" if all_varchar else ""
-        source = f"read_csv({sql_string(path)}, delim='\t', header=true{varchar})"
-        columns = [row[0] for row in self.con.sql(f"DESCRIBE FROM {source}").fetchall()]
-        if columns[0] not in first_column:
-            expected = " or ".join(repr(name) for name in first_column)
-            raise ValueError(
-                f"'{path}' must begin with a header line whose first column is "
-                f"named {expected}, but its first column is {columns[0]!r}. If "
-                "the file has no header, add one: micov would otherwise read "
-                "the first row as column names and silently drop it."
-            )
-        # not strict: `rename` covers only the leading columns, and the file
-        # carries however many more it likes
-        selected = [
-            f'"{old}" AS {new}' for old, new in zip(columns, rename, strict=False)
-        ]
-        selected += [f'"{column}"' for column in columns[len(rename) :]]
-        return f"SELECT {', '.join(selected)} FROM {source}"
-
     def _feature_filters(self):
         """Load the feature constraints and decide which filter mode applies.
 
@@ -109,8 +66,8 @@ class View:
                              FROM {sql_string(coverage)}""")
             return
 
-        query = self._read_tsv(
-            self.features_to_keep, [COLUMN_GENOME_ID], FEATURE_ID_COLUMNS
+        query = read_tsv_with_header(
+            self.con, self.features_to_keep, [COLUMN_GENOME_ID], FEATURE_ID_COLUMNS
         )
         columns = [row[0] for row in self.con.sql(f"DESCRIBE {query}").fetchall()]
 
@@ -179,7 +136,8 @@ class View:
 
         # constrain the metadata before any feature filtering as the unfocused
         # monte carlo curve assumes access to _any_ sample with _any_ coverage
-        metadata = self._read_tsv(
+        metadata = read_tsv_with_header(
+            self.con,
             self.sample_metadata,
             [COLUMN_SAMPLE_ID],
             SAMPLE_ID_COLUMNS,
@@ -437,7 +395,8 @@ class View:
                 FROM feature_metadata
             """)
         else:
-            names = self._read_tsv(
+            names = read_tsv_with_header(
+                self.con,
                 self.feature_names_source,
                 [COLUMN_GENOME_ID, COLUMN_NAME],
                 FEATURE_ID_COLUMNS,

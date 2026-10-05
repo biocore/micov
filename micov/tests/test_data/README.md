@@ -67,6 +67,95 @@ committed `example/parquet/` files, was removed and that corpus regenerated
 with `cov-to-parquet`. It is now the only producer of the Parquet pair from
 `.cov` input, so these goldens are the whole of its coverage.
 
+## The `dp_*` corpus (`depth-plot`)
+
+A **synthetic** corpus for `depth-plot`, small enough to compute every
+expected value by hand. The sources are the readable `dp.sam` and `dp.gff`.
+The Parquet inputs are derived from them through miint's own
+`read_alignments` and `read_gff` (block below), so their schemas are exactly
+what a user's files would have. The layer each read belongs to is in its
+QNAME, `sample:layer:id`, and `sample_id` is the part before the first `:`.
+
+| File | What |
+|---|---|
+| `dp_depth.parquet` | reads whose layer is `both` or `depth` |
+| `dp_breadth.parquet` | reads whose layer is `both` or `breadth` |
+| `dp_orfs.parquet` | every `dp.gff` line, through `read_gff` |
+| `dp_features.tsv` | `genome_id`, `length`, `is_circular` |
+| `dp_regions.tsv` | the same plus `start`/`stop`: two detail regions on GC, none on the others |
+| `dp_metadata.tsv` | `sample_id` and four columns giving 2, 3 and 4 groups, one with a `'` in a value |
+| `dp_target_names.tsv` | lineage-style names for GC and GL |
+
+**Genomes**
+
+| Genome | Length | Why |
+|---|---|---|
+| GC | 3,000, circular | the circular path; regions [1001, 1501) and [2501, 2901) |
+| GL | 2,000, linear | the linear path |
+| GX | 1,000 | depth layer only: left out and reported |
+| GB | 1,000 | breadth layer only: left out and reported |
+
+**Samples** (`group` / `trio` / `quad` / `site`)
+
+| Sample | Values | Layers | Why |
+|---|---|---|---|
+| S1–S3 | case / a,b,c / a,b,c / o'hare | both | case, n = 3 |
+| S4, S5 | control / a,b / d,a / midway | both | control, n = 2 |
+| S6 | case / c / b / midway | breadth only | left out and reported |
+| S7 | control / a / c / midway | depth only | left out and reported |
+| S8 | control / b / d / midway | neither | in the metadata with no reads: reported |
+| S9 | — | both | not in the metadata: left out by the user, so not reported |
+
+**Reads worth knowing about** (GC unless said)
+
+| Read | Span | Why |
+|---|---|---|
+| `S1:both:a1`, flag 256 | [1201, 1301) | a secondary alignment, which counts |
+| `S1:both:a2`, flag 16 | [951, 1051) | crosses 1001, a bin and region edge |
+| `S1:both:a3` | [2951, 3001) | ends exactly at the genome's end |
+| `S2:both:b1` `50M10D40M` | [1001, 1101) | the deletion counts toward depth |
+| `S3:both:c2` `30M100N30M` | [2601, 2761) | the skip counts toward breadth, not depth |
+| `S4:both:d2`, `d3` | [1221, 1321) twice | depth 2 |
+| `S4:both:d4`, flag 4 at 1500 | stop 0 | a placed unmapped read, which covers nothing |
+| `S2:depth:b4`, flag 4, RNAME `*` | — | unplaced: never a genome |
+| `S1:breadth:a6` (GL) | [1801, 1851) | breadth over gl_5, which has no depth |
+
+**ORFs.** Besides the plain ones: a `gene` and a `region` line, which are
+dropped; gc_2 (−, crosses 1001, label from `locus_tag`, `product` with a
+`'`); gc_4 (strand `.`, label from `ID`); gc_5 (under the `N` skip); gc_7
+(2951–3050, crossing the origin of circular GC); gl_5 (breadth but no depth);
+gx_1 on the left-out GX; gq_1 on GQ, which is not a feature.
+
+Regenerate the Parquet inputs, from the repository root:
+
+```bash
+D=micov/tests/test_data
+python - "$D" <<'PY'
+import sys
+from micov._miint import connection
+from micov._utils import sql_string
+D = sys.argv[1]
+con = connection()
+con.sql("""CREATE TABLE genome_lengths AS SELECT * FROM (VALUES
+               ('GC', 3000::BIGINT), ('GL', 2000::BIGINT),
+               ('GX', 1000::BIGINT), ('GB', 1000::BIGINT)) t(genome_id, length)""")
+con.sql(f"""CREATE TABLE a AS
+            SELECT split_part(read_id, ':', 1) AS sample_id,
+                   split_part(read_id, ':', 2) AS layer, *
+            FROM read_alignments({sql_string(D + '/dp.sam')},
+                                 reference_lengths := genome_lengths)""")
+for layer in ("depth", "breadth"):
+    con.sql(f"""COPY (SELECT * EXCLUDE (layer) FROM a
+                      WHERE layer IN ('both', {sql_string(layer)})
+                      ORDER BY sample_id, read_id, flags)
+                TO {sql_string(f'{D}/dp_{layer}.parquet')}
+                (FORMAT PARQUET, COMPRESSION zstd)""")
+con.sql(f"""COPY (SELECT * FROM read_gff({sql_string(D + '/dp.gff')})
+                  ORDER BY seqid, position, type)
+            TO {sql_string(D + '/dp_orfs.parquet')} (FORMAT PARQUET, COMPRESSION zstd)""")
+PY
+```
+
 ## `golden/`
 
 Frozen expected outputs. **Do not refresh one to make a test pass.** These

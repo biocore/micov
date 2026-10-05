@@ -66,7 +66,7 @@ test that guards it.
 
 ## Inputs
 
-- **Metadata and feature files must have a header.** `View._read_tsv` raises
+- **Metadata and feature files must have a header.** `_io.read_tsv_with_header` raises
   unless the first column is `genome_id` (features, regions,
   `--target-names`) or `sample_id`/`sample_name` (sample metadata).
   Otherwise a headerless file, such as a taxonomy `lineages.txt`, would have
@@ -80,6 +80,11 @@ test that guards it.
   `stop_position > position` in any aggregate over alignments.
   `test_alignments.test_an_unmapped_mate_adds_no_breadth` pins it; `example/`
   has no unmapped reads and could not show it.
+- **DuckDB's CSV sniffer reads `Yes`/`No` and `true`/`false` as BOOLEAN.**
+  A metadata group would then be named `True`, not `Yes`, as `example/`'s
+  `dog` column shows. Read metadata with `all_varchar=True`, and read
+  `depth-plot`'s features as text and cast each column explicitly
+  (`_io.load_depth_features`). `test_io` pins both.
 - **`_test_has_header` uses `==`, not `in`.** `COLUMN_GENOME_ID` is a plain
   string, so `x in COLUMN_GENOME_ID` is a substring test. A headerless
   lengths file whose first genome was `id` or `genome` silently lost that
@@ -94,7 +99,7 @@ test that guards it.
     in plain queries, for example `WHERE genome_id = ?`, so use them there.
   - `test_quoting.py` drives every literal site with an apostrophe path.
 - **Identifiers built from file headers are not escaped.** `"{column}"` in
-  `_read_tsv` and `load_genome_lengths` breaks on a header containing `"`.
+  `read_tsv_with_header` and `load_genome_lengths` breaks on a header containing `"`.
   This is known, and has not been fixed.
 - **`compress` reads its input once.** Anything needing a second pass breaks
   the stdin idiom.
