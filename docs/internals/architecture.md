@@ -24,8 +24,8 @@ Paper: Weng Y, Guccione C, McDonald D, et al., *Communications Biology* 2025,
 ## Runtime dependencies
 
 The package dependencies are `click`, `matplotlib` and `duckdb`. The
-`duckdb` pin is `>=1.5.4,<1.5.5`; its upper bound exists only because the
-miint repository has no build for v1.5.5 yet. The **miint DuckDB extension**
+`duckdb` pin is `>=1.5.4,<=1.5.5`; its upper bound exists only because the
+miint repository has no build newer than v1.5.5. The **miint DuckDB extension**
 is also required at runtime, but it is not a Python package and cannot be
 declared. `_miint.connection` installs and loads it (see [miint.md](miint.md)).
 `numpy` comes in through matplotlib and is used directly.

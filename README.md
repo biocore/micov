@@ -22,9 +22,9 @@ miint is currently published **unsigned**, so micov enables DuckDB's
 `allow_unsigned_extensions` on every connection. This is a development
 posture and will be tightened once signed builds are available.
 
-DuckDB is pinned to **1.5.4**. Extensions are built per DuckDB version, and
-the repository above carries a `v1.5.4` tree only; a newer DuckDB has no miint
-build to load.
+DuckDB is pinned to **1.5.4 or 1.5.5**. Extensions are built per DuckDB
+version, and the repository above carries trees up to `v1.5.5`; a newer DuckDB
+has no miint build to load.
 
 Supported platforms are **Linux** (x86_64, aarch64) and **macOS on Apple
 silicon**. No miint build is published for Windows or for Intel macOS, so

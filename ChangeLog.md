@@ -195,9 +195,9 @@ Backward incompatible changes (earlier in this release):
 * micov's alignment ingest now runs through miint's `read_alignments` and
   `compress_intervals` rather than its own CIGAR walker and numba interval
   merge. **`numba` is no longer a dependency.**
-* DuckDB is now pinned to `>=1.5.4,<1.5.5`. miint is published per DuckDB
-  version and the repository carries a `v1.5.4` tree only, so a newer DuckDB
-  has no extension build to load. The ceiling comes off when one is published.
+* DuckDB is now pinned to `>=1.5.4,<=1.5.5`. miint is published per DuckDB
+  version and the repository carries trees up to `v1.5.5`, so a newer DuckDB
+  has no extension build to load. The ceiling rises as builds are published.
 * The miint extension is now installed from `https://ftp.microbio.me/pub/miint`
   rather than the DuckDB community repository, and micov enables
   `allow_unsigned_extensions` because those builds are currently unsigned. A
