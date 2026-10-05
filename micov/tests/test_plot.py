@@ -318,6 +318,68 @@ class KsTableTests(unittest.TestCase):
         self.assertEqual(rows[0][4], "")
 
 
+class PositionPlotGroupOrderTests(unittest.TestCase):
+    """Where each metadata group sits along the position plot's x-axis.
+
+    Metadata is read as text and groups are laid out smallest first, ties in
+    text order, so a depth column came out as 10, 20, 24, 55, 56, 71, 30, 5,
+    270 -- no order a reader can follow. `sort_by_value` lays groups out by
+    value instead, numbers numerically. The default must not move: the scaled
+    plot's `x` is a frozen output.
+    """
+
+    #: Sizes chosen so that smallest first, text order and numeric order all
+    #: disagree. `None` is a blank metadata value, which `View` hands over
+    #: masked with `None` beneath; there are 146 `not applicable` and 28 blank
+    #: depths in the study this flag was written for.
+    GROUPS = ("5", "5", "5", "30", "270", "270", "not applicable", None, None)
+
+    def setUp(self):
+        self.d = mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+        n = len(self.GROUPS)
+        samples = np.array([f"S{i}" for i in range(n)], dtype=object)
+        self.metadata = {
+            "sample_id": samples,
+            "grp": np.ma.array(
+                self.GROUPS, mask=[g is None for g in self.GROUPS], dtype=object
+            ),
+        }
+        self.coverage = {
+            "sample_id": samples,
+            "genome_id": np.full(n, "G1", dtype=object),
+            "covered": np.full(n, 490, dtype=np.uint32),
+            "length": np.full(n, 1000, dtype=np.uint32),
+            "percent_covered": np.full(n, 49.0),
+        }
+        self.positions = {
+            "genome_id": np.full(n, "G1", dtype=object),
+            "start": np.full(n, 10, dtype=np.uint32),
+            "stop": np.full(n, 500, dtype=np.uint32),
+            "sample_id": samples,
+        }
+
+    def groups_left_to_right(self, **kwargs):
+        _plot.position_plot(self.metadata, self.coverage, self.positions, "G1",
+                            "grp", f"{self.d}/out", "G1", 0, 1000, scale=10000,
+                            **kwargs)
+        path = f"{self.d}/out.G1.G1.grp.position-plot-scaled.tsv.gz"
+        with gzip.open(path, "rt") as fp:
+            rows = sorted(csv.DictReader(fp, delimiter="\t"),
+                          key=lambda row: int(row["x"]))
+        return list(dict.fromkeys(row["group"] for row in rows))
+
+    def test_default_is_smallest_group_first(self):
+        # "--" is how the writer renders the blank group, which np.unique
+        # sorts as "?": 270 precedes it on the tie at two samples
+        self.assertEqual(self.groups_left_to_right(),
+                         ["30", "not applicable", "270", "--", "5"])
+
+    def test_sort_by_value_puts_numbers_in_numeric_order_then_text(self):
+        self.assertEqual(self.groups_left_to_right(sort_by_value=True),
+                         ["5", "30", "270", "not applicable", "--"])
+
+
 class ScaledPositionPlotTests(unittest.TestCase):
     """Which buckets the scaled position plot marks, and how wide they are.
 
@@ -475,6 +537,24 @@ class PerSamplePlotsPerGenomeTests(unittest.TestCase):
         for name, target, genomes in seen:
             with self.subTest(call=name, target=target):
                 self.assertEqual(genomes, {target})
+
+    def test_sort_by_value_reaches_both_position_plots(self):
+        """The PNG and the scaled `.tsv.gz` must lay groups out alike.
+
+        Only the scaled plot writes data, so a flag dropped on the way to the
+        unscaled one would leave the PNG disagreeing with its own `.tsv.gz`.
+        """
+        seen = []
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("sort_by_value"))
+
+        with mock.patch.object(_plot, "coverage_curve"), \
+             mock.patch.object(_plot, "position_plot", spy):
+            _plot.per_sample_plots(self.view, "grp", f"{self.d}/out", None, 5,
+                                   False, sort_by_value=True)
+
+        self.assertEqual(seen, [True] * 4, "2 genomes x 2 position plots")
 
     def test_unfocused_monte_carlo_draws_from_samples_of_any_genome(self):
         """S11 covers only G1, and must still be in G2's unfocused pool.

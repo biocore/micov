@@ -146,6 +146,11 @@ Other changes:
   are now `click`, `scipy`, `matplotlib` and `duckdb`.
 * `micov position-plot` now accepts a `.cov` file with a `#`-prefixed header,
   which it previously read as data.
+* **`micov per-sample --sort-by-metadata-value`** lays position plot groups out
+  by metadata value, comparing numbers numerically, then other text, then
+  blanks. Groups are otherwise laid out smallest first, with ties in text
+  order, so equal-sized depth groups read 270, 30, 5. Without the flag nothing
+  changes, and the coverage curves are unaffected either way.
 
 Backward incompatible changes (earlier in this release):
 

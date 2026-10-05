@@ -72,6 +72,10 @@ names cannot drift into separate implementations.
 - **`--percentile`** puts percentiles on the x-axis. It changes PNGs only:
   `test_percentile_does_not_alter_data_outputs` pins that the data files are
   unchanged.
+- **`--sort-by-metadata-value`** lays position plot groups out by value
+  instead of smallest first (see [curves-and-ks.md](curves-and-ks.md)). It
+  moves the scaled plot's `x` values, and only with the flag; the curves and
+  `.ks.csv` do not see it.
 - **`--target-names`** maps genome ids to display names, which appear in
   filenames and titles.
 

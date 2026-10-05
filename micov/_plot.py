@@ -156,6 +156,7 @@ def per_sample_plots(
     monte,
     monte_iters,
     percentile,
+    sort_by_value=False,
 ):
     """Construct plots for all genomes.
 
@@ -176,6 +177,8 @@ def per_sample_plots(
         One of (None, 'focused', 'unfocused'). See "add_monte" for more detail.
     monte_iters : int
         The number of Monte Carlo iterations to perform.
+    sort_by_value : bool, optional
+        Lay position plot groups out by metadata value. See `position_plot`.
     """
     # Positions stay in DuckDB and only one genome's rows are fetched at a
     # time. Fetching the whole table and masking it per genome was four full
@@ -266,6 +269,7 @@ def per_sample_plots(
             ymin,
             ymax,
             scale=None,
+            sort_by_value=sort_by_value,
         )
         position_plot(
             metadata,
@@ -278,6 +282,7 @@ def per_sample_plots(
             ymin,
             ymax,
             scale=10000,
+            sort_by_value=sort_by_value,
         )
 
 
@@ -730,6 +735,7 @@ def position_plot(
     ymin,
     ymax,
     scale=None,
+    sort_by_value=False,
 ):
     """Construct position plots stratified by metadata value.
 
@@ -758,6 +764,9 @@ def position_plot(
         If specified, represent the genome as `scale` number of buckets, or as
         `MIN_BUCKET_WIDTH` buckets if those would be narrower. A bucket is
         considered represented if any position within the bucket is covered
+    sort_by_value : bool, optional
+        If true, lay groups out by metadata value, numbers numerically, rather
+        than smallest group first
 
     """
     if scale is not None and scale <= 1:
@@ -797,7 +806,24 @@ def position_plot(
     # tied on size stay in value order.
     names, counts = np.unique(metadata[variable], return_counts=True)
     max_x = int(counts.sum())
-    order = np.argsort(counts, kind="stable")
+    if sort_by_value:
+        # numbers first, numerically, then the rest in the text order np.unique
+        # gave them; that order also breaks ties such as "1" and "1.0". A blank
+        # value arrives masked, and np.unique sorts a mask as "?" -- after the
+        # digits, before the letters -- so it is put last explicitly.
+        blank = np.ma.getmaskarray(names)
+
+        def by_value(row):
+            if blank[row]:
+                return (2, row)
+            try:
+                return (0, float(names[row]), row)
+            except ValueError:
+                return (1, row)
+
+        order = sorted(range(len(names)), key=by_value)
+    else:
+        order = np.argsort(counts, kind="stable")
 
     label_pos = []
     x_offset = 0

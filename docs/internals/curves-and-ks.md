@@ -124,8 +124,14 @@ Called twice per genome: `scale=None`, then `scale=10000`.
 
 1. Metadata is restricted to samples with positions on this genome.
 2. Groups are the sorted unique values, and a group's sorted index is its
-   colour (`C{index}`).
+   colour (`C{index}`). Values are text, so `"30" < "5"`. A blank value is
+   masked, and `np.unique` sorts a mask as `"?"`: after the digits, before
+   the letters.
 3. Groups are laid out **smallest first**, with ties kept in value order.
+   With `sort_by_value` (`--sort-by-metadata-value`) they are laid out by
+   value instead: values that parse as numbers, numerically, then other text
+   in sorted order, then blanks. Colours do not change, so a group keeps the
+   colour it has in the curve plots.
 4. Within a group, samples are ranked by `ordered_coverage`. With **exactly
    two groups** the second is drawn in reverse, so the two mirror each other.
 5. `ymin` and `ymax` are `feature_metadata`'s `start` and `stop`. In genome
