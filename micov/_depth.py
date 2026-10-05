@@ -49,6 +49,10 @@ DETAIL_MAX_BINS = 1_500
 #: Depth quantiles drawn per group: the IQR's edges and the median.
 QUARTILES = (0.25, 0.5, 0.75)
 
+#: Added to both groups' scaled ORF depth before the contrast's ratio, so an
+#: ORF with no depth in one group gives a large, finite contrast.
+CONTRAST_PSEUDOCOUNT = 0.05
+
 
 def _ids(con, sql):
     return {row[0] for row in con.sql(sql).fetchall()}
@@ -81,7 +85,8 @@ def intersect_layers(con, depth_view, breadth_view, *, orfs):
     ValueError
         If no sample or no genome is left, if more than `MAX_GROUPS` groups
         are, if an aligned read starts beyond its genome's length, or if
-        `orfs` and no ORF is on a genome that is left.
+        `orfs` and no ORF is on a genome that is left, or an ORF on one is
+        outside it.
     """
     def aligned(view, column):
         return _ids(
@@ -168,6 +173,26 @@ def intersect_layers(con, depth_view, breadth_view, *, orfs):
             raise ValueError(
                 "No ORF is on a genome being plotted; the ORFs' seqids are "
                 f"{_examples(seqids)}. A seqid must equal the genome_id."
+            )
+        # GFF3 writes an ORF across a circular genome's origin with an end
+        # past the length; `orf_segments` splits it there
+        rows = con.sql(f"""SELECT o.{COLUMN_GENOME_ID} || ':' || o.orf_id
+                                      || ' [' || o.{COLUMN_START} || ', '
+                                      || o.{COLUMN_STOP} || '), length '
+                                      || g.{COLUMN_LENGTH}
+                           FROM {ORFS_TABLE} o
+                               JOIN {GENOMES_TABLE} g USING ({COLUMN_GENOME_ID})
+                           WHERE o.{COLUMN_START} > g.{COLUMN_LENGTH}
+                               OR o.{COLUMN_STOP} - o.{COLUMN_START}
+                                   > g.{COLUMN_LENGTH}
+                               OR (NOT g.is_circular
+                                   AND o.{COLUMN_STOP} > g.{COLUMN_LENGTH} + 1)
+                           ORDER BY 1""").fetchall()
+        if rows:
+            raise ValueError(
+                "An ORF must lie within its genome; only a circular genome's "
+                "may run past the end, across the origin. These do not: "
+                f"{_examples(rows)}"
             )
 
 
@@ -297,7 +322,7 @@ def detail_bin_bp(start, stop):
     return max(1, -(-(stop - start) // DETAIL_MAX_BINS))
 
 
-def genome_bins(con, depth_view, genome_id, length, edge_sets):
+def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None):
     """Bin one genome's per-base group statistics, in one pass of windows.
 
     At each base, each group's depth Q1, median, Q3 and mean are taken across
@@ -307,6 +332,11 @@ def genome_bins(con, depth_view, genome_id, length, edge_sets):
     and is in the union if any base is: so the median drawn is a per-base
     median, never a median of per-sample averages.
 
+    With `orfs`, the same pass gives each ORF's statistics per group: each
+    sample's mean depth over the ORF, then the group's quantiles of those --
+    the typical sample's depth, where the bins' median is the typical base's
+    -- and the mean, prevalence and union breadth over the ORF's bases.
+
     Requires `ROSTER_TABLE` and `BREADTH_INTERVALS_TABLE`. Replaces
     `DEPTH_ALIGNMENTS_TABLE`.
 
@@ -315,13 +345,18 @@ def genome_bins(con, depth_view, genome_id, length, edge_sets):
     edge_sets : list of np.ndarray
         Bin edges within [1, `length` + 1], one array per table: the overview
         and each detail region.
+    orfs : dict of np.ndarray, optional
+        This genome's ORFs, as `genome_orfs` returns them.
 
     Returns
     -------
-    list of dict
+    bins : list of dict
         One table per edge set, a row per group (sorted) and bin: `group`,
         `bin_start`, `bin_stop`, `q1`, `median`, `q3`, `mean`, `prevalence`
         and `union`, each a numpy array.
+    orf_table : dict or None
+        With `orfs`, a row per ORF and group (sorted): the columns of
+        `_io.write_orf_table`, each a numpy array.
     """
     roster = con.sql(f"""SELECT group_name FROM {ROSTER_TABLE}
                          ORDER BY sample_idx""").fetchnumpy()["group_name"]
@@ -338,27 +373,33 @@ def genome_bins(con, depth_view, genome_id, length, edge_sets):
             for g in range(len(groups))]
     stage_depth(con, depth_view, genome_id)
 
+    spans = [(edges[:-1], edges[1:]) for edges in edge_sets]
+    if orfs is not None:
+        segment_orf, *segments = orf_segments(orfs[COLUMN_START],
+                                              orfs[COLUMN_STOP], length)
+        spans.append(segments)
+        sample_depth = np.zeros((len(roster), len(segment_orf)), np.int64)
+
     # q1, median, q3 (x4), depth, covering samples, covered: integer sums
-    totals = [np.zeros((len(groups), 6, len(edges) - 1), np.int64)
-              for edges in edge_sets]
+    totals = [np.zeros((len(groups), 6, len(starts)), np.int64)
+              for starts, _ in spans]
     width = window_size(len(roster), length)
     for w0 in range(1, length + 1, width):
         w1 = min(w0 + width, length + 1)
         depth = window_depth(con, len(roster), w0, w1)
+        if orfs is not None:
+            _add_span_sums(sample_depth, depth, *segments, w0, w1)
         for g, rows in enumerate(members):
             covering = coverage_counts(*ends[g], w0, w1)
             per_base = np.vstack([quartiles_x4(depth[rows]),
                                   depth[rows].sum(axis=0, dtype=np.int64),
                                   covering, covering > 0])
-            prefix = np.zeros((6, w1 - w0 + 1), np.int64)
-            np.cumsum(per_base, axis=1, out=prefix[:, 1:])
-            for edges, total in zip(edge_sets, totals, strict=True):
-                at = np.clip(edges, w0, w1) - w0
-                total[g] += prefix[:, at[1:]] - prefix[:, at[:-1]]
+            for (starts, stops), total in zip(spans, totals, strict=True):
+                _add_span_sums(total[g], per_base, starts, stops, w0, w1)
 
     sizes = np.array([len(rows) for rows in members])[:, None]
     tables = []
-    for edges, total in zip(edge_sets, totals, strict=True):
+    for edges, total in zip(edge_sets, totals[: len(edge_sets)], strict=True):
         bp = np.diff(edges)
         tables.append({
             "group": np.repeat(groups, len(bp)),
@@ -371,4 +412,120 @@ def genome_bins(con, depth_view, genome_id, length, edge_sets):
             "prevalence": (total[:, 4] / (sizes * bp)).ravel(),
             "union": (total[:, 5] > 0).ravel(),
         })
-    return tables
+    if orfs is None:
+        return tables, None
+
+    def per_orf(sums):
+        """Add each ORF's segments up: its last axis becomes ORFs."""
+        out = np.zeros((*sums.shape[:-1], len(orfs[COLUMN_START])), np.int64)
+        np.add.at(out.T, segment_orf, sums.T)
+        return out
+
+    depth_sum = per_orf(sample_depth)
+    breadth = per_orf(totals[-1])
+    bp = orfs[COLUMN_STOP] - orfs[COLUMN_START]
+    quartiles = np.stack([np.quantile(depth_sum[rows] / bp, QUARTILES, axis=0)
+                          for rows in members])
+    columns = {
+        "depth_q1": quartiles[:, 0],
+        "depth_median": quartiles[:, 1],
+        "depth_q3": quartiles[:, 2],
+        "depth_mean": np.stack([depth_sum[rows].sum(axis=0) for rows in members])
+                      / (sizes * bp),
+        "prevalence": breadth[:, 4] / (sizes * bp),
+        "union_breadth": breadth[:, 5] / bp,
+    }
+    # ORF by ORF, the groups within each: transpose (group, ORF) arrays
+    orf_table = {
+        COLUMN_GENOME_ID: np.full(len(bp) * len(groups), genome_id, dtype=object),
+        **{key: np.repeat(orfs[key], len(groups))
+           for key in ("orf_id", "label", "type", COLUMN_START, COLUMN_STOP,
+                       "strand")},
+        "group": np.tile(groups, len(bp)),
+        "n_samples": np.tile(sizes[:, 0], len(bp)),
+        **{key: values.T.ravel() for key, values in columns.items()},
+        "contrast": np.repeat(
+            orf_contrast(quartiles[:, 1], groups, genome_id), len(groups)
+        ),
+    }
+    return tables, orf_table
+
+
+def _add_span_sums(total, per_base, starts, stops, w0, w1):
+    """Add `per_base`'s rows, summed over each span's part of [w0, w1).
+
+    `total` is rows x spans. Only the spans the window overlaps are touched,
+    so a window costs the same however many spans the genome has.
+    """
+    here = np.flatnonzero((starts < w1) & (stops > w0))
+    prefix = np.zeros((len(per_base), w1 - w0 + 1), np.int64)
+    np.cumsum(per_base, axis=1, out=prefix[:, 1:])
+    total[:, here] += (prefix[:, np.clip(stops[here], w0, w1) - w0]
+                       - prefix[:, np.clip(starts[here], w0, w1) - w0])
+
+
+def genome_orfs(con, genome_id):
+    """Return one genome's ORFs, by position, as numpy arrays.
+
+    The columns are `orf_id`, `label`, `type`, `start`, `stop` and `strand`.
+    Requires `ORFS_TABLE`.
+    """
+    return con.execute(
+        f"""SELECT orf_id, label, type, {COLUMN_START}, {COLUMN_STOP}, strand
+            FROM {ORFS_TABLE} WHERE {COLUMN_GENOME_ID} = ?
+            ORDER BY {COLUMN_START}, {COLUMN_STOP}, orf_id, type""",
+        [genome_id],
+    ).fetchnumpy()
+
+
+def orf_segments(starts, stops, length):
+    """Split ORFs that run past the genome's end, across its origin.
+
+    GFF3 writes such an ORF, on a circular genome, with an end beyond the
+    length: [start, stop) becomes [start, length + 1) and [1, stop - length).
+
+    Returns
+    -------
+    tuple of np.ndarray
+        Each segment's ORF index, start and stop.
+    """
+    wraps = np.flatnonzero(stops > length + 1)
+    return (np.concatenate([np.arange(len(starts)), wraps]),
+            np.concatenate([starts, np.ones(len(wraps), starts.dtype)]),
+            np.concatenate([np.minimum(stops, length + 1), stops[wraps] - length]))
+
+
+def orf_contrast(median, groups, genome_id):
+    """Compare two groups' depth, ORF by ORF, each scaled by its typical ORF.
+
+    ``log2((B / norm B + c) / (A / norm A + c))``, where A and B are the
+    groups' per-ORF median depth, in sorted order, a group's norm is the
+    median of those over the genome's ORFs, and c is `CONTRAST_PSEUDOCOUNT`.
+    Positive where the second group is the higher. Scaling makes a group
+    sequenced deeper throughout no different from the other.
+
+    Parameters
+    ----------
+    median : np.ndarray
+        Groups x ORFs.
+
+    Returns
+    -------
+    np.ndarray
+        Per ORF; NaN unless there are exactly two groups, and NaN with a
+        warning if either group's norm is 0.
+    """
+    contrast = np.full(median.shape[1], np.nan)
+    if len(groups) != 2 or median.shape[1] == 0:
+        return contrast
+    norm = np.median(median, axis=1)
+    zero = [group for group, value in zip(groups, norm, strict=True) if value == 0]
+    if zero:
+        logger.warning(
+            f"No ORF contrast for {genome_id}: its median ORF has median depth "
+            f"0 in {', '.join(zero)}, so there is no typical depth to scale by."
+        )
+        return contrast
+    a, b = median / norm[:, None]
+    return np.log2((b + CONTRAST_PSEUDOCOUNT) / (a + CONTRAST_PSEUDOCOUNT))
+

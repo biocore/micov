@@ -13,11 +13,14 @@ The error messages are asserted verbatim, including the stray trailing quote in
 wrong and because they were the evidence that the two implementations agreed.
 """
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 import duckdb
+import numpy as np
 
 from micov._constants import (
     COLUMN_GENOME_ID,
@@ -35,6 +38,7 @@ from micov._io import (
     load_orfs,
     load_sample_groups,
     read_tsv_with_header,
+    write_orf_table,
 )
 from micov._miint import connection
 
@@ -501,6 +505,93 @@ class OrfTests(DepthInputTestCase):
                          TO '{path}' (FORMAT PARQUET)""")
         with self.assertRaisesRegex(ValueError, "attributes"):
             self.load(path)
+
+
+class WriteOrfTableTests(DepthInputTestCase):
+    """`depth-plot`'s per-ORF table: one Parquet per run, for every genome.
+
+    It is the command's only tabular output, so its columns, their order and
+    their types are pinned here literally, like the Parquet pair's.
+    """
+
+    SCHEMA: ClassVar[list] = [
+        ("genome_id", "VARCHAR"), ("orf_id", "VARCHAR"), ("label", "VARCHAR"),
+        ("type", "VARCHAR"), ("start", "BIGINT"), ("stop", "BIGINT"),
+        ("strand", "VARCHAR"), ("group", "VARCHAR"), ("n_samples", "BIGINT"),
+        ("depth_q1", "DOUBLE"), ("depth_median", "DOUBLE"),
+        ("depth_q3", "DOUBLE"), ("depth_mean", "DOUBLE"),
+        ("prevalence", "DOUBLE"), ("union_breadth", "DOUBLE"),
+        ("contrast", "DOUBLE"),
+    ]
+
+    @staticmethod
+    def table(genome, contrast):
+        """Two rows, one ORF in two groups, as `genome_statistics` returns."""
+        def text(*values):
+            return np.array(values, dtype=object)
+
+        return {
+            "genome_id": text(genome, genome), "orf_id": text("o1", "o1"),
+            "label": text("dnaA", "dnaA"), "type": text("CDS", "CDS"),
+            "start": np.array([1, 1]), "stop": np.array([301, 301]),
+            "strand": text("+", "+"), "group": text("case", "o'hare"),
+            "n_samples": np.array([3, 2]),
+            "depth_q1": np.array([0.25, 0.0]), "depth_median": np.array([0.5, 0.0]),
+            "depth_q3": np.array([0.75, 0.0]), "depth_mean": np.array([0.5, 0.0]),
+            "prevalence": np.array([0.5, 0.0]),
+            "union_breadth": np.array([0.75, 0.0]),
+            "contrast": np.array([contrast, contrast]),
+        }
+
+    def write_tables(self, *tables):
+        directory = f"{self.temp_dir.name}/o'brien data"
+        os.mkdir(directory)
+        return write_orf_table(self.con, list(tables), f"{directory}/run", "group")
+
+    def read(self, path, what="*"):
+        return self.con.execute(
+            f"SELECT {what} FROM read_parquet(?)", [path]
+        ).fetchall()
+
+    def test_one_file_per_run_named_by_the_output_and_the_variable(self):
+        path = self.write_tables(self.table("GC", 0.5), self.table("GL", 1.0))
+        self.assertEqual(
+            path,
+            f"{self.temp_dir.name}/o'brien data/run.group.depth-plot-orfs.parquet",
+        )
+        self.assertEqual(
+            self.read(path, 'genome_id, "group"'),
+            [("GC", "case"), ("GC", "o'hare"), ("GL", "case"), ("GL", "o'hare")],
+        )
+
+    def test_columns(self):
+        path = self.write_tables(self.table("GC", 0.5))
+        self.assertEqual(
+            [row[:2] for row in self.con.execute(
+                "DESCRIBE FROM read_parquet(?)", [path]).fetchall()],
+            self.SCHEMA,
+        )
+
+    def test_values(self):
+        path = self.write_tables(self.table("GC", 0.5))
+        self.assertEqual(
+            self.read(path)[0],
+            ("GC", "o1", "dnaA", "CDS", 1, 301, "+", "case", 3, 0.25, 0.5, 0.75,
+             0.5, 0.5, 0.75, 0.5),
+        )
+
+    def test_a_missing_contrast_is_null(self):
+        """NaN would read as a number in most tools; NULL says there is none."""
+        path = self.write_tables(self.table("GC", float("nan")))
+        self.assertEqual(self.read(path, "contrast"), [(None,), (None,)])
+
+    def test_compressed_like_the_parquet_pair(self):
+        path = self.write_tables(self.table("GC", 0.5))
+        self.assertEqual(
+            {row[0] for row in self.con.execute(
+                "SELECT compression FROM parquet_metadata(?)", [path]).fetchall()},
+            {"ZSTD"},
+        )
 
 
 if __name__ == "__main__":

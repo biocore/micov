@@ -29,8 +29,8 @@ At the time of writing:
 
 | Tier | Result |
 |---|---|
-| Fast | 290 passed, 10 skipped |
-| Full | 300 passed, 0 skipped |
+| Fast | 315 passed, 10 skipped |
+| Full | 325 passed, 0 skipped |
 
 The 10 fast-tier skips are the `requires_full_tier` tests. Any other skip
 needs a reason: `requires_miint_build` is legitimate, and a skip you caused
@@ -67,8 +67,8 @@ samples. Test those with synthetic data spanning thousands of genomes; see
 | `test_view.py` | `View` modes, region clipping and breadth, presence, feature names, the header rule |
 | `test_plot.py` | `position_plot_segments`, `ks_2samp`, `ks_table`, the per-genome loop's slicing, Monte Carlo pool and figure closing, and group colours: their colour-blind separation, dashes past five groups, the warning past ten |
 | `test_quant.py` | Bin edges and hit counts |
-| `test_io.py` | Lengths parsing and header detection; BED3 loading; the shared header rule; `depth-plot`'s readers |
-| `test_depth.py` | `depth-plot`'s computation: which samples and genomes are used and what is reported, windowed per-base depth, merged breadth, and the binned group statistics, hand-computed on the `dp_*` fixtures and on literal reads, plus window-size invariance and a CIGAR-walking oracle |
+| `test_io.py` | Lengths parsing and header detection; BED3 loading; the shared header rule; `depth-plot`'s readers and its per-ORF writer, whose columns and types are pinned literally |
+| `test_depth.py` | `depth-plot`'s computation: which samples and genomes are used and what is reported, windowed per-base depth, merged breadth, the binned group statistics and the per-ORF statistics and contrast, hand-computed on the `dp_*` fixtures and on literal reads, plus window-size invariance and a CIGAR-walking oracle for both |
 | `test_miint.py` | Connection, overrides, error messages, capability check |
 | `test_quoting.py` | `sql_string`, and every SQL literal site driven with a path containing `'` |
 | `test_dependencies.py` | No module imports `polars`, `numba`, `pyarrow` or `scipy` |

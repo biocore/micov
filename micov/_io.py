@@ -6,6 +6,8 @@ import sys
 import tempfile
 from contextlib import contextmanager
 
+import numpy as np
+
 from ._constants import (
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
@@ -640,3 +642,60 @@ def load_orfs(con, path):
             f"{len(rows)} ORF(s) in '{path}' have no ID attribute, which keys "
             f"the per-ORF table: {_examples(rows)}"
         )
+
+
+
+#: `write_orf_table` registers the per-ORF statistics under this name.
+ORF_STATISTICS_RELATION = "depth_orf_statistics"
+
+
+def write_orf_table(con, tables, output, variable):
+    """Write `depth-plot`'s per-ORF statistics, every genome's, to one Parquet.
+
+    The columns, in order: `genome_id`, `orf_id`, `label`, `type`, `start`,
+    `stop` (half-open, as `read_gff` gives them), `strand`, `group`,
+    `n_samples`, then the group's `depth_q1`, `depth_median`, `depth_q3`,
+    `depth_mean`, `prevalence`, `union_breadth`, and the ORF's `contrast`.
+    A missing contrast is NaN in the tables and NULL in the file: DuckDB reads
+    a numpy NaN as NULL.
+
+    Parameters
+    ----------
+    tables : list of dict
+        `_depth.genome_statistics`' ORF tables, one per genome.
+    output, variable : str
+        The file is ``{output}.{variable}.depth-plot-orfs.parquet``.
+
+    Returns
+    -------
+    str
+        The path written.
+    """
+    path = f"{output}.{variable}.depth-plot-orfs.parquet"
+    con.register(
+        ORF_STATISTICS_RELATION,
+        {key: np.concatenate([table[key] for table in tables]) for key in tables[0]},
+    )
+    try:
+        con.sql(f"""COPY (SELECT {COLUMN_GENOME_ID}::VARCHAR AS {COLUMN_GENOME_ID},
+                                 orf_id::VARCHAR AS orf_id,
+                                 label::VARCHAR AS label,
+                                 type::VARCHAR AS type,
+                                 {COLUMN_START}::BIGINT AS {COLUMN_START},
+                                 {COLUMN_STOP}::BIGINT AS {COLUMN_STOP},
+                                 strand::VARCHAR AS strand,
+                                 "group"::VARCHAR AS "group",
+                                 n_samples::BIGINT AS n_samples,
+                                 depth_q1::DOUBLE AS depth_q1,
+                                 depth_median::DOUBLE AS depth_median,
+                                 depth_q3::DOUBLE AS depth_q3,
+                                 depth_mean::DOUBLE AS depth_mean,
+                                 prevalence::DOUBLE AS prevalence,
+                                 union_breadth::DOUBLE AS union_breadth,
+                                 contrast::DOUBLE AS contrast
+                          FROM {ORF_STATISTICS_RELATION})
+                    TO {sql_string(path)}
+                        (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
+    finally:
+        con.unregister(ORF_STATISTICS_RELATION)
+    return path

@@ -10,9 +10,11 @@ The `dp_*` fixtures are described in `test_data/README.md`.
 """
 
 import itertools
+import math
 import re
 import shutil
 import unittest
+import warnings
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import ClassVar
@@ -26,13 +28,17 @@ from micov._depth import (
     DEPTH_ALIGNMENTS_TABLE,
     DETAIL_MAX_BINS,
     GENOMES_TABLE,
+    OVERVIEW_BIN_BP,
     ROSTER_TABLE,
     WINDOW_CELLS,
     coverage_counts,
     detail_bin_bp,
     display_bin_edges,
-    genome_bins,
+    genome_orfs,
+    genome_statistics,
     intersect_layers,
+    orf_contrast,
+    orf_segments,
     quartiles_x4,
     stage_breadth,
     stage_depth,
@@ -203,6 +209,30 @@ class IntersectLayersTests(DepthTestCase):
         with self.assertRaisesRegex(ValueError, "GQ"):
             self.resolve(orfs=orfs)
 
+    def orfs_from_gff(self, lines):
+        gff = self.write("o.gff", "##gff-version 3\n" + lines)
+        path = f"{self.d}/o.parquet"
+        self.con.sql(f"COPY (FROM read_gff('{gff}')) TO '{path}' (FORMAT PARQUET)")
+        return path
+
+    def test_orfs_outside_their_genome_are_an_error_naming_them(self):
+        """Checked before any genome is computed, so a run that fails here
+        writes nothing. Only a circular genome's ORF may run past its end,
+        across the origin (gc_7 in dp_orfs does, and is fine)."""
+        for line, why in (
+            ("GL\tt\tCDS\t1951\t2050\t.\t+\t0\tID=bad\n", "past a linear end"),
+            ("GC\tt\tCDS\t3001\t3100\t.\t+\t0\tID=bad\n", "starts beyond"),
+            ("GC\tt\tCDS\t2001\t5100\t.\t+\t0\tID=bad\n", "longer than GC"),
+        ):
+            with self.subTest(why):
+                orfs = self.orfs_from_gff(
+                    "GL\tt\tCDS\t1\t30\t.\t+\t0\tID=fine\n" + line
+                )
+                with (self.assertLogs("micov", level="WARNING"),
+                      self.assertRaisesRegex(ValueError, r"bad") as raised):
+                    self.resolve(orfs=orfs)
+                self.assertNotIn("fine", str(raised.exception))
+
     def test_orfs_on_other_genomes_are_ignored(self):
         """dp_orfs also has ORFs on GX (left out) and GQ (not a feature)."""
         with self.assertLogs("micov", level="WARNING"):
@@ -249,7 +279,7 @@ class SyntheticTestCase(unittest.TestCase):
         stage_breadth(self.con, "layer")
 
     def bins(self, edge_sets, length=8):
-        return genome_bins(self.con, "layer", "G", length, edge_sets)
+        return genome_statistics(self.con, "layer", "G", length, edge_sets)[0]
 
 
 class StageDepthTests(DepthTestCase):
@@ -411,7 +441,7 @@ class StageBreadthTests(DepthTestCase):
 class CoverageCountsTests(unittest.TestCase):
     """How many of the given (merged, so one per sample) intervals cover each
     base of [w0, w1). The caller sorts the starts and stops, as
-    `genome_bins` does once per genome."""
+    `genome_statistics` does once per genome."""
 
     @staticmethod
     def counts(starts, stops, w0, w1):
@@ -584,7 +614,9 @@ class FixtureBinsTests(DepthTestCase):
     def bins(self, genome, length, edge_sets):
         self.resolve_quietly()
         stage_breadth(self.con, "breadth_layer")
-        return genome_bins(self.con, "depth_layer", genome, length, edge_sets)
+        return genome_statistics(
+            self.con, "depth_layer", genome, length, edge_sets
+        )[0]
 
     def assertBins(self, table, expected):
         for (group, start), values in expected.items():
@@ -659,9 +691,9 @@ def random_reads(rng, samples, length, count):
     return reads
 
 
-def oracle_bins(groups, reads, length, edges):
-    """Per-base depth by walking each CIGAR in Python, then binned with
-    numpy: independent of miint and of the windows."""
+def oracle_per_base(groups, reads, length):
+    """Per-base depth and breadth by walking each CIGAR in Python:
+    independent of miint and of the windows. Rows are samples in order."""
     samples = sorted(groups)
     depth = np.zeros((len(samples), length + 1), np.int64)
     cover = np.zeros((len(samples), length + 1), bool)
@@ -673,7 +705,11 @@ def oracle_bins(groups, reads, length, edges):
             if op in "M=XDN":
                 at += int(count)
         cover[i, position:stop] = True
-    depth, cover = depth[:, 1:], cover[:, 1:]
+    return samples, depth[:, 1:], cover[:, 1:]
+
+
+def oracle_bins(groups, reads, length, edges):
+    samples, depth, cover = oracle_per_base(groups, reads, length)
     table = {key: [] for key in GenomeBinsTests.COLUMNS}
     for group in sorted(set(groups.values())):
         rows = [i for i, s in enumerate(samples) if groups[s] == group]
@@ -733,6 +769,351 @@ class WindowInvarianceTests(SyntheticTestCase):
                         )
                     else:
                         self.assertEqual(table[key].tolist(), expected[key])
+
+
+
+ORF_COLUMNS = ["genome_id", "orf_id", "label", "type", "start", "stop", "strand",
+               "group", "n_samples", "depth_q1", "depth_median", "depth_q3",
+               "depth_mean", "prevalence", "union_breadth", "contrast"]
+
+
+def synthetic_orfs(spans):
+    """ORFs o0, o1, ... over the given [start, stop) spans, as `genome_orfs`
+    returns them."""
+    def text(values):
+        return np.array(values, dtype=object)
+
+    return {"orf_id": text([f"o{i}" for i in range(len(spans))]),
+            "label": text([f"L{i}" for i in range(len(spans))]),
+            "type": text(["CDS"] * len(spans)),
+            "start": np.array([a for a, _ in spans], np.int64),
+            "stop": np.array([b for _, b in spans], np.int64),
+            "strand": text(["+"] * len(spans))}
+
+
+class OrfSegmentsTests(unittest.TestCase):
+    def test_an_orf_within_the_genome_is_one_segment(self):
+        index, starts, stops = orf_segments(
+            np.array([1, 2901]), np.array([301, 3001]), 3000
+        )
+        self.assertEqual(
+            (index.tolist(), starts.tolist(), stops.tolist()),
+            ([0, 1], [1, 2901], [301, 3001]),
+        )
+
+    def test_an_orf_across_the_origin_splits_there(self):
+        """GFF3 writes an ORF across a circular genome's origin with an end
+        past the length: gc_7, 2951-3050 on the 3,000 bp GC."""
+        index, starts, stops = orf_segments(
+            np.array([101, 2951]), np.array([201, 3051]), 3000
+        )
+        self.assertEqual(
+            sorted(zip(index.tolist(), starts.tolist(), stops.tolist(),
+                       strict=True)),
+            [(0, 101, 201), (1, 1, 51), (1, 2951, 3001)],
+        )
+
+
+class OrfStatisticsTests(SyntheticTestCase):
+    """One row per ORF and group; each sample's mean depth over the ORF first,
+    then the group's quantiles of those."""
+
+    def orf_table(self, spans, length=8):
+        _, table = genome_statistics(
+            self.con, "layer", "G", length,
+            [display_bin_edges(1, length + 1, length)], synthetic_orfs(spans),
+        )
+        return table
+
+    def row(self, table, orf_id, group):
+        (i,) = np.flatnonzero(
+            (table["orf_id"] == orf_id) & (table["group"] == group)
+        )
+        return {key: table[key][i].item() if hasattr(table[key][i], "item")
+                else table[key][i] for key in ORF_COLUMNS}
+
+    def test_columns_and_rows(self):
+        """ORF by ORF, the groups sorted within each."""
+        self.build({"S0": "b", "S1": "a", "S2": "b", "S3": "c"},
+                   [("S0", 1, 3, "2M")])
+        table = self.orf_table([(1, 3), (5, 7)])
+        self.assertEqual(list(table), ORF_COLUMNS)
+        self.assertEqual(table["orf_id"].tolist(), ["o0"] * 3 + ["o1"] * 3)
+        self.assertEqual(table["group"].tolist(), ["a", "b", "c"] * 2)
+        self.assertEqual(table["n_samples"].tolist(), [1, 2, 1] * 2)
+        self.assertEqual(table["genome_id"].tolist(), ["G"] * 6)
+        self.assertEqual(table["label"].tolist(), ["L0"] * 3 + ["L1"] * 3)
+        self.assertEqual(table["start"].tolist(), [1, 1, 1, 5, 5, 5])
+        self.assertEqual(table["stop"].tolist(), [3, 3, 3, 7, 7, 7])
+
+    def test_the_median_is_of_each_samples_mean_depth(self):
+        """Over the two bases, S0 has depth 2 then 0, S1 0 then 2, and S2 1
+        then 0: means 1, 1 and 0.5, whose median is 1. Per base first would
+        give medians 1 and 0, so 0.5 -- a typical sample this ORF does not
+        have."""
+        reads = ([("S0", 1, 2, "1M")] * 2 + [("S1", 2, 3, "1M")] * 2
+                 + [("S2", 1, 2, "1M")])
+        self.build({"S0": "a", "S1": "a", "S2": "a"}, reads)
+        row = self.row(self.orf_table([(1, 3)]), "o0", "a")
+        self.assertEqual(
+            [row[k] for k in ("depth_q1", "depth_median", "depth_q3")],
+            [0.75, 1.0, 1.0],
+        )
+        self.assertEqual(row["depth_mean"], 5 / 6)
+
+    def test_an_orf_without_coverage_is_zero_not_nan(self):
+        self.build({"S0": "a"}, [("S0", 1, 3, "2M")])
+        row = self.row(self.orf_table([(5, 8)]), "o0", "a")
+        self.assertEqual(
+            [row[k] for k in ORF_COLUMNS[9:15]], [0.0] * 6
+        )
+
+    def test_prevalence_and_union_breadth(self):
+        """S0 covers 1-4 with a skip (depth only at 1 and 4), S1 covers 2-4:
+        7 of the 8 (sample, base) pairs, and all 4 bases."""
+        self.build({"S0": "a", "S1": "a"},
+                   [("S0", 1, 5, "1M2N1M"), ("S1", 2, 5, "3M")])
+        row = self.row(self.orf_table([(1, 5)]), "o0", "a")
+        self.assertEqual(row["prevalence"], 7 / 8)
+        self.assertEqual(row["union_breadth"], 1.0)
+        self.assertEqual(row["depth_mean"], 5 / 8)
+
+    def test_an_orf_across_the_origin_counts_both_ends(self):
+        """[7, 11) on an 8 bp genome is bases 7, 8, 1 and 2."""
+        self.build({"S0": "a"}, [("S0", 1, 3, "2M"), ("S0", 7, 9, "2M")])
+        row = self.row(self.orf_table([(7, 11)]), "o0", "a")
+        self.assertEqual(
+            [row[k] for k in ("depth_median", "prevalence", "union_breadth")],
+            [1.0, 1.0, 1.0],
+        )
+
+    def test_a_genome_without_orfs_has_an_empty_table(self):
+        """--orfs may annotate some plotted genomes and not others."""
+        self.build({"S0": "a", "S1": "b"}, [("S0", 1, 3, "2M")])
+        with warnings.catch_warnings(), self.assertNoLogs("micov"):
+            warnings.simplefilter("error")
+            table = self.orf_table([])
+        self.assertEqual(list(table), ORF_COLUMNS)
+        self.assertEqual({len(column) for column in table.values()}, {0})
+
+    def test_two_groups_have_a_contrast(self):
+        """b has twice a's depth on every ORF: no contrast, once each group
+        is scaled by its typical ORF."""
+        reads = []
+        for sample, scale in (("S0", 1), ("S1", 2)):
+            for base in (1, 2, 3):
+                reads += [(sample, base, base + 1, "1M")] * (base * scale)
+        self.build({"S0": "a", "S1": "b"}, reads)
+        table = self.orf_table([(1, 2), (2, 3), (3, 4)])
+        self.assertEqual(table["contrast"].tolist(), [0.0] * 6)
+
+
+class OrfContrastTests(unittest.TestCase):
+    """log2((B / norm B + 0.05) / (A / norm A + 0.05)) per ORF, from each
+    group's per-ORF median; A and B are the groups in sorted order, and a
+    group's norm is the median of its per-ORF medians on this genome."""
+
+    def test_a_constant_ratio_is_no_contrast(self):
+        """Deeper sequencing of one group is not a difference between them."""
+        median = np.array([[1.0, 2.0, 3.0, 0.5], [2.0, 4.0, 6.0, 1.0]])
+        self.assertEqual(
+            orf_contrast(median, ["a", "b"], "G").tolist(), [0.0] * 4
+        )
+
+    def test_positive_where_the_second_group_is_higher(self):
+        """Norms 2 and 4: o0 is 0.5 of typical in a and 1 in b."""
+        median = np.array([[1.0, 2.0, 3.0], [4.0, 4.0, 4.0]])
+        contrast = orf_contrast(median, ["a", "b"], "G")
+        for got, expected in zip(
+            contrast,
+            [math.log2(1.05 / 0.55), 0.0, math.log2(1.05 / 1.55)],
+            strict=True,
+        ):
+            self.assertAlmostEqual(got, expected, places=12)
+        self.assertGreater(contrast[0], 0)
+        self.assertLess(contrast[2], 0)
+
+    def test_a_zero_norm_is_no_contrast_and_is_named(self):
+        """Most of the genome's ORFs have median 0 in case, so there is no
+        typical depth to scale by."""
+        median = np.array([[0.0, 0.0, 3.0], [1.0, 2.0, 3.0]])
+        with self.assertLogs("micov", level="WARNING") as logged:
+            contrast = orf_contrast(median, ["case", "control"], "GQ1")
+        self.assertTrue(np.isnan(contrast).all())
+        message = "\n".join(logged.output)
+        self.assertIn("GQ1", message)
+        self.assertIn("case", message)
+        self.assertNotIn("control", message)
+
+    def test_only_two_groups_have_a_contrast(self):
+        for groups in (["a"], ["a", "b", "c"]):
+            with self.subTest(groups=groups), self.assertNoLogs("micov"):
+                median = np.ones((len(groups), 3))
+                self.assertTrue(
+                    np.isnan(orf_contrast(median, groups, "G")).all()
+                )
+
+
+class FixtureOrfTests(DepthTestCase):
+    """The dp ORFs, worked by hand from `dp.sam` and `dp.gff`. Case is S1-S3
+    (n 3), control S4 and S5 (n 2)."""
+
+    def orf_table(self, genome, length):
+        with self.assertLogs("micov", level="WARNING"):
+            self.resolve(orfs=DATA / "dp_orfs.parquet")
+        stage_breadth(self.con, "breadth_layer")
+        orfs = genome_orfs(self.con, genome)
+        with self.assertLogs("micov", level="WARNING") as logged:
+            _, table = genome_statistics(
+                self.con, "depth_layer", genome, length,
+                [display_bin_edges(1, length + 1, OVERVIEW_BIN_BP)], orfs,
+            )
+        return table, "\n".join(logged.output)
+
+    def assertRows(self, table, expected):
+        for (orf_id, group), values in expected.items():
+            (row,) = np.flatnonzero(
+                (table["orf_id"] == orf_id) & (table["group"] == group)
+            )
+            for key, value in zip(ORF_COLUMNS[9:15], values, strict=True):
+                with self.subTest(orf=orf_id, group=group, column=key):
+                    self.assertAlmostEqual(table[key][row], value, places=12)
+
+    def test_genome_orfs(self):
+        """Only the ORF types, by position; the gene and region lines are not."""
+        with self.assertLogs("micov", level="WARNING"):
+            self.resolve(orfs=DATA / "dp_orfs.parquet")
+        orfs = genome_orfs(self.con, "GC")
+        self.assertEqual(
+            list(zip(*(orfs[k].tolist() for k in
+                       ("orf_id", "label", "type", "start", "stop", "strand")),
+                     strict=True)),
+            [("gc_1", "dnaA", "CDS", 1, 301, "+"),
+             ("gc_2", "GC_0002", "CDS", 901, 1101, "-"),
+             ("gc_3", "rrsA", "rRNA", 1201, 1401, "+"),
+             ("gc_4", "gc_4", "ncRNA", 2001, 2101, "."),
+             ("gc_5", "nTest", "CDS", 2601, 2801, "+"),
+             ("gc_6", "gc_6", "CDS", 2901, 3001, "-"),
+             ("gc_7", "gc_7", "CDS", 2951, 3051, "+")],
+        )
+
+    def test_gc(self):
+        """Columns: depth Q1, median, Q3, mean, prevalence, union breadth.
+
+        - gc_2 (200 bp): S1 (a2) and S2 (b1) each cover 100 bases, means 0.5,
+          0.5 and 0; their breadth joins up to 150 bases.
+        - gc_3 (200 bp): S1, S2 and S3 each 100 bases, means 0.5; S4's two
+          reads stack to depth 2 over 100 bases, mean 1, beside S5's 0.
+        - gc_4 (100 bp): S5 covers it all.
+        - gc_5 (200 bp): S3's read has 60 bases of depth and spans 160.
+        - gc_7 (2951-3050, across the origin): S1's a3 covers 2951-3000 and
+          a1 1-50, so all 100 bases.
+        """
+        table, _ = self.orf_table("GC", 3000)
+        self.assertRows(table, {
+            ("gc_2", "case"): (0.25, 0.5, 0.5, 1 / 3, 1 / 3, 0.75),
+            ("gc_2", "control"): (0, 0, 0, 0, 0, 0),
+            ("gc_3", "case"): (0.5, 0.5, 0.5, 0.5, 0.5, 0.75),
+            ("gc_3", "control"): (0.25, 0.5, 0.75, 0.5, 0.25, 0.5),
+            ("gc_4", "control"): (0.25, 0.5, 0.75, 0.5, 0.5, 1.0),
+            ("gc_5", "case"): (0, 0, 0.15, 0.1, 4 / 15, 0.8),
+            ("gc_7", "case"): (0, 0, 0.5, 1 / 3, 1 / 3, 1.0),
+        })
+        self.assertEqual(len(table["orf_id"]), 14)
+
+    def test_gc_has_no_contrast(self):
+        """Most GC ORFs have median 0 in both groups: nothing to scale by."""
+        table, warned = self.orf_table("GC", 3000)
+        self.assertTrue(np.isnan(table["contrast"]).all())
+        for name in ("GC", "case", "control"):
+            self.assertIn(name, warned)
+
+    def test_gl_breadth_without_depth(self):
+        """gl_5 has breadth (S1's a6, 50 bases) but no depth."""
+        table, _ = self.orf_table("GL", 2000)
+        self.assertRows(table, {
+            ("gl_5", "case"): (0, 0, 0, 0, 1 / 6, 0.5),
+            ("gl_1", "case"): (0, 0, 2 / 3, 4 / 9, 1 / 3, 1.0),
+            ("gl_2", "control"): (1, 1, 1, 1, 1, 1),
+        })
+
+
+def random_orfs(rng, length, count):
+    """Spans up to 15 bp, some running past the end (so across the origin)."""
+    starts = rng.integers(1, length + 1, count)
+    return [(int(a), int(a + b)) for a, b in
+            zip(starts, rng.integers(1, 16, count), strict=True)]
+
+
+def oracle_orfs(groups, reads, length, spans):
+    samples, depth, cover = oracle_per_base(groups, reads, length)
+    names = sorted(set(groups.values()))
+    table = {key: [] for key in ORF_COLUMNS[7:15]}
+    medians = []
+    for start, stop in spans:
+        bases = [(b - 1) % length for b in range(start, stop)]
+        for group in names:
+            rows = [i for i, s in enumerate(samples) if groups[s] == group]
+            d, c = depth[np.ix_(rows, bases)], cover[np.ix_(rows, bases)]
+            q1, median, q3 = np.quantile(d.mean(axis=1), (0.25, 0.5, 0.75))
+            values = {"group": group, "n_samples": len(rows), "depth_q1": q1,
+                      "depth_median": median, "depth_q3": q3,
+                      "depth_mean": d.mean(), "prevalence": c.mean(),
+                      "union_breadth": c.any(axis=0).mean()}
+            for key, value in values.items():
+                table[key].append(value)
+            medians.append(median)
+    medians = np.array(medians).reshape(len(spans), len(names)).T
+    a, b = medians / np.median(medians, axis=1, keepdims=True)
+    table["contrast"] = np.repeat(np.log2((b + 0.05) / (a + 0.05)), len(names))
+    return table
+
+
+class OrfWindowInvarianceTests(SyntheticTestCase):
+    """ORF sums carried across windows, including over a window edge and an
+    ORF across the origin: bit-identical for any window, and equal to the
+    Python oracle."""
+
+    LENGTH = 61
+    GROUPS: ClassVar[dict] = {"S0": "a", "S1": "b", "S2": "a", "S3": "b",
+                              "S4": "a"}
+
+    def setUp(self):
+        super().setUp()
+        rng = np.random.default_rng(5)
+        self.reads = random_reads(rng, sorted(self.GROUPS), self.LENGTH, 200)
+        self.spans = random_orfs(rng, self.LENGTH, 12)
+        self.assertTrue(any(stop > self.LENGTH + 1 for _, stop in self.spans))
+        self.build(self.GROUPS, self.reads, self.LENGTH)
+
+    def orf_table(self, width):
+        with mock.patch.object(_depth, "WINDOW_CELLS", width * len(self.GROUPS)):
+            _, table = genome_statistics(
+                self.con, "layer", "G", self.LENGTH,
+                [display_bin_edges(1, self.LENGTH + 1, 7)],
+                synthetic_orfs(self.spans),
+            )
+        return table
+
+    def test_any_window_size_gives_identical_orf_statistics(self):
+        whole = self.orf_table(self.LENGTH)
+        for width in (1, 2, 3, 7):
+            windowed = self.orf_table(width)
+            for key in ORF_COLUMNS:
+                with self.subTest(width=width, column=key):
+                    self.assertEqual(whole[key].tolist(), windowed[key].tolist())
+
+    def test_orf_statistics_match_a_per_base_oracle(self):
+        table = self.orf_table(3)
+        expected = oracle_orfs(self.GROUPS, self.reads, self.LENGTH, self.spans)
+        for key, values in expected.items():
+            with self.subTest(column=key):
+                if key in ("group", "n_samples"):
+                    self.assertEqual(table[key].tolist(), values)
+                else:
+                    np.testing.assert_allclose(
+                        table[key], values, rtol=1e-12, atol=1e-15
+                    )
 
 
 if __name__ == "__main__":
