@@ -22,9 +22,9 @@ miint is currently published **unsigned**, so micov enables DuckDB's
 `allow_unsigned_extensions` on every connection. This is a development
 posture and will be tightened once signed builds are available.
 
-DuckDB is pinned to **1.5.4**. Extensions are built per DuckDB version, and
-the repository above carries a `v1.5.4` tree only; a newer DuckDB has no miint
-build to load.
+DuckDB is pinned to **1.5.4 or 1.5.5**. Extensions are built per DuckDB
+version, and the repository above carries trees up to `v1.5.5`; a newer DuckDB
+has no miint build to load.
 
 Supported platforms are **Linux** (x86_64, aarch64) and **macOS on Apple
 silicon**. No miint build is published for Windows or for Intel macOS, so
@@ -202,6 +202,11 @@ group.
 
 Additionally, users can specify `--percentile` to display plots with the x-axis
 representing percentile of samples instead of absolute sample counts. 
+
+By default, the position plots lay sample groups out smallest first, and
+groups of equal size in text order, where `270` comes before `30` and `5`.
+Specify `--sort-by-metadata-value` to lay them out by metadata value instead,
+with numbers in numeric order: 5, 30, 270.
 
 Pairwise Kolmogorov-Smirnov (KS) tests between all sample groups' cumulative coverage curves are automatically conducted and results saved in `cumulative.ks.csv`. The KS test quantifies whether two sample groups differ in the distribution of their cumulative genome coverages, with the KS statistic measuring the maximal difference between the two cumulative distributions, and the KS p-value assessing the statistical significance of the difference.
 

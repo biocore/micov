@@ -30,6 +30,8 @@ Tests that need ``example/`` skip with a reason naming the missing directory
 rather than silently passing.
 """
 
+import csv
+import gzip
 import lzma
 import os
 import shutil
@@ -190,6 +192,13 @@ class TestCliSurface(unittest.TestCase):
         """A stale shadowing install lacked this flag; that cost an audit pass."""
         params = {p.name for p in cli.commands["per-sample"].params}
         self.assertIn("percentile", params)
+
+    def test_per_sample_sort_by_metadata_value_is_off_by_default(self):
+        """Without the flag, position plots keep their published layout."""
+        (flag,) = [p for p in cli.commands["per-sample"].params
+                   if p.name == "sort_by_metadata_value"]
+        self.assertTrue(flag.is_flag)
+        self.assertFalse(flag.default)
 
     def test_binning_still_declares_rank(self):
         """`--rank` is a documented no-op, but removing it is a CLI change."""
@@ -581,6 +590,53 @@ class TestBinningAndPlotsFastTier(MicovCliTestCase):
         )
         self.assertGreater(len(bins), 1)
         self.assertGreater(len(variance), 1)
+
+    def test_per_sample_sort_by_metadata_value_orders_groups_numerically(self):
+        """A depth column has to read left to right as 5, 30, 270.
+
+        Metadata is text, so without the flag these one-sample groups sit in
+        text order: 270, 30, 5. G000000002 is the genome all three cover.
+        """
+        prefix = self.tmp / "mini"
+        self.micov(
+            "cov-to-parquet",
+            "--pattern",
+            f"{DATA}/mini_sample*.cov",
+            "--output",
+            prefix,
+            "--lengths",
+            DATA / "mini_lengths.tsv",
+        )
+        metadata = self.tmp / "depth.tsv"
+        metadata.write_text(
+            "sample_id\tdepth\n"
+            "mini_sampleA\t30\n"
+            "mini_sampleB\t5\n"
+            "mini_sampleC\t270\n"
+        )
+        features = self.tmp / "features.tsv"
+        features.write_text("genome_id\nG000000002\n")
+        self.micov(
+            "per-sample",
+            "--parquet-coverage",
+            prefix,
+            "--sample-metadata",
+            metadata,
+            "--sample-metadata-column",
+            "depth",
+            "--features-to-keep",
+            features,
+            "--output",
+            self.tmp / "out",
+            "--sort-by-metadata-value",
+        )
+        scaled = (self.tmp / "out.G000000002.G000000002.depth"
+                  ".position-plot-scaled.tsv.gz")
+        with gzip.open(scaled, "rt") as fp:
+            rows = sorted(csv.DictReader(fp, delimiter="\t"),
+                          key=lambda row: int(row["x"]))
+        self.assertEqual(list(dict.fromkeys(row["group"] for row in rows)),
+                         ["5", "30", "270"])
 
     #: `mini_sampleA.cov` covers exactly these two genomes.
     POSITION_PLOT_GENOMES: ClassVar[tuple] = ("G000000001", "G000000002")

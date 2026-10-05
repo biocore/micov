@@ -1,5 +1,6 @@
 import csv
 import gzip
+import math
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -26,6 +27,12 @@ from ._io import BED_POSITIONS_TABLE
 #: `per_sample_plots`' genome-sorted copy of the positions, sliced per genome.
 PLOT_POSITIONS_TABLE = "plot_positions"
 
+#: The narrowest bucket in a scaled position plot, bar the last, which holds
+#: whatever remains. 1/10000 of a 145kb chloroplast is 15bp, narrower than
+#: the intervals being binned, and a genome under 10kb got buckets of less
+#: than a base.
+MIN_BUCKET_WIDTH = 100
+
 #: Header of every `.ks.csv`. The first four names are frozen; the Bonferroni
 #: column was appended in M11a so that readers taking columns by position were
 #: unaffected.
@@ -47,9 +54,9 @@ def _write_delimited(path, header, rows, delimiter=",", compress=False):
     **Do not reach for `repr()` or an f-string to format the values here.**
     `csv.writer` renders with `str()`, which for a float is the shortest form
     that round-trips -- exactly what polars wrote. The values arriving here are
-    numpy scalars (the position values come from `np.histogram`; the KS
-    values were `np.float64` too until M9 moved them from scipy to miint),
-    and under numpy 2 `repr()` of one of those is the string
+    numpy scalars (the position values are bucket edges from `np.linspace` or
+    `np.arange`; the KS values were `np.float64` too until M9 moved them from
+    scipy to miint), and under numpy 2 `repr()` of one of those is the string
     `np.float64(0.3)`. That would corrupt every float in every `.ks.csv` and
     `.tsv.gz` micov writes, and it is the sort of thing a tidy-up refactor
     does without noticing.
@@ -151,6 +158,7 @@ def per_sample_plots(
     monte,
     monte_iters,
     percentile,
+    sort_by_value=False,
 ):
     """Construct plots for all genomes.
 
@@ -171,6 +179,8 @@ def per_sample_plots(
         One of (None, 'focused', 'unfocused'). See "add_monte" for more detail.
     monte_iters : int
         The number of Monte Carlo iterations to perform.
+    sort_by_value : bool, optional
+        Lay position plot groups out by metadata value. See `position_plot`.
     """
     # Positions stay in DuckDB and only one genome's rows are fetched at a
     # time. Fetching the whole table and masking it per genome was four full
@@ -261,6 +271,7 @@ def per_sample_plots(
             ymin,
             ymax,
             scale=None,
+            sort_by_value=sort_by_value,
         )
         position_plot(
             metadata,
@@ -273,6 +284,7 @@ def per_sample_plots(
             ymin,
             ymax,
             scale=10000,
+            sort_by_value=sort_by_value,
         )
 
 
@@ -725,6 +737,7 @@ def position_plot(
     ymin,
     ymax,
     scale=None,
+    sort_by_value=False,
 ):
     """Construct position plots stratified by metadata value.
 
@@ -750,13 +763,22 @@ def position_plot(
     ymax : int
         For forcing ax.ylim.
     scale : int, optional
-        If specified, represent the genome as `scale` number of buckets. A
-        bucket is considered represented if any position within the bucket
-        is covered
+        If specified, represent the genome as `scale` number of buckets, or as
+        `MIN_BUCKET_WIDTH` buckets if those would be narrower. A bucket is
+        considered represented if any position within the bucket is covered
+    sort_by_value : bool, optional
+        If true, lay groups out by metadata value, finite numbers numerically,
+        rather than smallest group first
 
     """
     if scale is not None and scale <= 1:
         raise ValueError("`scale` must be greater than 1")
+
+    if scale is not None and ymax <= ymin:
+        raise ValueError(
+            f"Cannot scale the position plot of {target}: it spans "
+            f"[{ymin}, {ymax}), which holds no buckets"
+        )
 
     plt.figure(figsize=(12, 8))
     ax = plt.gca()
@@ -764,6 +786,17 @@ def position_plot(
     colors = []
 
     length = ymax - ymin
+
+    if scale is not None:
+        if length >= scale * MIN_BUCKET_WIDTH:
+            # np.histogram's own edges, so long genomes keep the published `y`
+            edges = np.linspace(ymin, ymax, scale + 1, dtype=np.float64)
+        else:
+            # exactly MIN_BUCKET_WIDTH from ymin; the last bucket holds the rest
+            edges = np.append(
+                np.arange(ymin, ymax, MIN_BUCKET_WIDTH, dtype=np.float64),
+                np.float64(ymax),
+            )
 
     target_positions = mask_table(positions, positions[COLUMN_GENOME_ID] == target)
 
@@ -781,13 +814,36 @@ def position_plot(
     # tied on size stay in value order.
     names, counts = np.unique(metadata[variable], return_counts=True)
     max_x = int(counts.sum())
-    order = np.argsort(counts, kind="stable")
+    if sort_by_value:
+        # finite numbers first, numerically, then the rest in the text order
+        # np.unique gave them; that order also breaks ties such as "1" and
+        # "1.0". A blank value arrives masked, and np.unique sorts a mask as
+        # "?" -- after the digits, before the letters -- so it is put last
+        # explicitly.
+        blank = np.ma.getmaskarray(names)
+
+        def by_value(row):
+            if blank[row]:
+                return (2, row)
+            try:
+                number = float(names[row])
+            except ValueError:
+                return (1, row)
+            # "nan" and "-inf" parse, but are not values to order by
+            return (0, number, row) if math.isfinite(number) else (1, row)
+
+        order = sorted(range(len(names)), key=by_value)
+    else:
+        order = np.argsort(counts, kind="stable")
 
     label_pos = []
     x_offset = 0
     boundaries = []
-    tsv_x = []
-    tsv_y = []
+    # arrays, not a Python object per mark: overlap marking can write
+    # samples x 10,000 rows for one genome. The empty seeds let a plot with no
+    # groups still concatenate.
+    tsv_x = [np.empty(0, dtype=np.int64)]
+    tsv_y = [np.empty(0, dtype=np.float64)]
     tsv_group = []
 
     invert = len(order) == 2
@@ -850,20 +906,29 @@ def position_plot(
                 )
                 ax.add_collection(lc)
             else:
-                # obs_bins = position_histogram(cur_positions, scale, ymin, ymax)
-                covered_positions = np.concatenate([starts, stops])
-
-                obs_count, obs_bins = np.histogram(
-                    covered_positions, bins=scale, range=(ymin, ymax)
+                # every bucket [start, stop) overlaps: from the one holding
+                # `start` to the last one whose left edge is before `stop`. A
+                # long genome's edges are fractional, and one can fall inside
+                # the last base, so "the bucket holding stop - 1" would miss
+                # it. An alignment can run off the end of the genome; only the
+                # part inside [ymin, ymax) is plotted.
+                first = np.searchsorted(edges, np.maximum(starts, ymin),
+                                        side="right") - 1
+                last = np.searchsorted(edges, np.minimum(stops, ymax),
+                                       side="left") - 1
+                touched = np.bincount(first, minlength=len(edges)) - np.bincount(
+                    last + 1, minlength=len(edges)
                 )
-                obs_bins = obs_bins[:-1][obs_count > 0]
-                hist_x.extend([x for _ in obs_bins])
-                hist_y.extend(obs_bins)
+                obs_bins = edges[:-1][np.cumsum(touched[:-1]) > 0]
+                hist_x.append(np.full(len(obs_bins), x, dtype=np.int64))
+                hist_y.append(obs_bins)
 
         if scale is not None:
+            hist_x = np.concatenate(hist_x)
+            hist_y = np.concatenate(hist_y)
             ax.scatter(hist_x, hist_y, s=0.2, color=color, alpha=0.7)
-            tsv_x += hist_x
-            tsv_y += hist_y
+            tsv_x.append(hist_x)
+            tsv_y.append(hist_y)
             tsv_group += [name] * len(hist_x)
 
         label_pos.append(x_offset + (count // 2))
@@ -884,18 +949,19 @@ def position_plot(
     else:
         filename = (
             f"{output}.{target_name}.{target}.{variable}."
-            f"position-plot-1_{scale}th-scale.tsv.gz"
+            "position-plot-scaled.tsv.gz"
         )
         _write_delimited(
             filename,
             ("group", "x", "y"),
-            zip(tsv_group, tsv_x, tsv_y, strict=True),
+            zip(tsv_group, np.concatenate(tsv_x), np.concatenate(tsv_y),
+                strict=True),
             delimiter="\t",
             compress=True,
         )
         ax.set_title(f"Scaled position plot: {target} ({length}bp)", fontsize=20)
-        ax.set_ylabel(f"Coverage (1/{scale})th scale", fontsize=20)
-        scaletag = f"-1_{scale}th-scale"
+        ax.set_ylabel(f"Coverage ({edges[1] - edges[0]:.0f}bp buckets)", fontsize=20)
+        scaletag = "-scaled"
 
     ax.set_xlabel("Within group sample rank by coverage", fontsize=16)
     ax.set_xticks(label_pos, labels, rotation=45, ha="right", fontsize=16)

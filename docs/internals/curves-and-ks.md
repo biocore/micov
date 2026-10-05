@@ -124,18 +124,48 @@ Called twice per genome: `scale=None`, then `scale=10000`.
 
 1. Metadata is restricted to samples with positions on this genome.
 2. Groups are the sorted unique values, and a group's sorted index is its
-   colour (`C{index}`).
+   colour (`C{index}`). Values are text, so `"30" < "5"`. A blank value is
+   masked, and `np.unique` sorts a mask as `"?"`: after the digits, before
+   the letters.
 3. Groups are laid out **smallest first**, with ties kept in value order.
+   With `sort_by_value` (`--sort-by-metadata-value`) they are laid out by
+   value instead: values that parse as finite numbers, numerically, then
+   other text in sorted order (`nan` and `-inf` parse, but count as text),
+   then blanks. Colours do not change, so a group keeps the
+   colour it has in the curve plots.
 4. Within a group, samples are ranked by `ordered_coverage`. With **exactly
    two groups** the second is drawn in reverse, so the two mirror each other.
 5. `ymin` and `ymax` are `feature_metadata`'s `start` and `stop`. In genome
    mode those are 0 and the genome length; in region mode, the region.
 
-**What the scaled plot measures.** The scaled plot and its `.tsv.gz` take a
-`np.histogram` of each sample's interval **endpoints**, `starts` and `stops`
-concatenated, into `scale` buckets over `(ymin, ymax)`. They record the left
-edge of each non-empty bucket. A long interval that spans a bucket without
-an endpoint in it does **not** mark that bucket. This is frozen behaviour:
-the goldens carry it.
+**What the scaled plot measures.** The scaled plot and its `.tsv.gz` record,
+per sample, the left edge of every bucket that one of its intervals
+overlaps.
+
+- **Bucket width** is `(ymax - ymin) / scale`, but never less than
+  `_plot.MIN_BUCKET_WIDTH` (100bp). With `scale=10000`, a genome or region of
+  1Mb or more gets 10,000 buckets with `np.linspace` edges, which are the
+  edges `np.histogram` produced, so the published `y` values hold. Anything
+  shorter gets buckets exactly 100bp wide from `ymin`, and the last bucket
+  holds the remainder.
+- **Marking** is by overlap: `[start, stop)` marks every bucket from the one
+  holding `start` to the last one whose left edge is before `stop`. Fractional
+  edges can fall inside an interval's last base, so asking which bucket holds
+  `stop - 1` would drop a bucket the interval overlaps.
+- **An interval reaching outside `[ymin, ymax)`** is plotted only where it
+  overlaps. `example/` has one, 1bp past the end of G000436435. In region
+  mode `View` has already clipped intervals to the region.
+- **A zero-length span** (`ymax <= ymin`) has no buckets, and raises a
+  `ValueError` naming the genome.
+- Before 0.0.1-dev, buckets were always 1/10,000 of the genome, and only the
+  buckets holding an interval's `start` and its exclusive `stop` were marked.
+  On a 145kb genome that is 15bp buckets, and half the covered buckets went
+  unmarked. Binning `stop` also marked the bucket starting exactly at `stop`,
+  which overlap does not, so genomes whose edges land on whole positions lose
+  those rows. The `example/` goldens gained 836 and 130 rows and lost none.
+- **Size.** A sample can mark every bucket, so one genome's `.tsv.gz` can
+  reach samples x 10,000 rows. On a 100-sample, 9,388-genome study the
+  total grew 1.35x, and the worst genome 3.1x (221k to 683k rows).
+- `test_plot.ScaledPositionPlotTests` pins all of this.
 
 **Group size.** There is no minimum, so every genome gets position plots.

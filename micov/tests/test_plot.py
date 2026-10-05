@@ -15,7 +15,10 @@ implementation before M5 replaced it -- this is Milestone 0's shape, freezing a
 baseline and then changing the code underneath it.
 """
 
+import csv
+import gzip
 import math
+import os
 import shutil
 import unittest
 from tempfile import mkdtemp
@@ -315,6 +318,195 @@ class KsTableTests(unittest.TestCase):
         self.assertEqual(rows[0][4], "")
 
 
+class PositionPlotGroupOrderTests(unittest.TestCase):
+    """Where each metadata group sits along the position plot's x-axis.
+
+    Metadata is read as text and groups are laid out smallest first, ties in
+    text order, so a depth column came out as 10, 20, 24, 55, 56, 71, 30, 5,
+    270 -- no order a reader can follow. `sort_by_value` lays groups out by
+    value instead, numbers numerically. The default must not move: the scaled
+    plot's `x` is a frozen output.
+    """
+
+    #: Sizes chosen so that smallest first, text order and numeric order all
+    #: disagree. `None` is a blank metadata value, which `View` hands over
+    #: masked with `None` beneath; there are 146 `not applicable` and 28 blank
+    #: depths in the study this flag was written for.
+    GROUPS = ("5", "5", "5", "30", "270", "270", "not applicable", None, None)
+
+    def setUp(self):
+        self.d = mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+        self.build(self.GROUPS)
+
+    def build(self, groups):
+        n = len(groups)
+        samples = np.array([f"S{i}" for i in range(n)], dtype=object)
+        self.metadata = {
+            "sample_id": samples,
+            "grp": np.ma.array(
+                groups, mask=[g is None for g in groups], dtype=object
+            ),
+        }
+        self.coverage = {
+            "sample_id": samples,
+            "genome_id": np.full(n, "G1", dtype=object),
+            "covered": np.full(n, 490, dtype=np.uint32),
+            "length": np.full(n, 1000, dtype=np.uint32),
+            "percent_covered": np.full(n, 49.0),
+        }
+        self.positions = {
+            "genome_id": np.full(n, "G1", dtype=object),
+            "start": np.full(n, 10, dtype=np.uint32),
+            "stop": np.full(n, 500, dtype=np.uint32),
+            "sample_id": samples,
+        }
+
+    def groups_left_to_right(self, **kwargs):
+        _plot.position_plot(self.metadata, self.coverage, self.positions, "G1",
+                            "grp", f"{self.d}/out", "G1", 0, 1000, scale=10000,
+                            **kwargs)
+        path = f"{self.d}/out.G1.G1.grp.position-plot-scaled.tsv.gz"
+        with gzip.open(path, "rt") as fp:
+            rows = sorted(csv.DictReader(fp, delimiter="\t"),
+                          key=lambda row: int(row["x"]))
+        return list(dict.fromkeys(row["group"] for row in rows))
+
+    def test_default_is_smallest_group_first(self):
+        # "--" is how the writer renders the blank group, which np.unique
+        # sorts as "?": 270 precedes it on the tie at two samples
+        self.assertEqual(self.groups_left_to_right(),
+                         ["30", "not applicable", "270", "--", "5"])
+
+    def test_sort_by_value_puts_numbers_in_numeric_order_then_text(self):
+        self.assertEqual(self.groups_left_to_right(sort_by_value=True),
+                         ["5", "30", "270", "not applicable", "--"])
+
+    def test_non_finite_values_sort_as_text(self):
+        """`float()` accepts "-inf" and "NaN", but neither is a depth.
+
+        As numbers, "-inf" led the axis, and NaN -- which compares false both
+        ways -- had no defined place among the numbers at all.
+        """
+        self.build(("5", "-inf", "NaN", "missing"))
+        self.assertEqual(self.groups_left_to_right(sort_by_value=True),
+                         ["5", "-inf", "NaN", "missing"])
+
+
+class ScaledPositionPlotTests(unittest.TestCase):
+    """Which buckets the scaled position plot marks, and how wide they are.
+
+    Buckets were 1/10000 of the genome whatever the genome: 15bp on a 145kb
+    chloroplast, narrower than the peptides being plotted. Only the buckets
+    holding an interval's two ends were marked, which there dropped 49% of the
+    covered buckets. Buckets are now never narrower than 100bp, and every
+    bucket holding a covered base is marked.
+    """
+
+    def plot(self, intervals, ymin, ymax):
+        d = mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        n = len(intervals)
+        sample = np.array(["S0"], dtype=object)
+        _plot.position_plot(
+            {"sample_id": sample, "grp": np.array(["g"], dtype=object)},
+            {
+                "sample_id": sample,
+                "genome_id": np.array(["G1"], dtype=object),
+                "covered": np.array([1], dtype=np.uint32),
+                "length": np.array([ymax - ymin], dtype=np.uint32),
+                "percent_covered": np.array([1.0]),
+            },
+            {
+                "genome_id": np.full(n, "G1", dtype=object),
+                "start": np.array([s for s, _ in intervals], dtype=np.uint32),
+                "stop": np.array([e for _, e in intervals], dtype=np.uint32),
+                "sample_id": np.full(n, "S0", dtype=object),
+            },
+            "G1", "grp", f"{d}/out", "G1", ymin, ymax, scale=10000,
+        )
+        return f"{d}/out.G1.G1.grp.position-plot"
+
+    def marked(self, intervals, ymin=0, ymax=1000):
+        with gzip.open(f"{self.plot(intervals, ymin, ymax)}-scaled.tsv.gz",
+                       "rt") as fp:
+            return [float(row["y"]) for row in csv.DictReader(fp, delimiter="\t")]
+
+    def test_files_are_named_scaled_whatever_the_bucket_count(self):
+        prefix = self.plot([(150, 151)], 0, 1000)
+        self.assertTrue(os.path.exists(f"{prefix}-scaled.png"))
+        self.assertTrue(os.path.exists(f"{prefix}-scaled.tsv.gz"))
+
+    def test_a_short_genome_gets_100bp_buckets(self):
+        self.assertEqual(self.marked([(150, 151)]), [100.0])
+
+    def test_every_bucket_an_interval_covers_is_marked(self):
+        self.assertEqual(self.marked([(150, 420)]),
+                         [100.0, 200.0, 300.0, 400.0])
+
+    def test_stop_is_exclusive(self):
+        # [100, 200) covers nothing in the bucket that starts at 200
+        self.assertEqual(self.marked([(100, 200)]), [100.0])
+
+    def test_the_last_bucket_holds_the_remainder(self):
+        self.assertEqual(self.marked([(1020, 1050)], ymax=1050), [1000.0])
+
+    def test_an_interval_running_off_the_end_stops_at_the_last_bucket(self):
+        """`example/` has one: G000436435 is 5,348,036bp, an interval ends 5,348,037."""
+        self.assertEqual(self.marked([(850, 1001)]), [800.0, 900.0])
+
+    def test_an_interval_starting_before_the_region_marks_from_its_start(self):
+        """`View` clips to the region, so the CLI cannot reach this today.
+
+        It was a silent wipe-out all the same: a start below `ymin` fell
+        outside the buckets and cancelled every other mark for the sample.
+        """
+        self.assertEqual(
+            self.marked([(10, 40), (50, 150), (300, 450)], 100, 1000),
+            [100.0, 300.0, 400.0],
+        )
+
+    def test_a_zero_length_genome_is_rejected_by_name(self):
+        """It has no buckets; this died on an IndexError in the axis label."""
+        with self.assertRaisesRegex(ValueError, "G1"):
+            self.plot([(0, 1)], 0, 0)
+
+    def test_region_buckets_start_at_the_region(self):
+        self.assertEqual(self.marked([(1060, 1100), (1150, 1151)], 1050, 1500),
+                         [1050.0, 1150.0])
+
+    def test_a_long_genome_keeps_its_published_bucket_edges(self):
+        """Above 1Mb the buckets are still np.histogram's 10,000.
+
+        The `example/` genomes are 4.7 and 5.3Mb, and the published plots were
+        drawn from them, so their `y` values must not move.
+        """
+        length = 4_719_737
+        _, edges = np.histogram([], bins=10000, range=(0, length))
+        self.assertEqual(self.marked([(1000, 1001)], ymax=length), [edges[2]])
+
+    def test_a_bucket_edge_inside_the_last_base_still_marks_its_bucket(self):
+        """Edges above 1Mb are fractional; 943.9474 falls inside base 943.
+
+        [900, 944) overlaps the bucket starting there, and the published plots
+        marked it. Asking which bucket holds `stop - 1` would not.
+        """
+        length = 4_719_737
+        _, edges = np.histogram([], bins=10000, range=(0, length))
+        self.assertEqual(self.marked([(900, 944)], ymax=length),
+                         [edges[1], edges[2]])
+
+    def test_a_bucket_starting_at_stop_is_not_marked_on_a_long_genome(self):
+        """[0, 200) covers nothing at 200.
+
+        On a 2Mb genome the edges are whole 200bp steps, and the old rule,
+        which binned `stop` itself, marked the bucket starting at 200. Such
+        genomes lose those rows; `example/`'s edges are never whole, so its
+        goldens only gained rows.
+        """
+        self.assertEqual(self.marked([(0, 200)], ymax=2_000_000), [0.0])
+
+
 class PerSamplePlotsPerGenomeTests(unittest.TestCase):
     """Each genome's plots see that genome's rows, and only those.
 
@@ -384,6 +576,24 @@ class PerSamplePlotsPerGenomeTests(unittest.TestCase):
         for name, target, genomes in seen:
             with self.subTest(call=name, target=target):
                 self.assertEqual(genomes, {target})
+
+    def test_sort_by_value_reaches_both_position_plots(self):
+        """The PNG and the scaled `.tsv.gz` must lay groups out alike.
+
+        Only the scaled plot writes data, so a flag dropped on the way to the
+        unscaled one would leave the PNG disagreeing with its own `.tsv.gz`.
+        """
+        seen = []
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("sort_by_value"))
+
+        with mock.patch.object(_plot, "coverage_curve"), \
+             mock.patch.object(_plot, "position_plot", spy):
+            _plot.per_sample_plots(self.view, "grp", f"{self.d}/out", None, 5,
+                                   False, sort_by_value=True)
+
+        self.assertEqual(seen, [True] * 4, "2 genomes x 2 position plots")
 
     def test_unfocused_monte_carlo_draws_from_samples_of_any_genome(self):
         """S11 covers only G1, and must still be in G2's unfocused pool.

@@ -43,8 +43,9 @@ dynamic = ["version"]
 #
 # The duckdb CEILING is a repository-coverage artifact, not a technical limit.
 # miint is published per DuckDB version at https://ftp.microbio.me/pub/miint,
-# which carries v1.5.4 and no v1.5.5 tree, so micov cannot run on a DuckDB it
-# has no extension build for. Drop the ceiling once v1.5.5 is published.
+# and micov cannot run on a DuckDB it has no extension build for. The ceiling
+# is the newest DuckDB with a tree there (v1.5.5); raise it, here and in
+# ci/conda_requirements.txt, as newer ones are published and pass the suite.
 #
 # numba is gone: it backed the interval merge in `_cov.py`, which is now
 # miint's `compress_intervals`, and a `get_covered` list comprehension that
@@ -63,7 +64,7 @@ dynamic = ["version"]
 dependencies = [
     "click",
     "matplotlib>=3.9.0",
-    "duckdb>=1.5.4,<1.5.5",
+    "duckdb>=1.5.4,<=1.5.5",
 ]
 
 readme = "README.md"

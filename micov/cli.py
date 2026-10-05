@@ -278,6 +278,13 @@ cli.add_command(_nonqiita_alias)
     help="Genome names, with a header; columns `genome_id` then the name",
 )
 @click.option("--percentile", is_flag=True, default=False, help="Use percentile")
+@click.option(
+    "--sort-by-metadata-value",
+    is_flag=True,
+    default=False,
+    help="Order position plot groups by metadata value, numbers numerically, "
+    "rather than smallest group first",
+)
 def per_sample_group(
     parquet_coverage,
     sample_metadata,
@@ -291,6 +298,7 @@ def per_sample_group(
     memory,
     threads,
     percentile,
+    sort_by_metadata_value,
 ):
     """Generate sample group plots and coverage data."""
     view = View(
@@ -309,6 +317,7 @@ def per_sample_group(
         monte,
         monte_iters,
         percentile,
+        sort_by_value=sort_by_metadata_value,
     )
 
 
