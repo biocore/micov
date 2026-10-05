@@ -29,8 +29,8 @@ At the time of writing:
 
 | Tier | Result |
 |---|---|
-| Fast | 251 passed, 10 skipped |
-| Full | 261 passed, 0 skipped |
+| Fast | 290 passed, 10 skipped |
+| Full | 300 passed, 0 skipped |
 
 The 10 fast-tier skips are the `requires_full_tier` tests. Any other skip
 needs a reason: `requires_miint_build` is legitimate, and a skip you caused
@@ -68,7 +68,7 @@ samples. Test those with synthetic data spanning thousands of genomes; see
 | `test_plot.py` | `position_plot_segments`, `ks_2samp`, `ks_table`, the per-genome loop's slicing, Monte Carlo pool and figure closing, and group colours: their colour-blind separation, dashes past five groups, the warning past ten |
 | `test_quant.py` | Bin edges and hit counts |
 | `test_io.py` | Lengths parsing and header detection; BED3 loading; the shared header rule; `depth-plot`'s readers |
-| `test_depth.py` | `depth-plot`'s computation: so far, which samples and genomes are used and what is reported, on the `dp_*` fixtures |
+| `test_depth.py` | `depth-plot`'s computation: which samples and genomes are used and what is reported, windowed per-base depth, merged breadth, and the binned group statistics, hand-computed on the `dp_*` fixtures and on literal reads, plus window-size invariance and a CIGAR-walking oracle |
 | `test_miint.py` | Connection, overrides, error messages, capability check |
 | `test_quoting.py` | `sql_string`, and every SQL literal site driven with a path containing `'` |
 | `test_dependencies.py` | No module imports `polars`, `numba`, `pyarrow` or `scipy` |

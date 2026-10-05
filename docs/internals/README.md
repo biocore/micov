@@ -17,6 +17,7 @@ same change.
 | [commands.md](commands.md) | You change a CLI command, or need to know what one does end to end |
 | [view.md](view.md) | You touch `View`, feature filtering, regions, or presence/absence |
 | [curves-and-ks.md](curves-and-ks.md) | You touch ranking, cumulative curves, Monte Carlo, position plots, or KS output |
+| [depth-plot.md](depth-plot.md) | You touch `depth-plot`: its layers, per-base depth and breadth, or its bins |
 | [miint.md](miint.md) | You add or change a call into the miint extension, or debug loading it |
 | [testing.md](testing.md) | You add a test, see a golden fail, or need to know what a tier covers |
 | [traps.md](traps.md) | **Before any non-trivial change.** Each entry is a mistake already made once |

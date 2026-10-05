@@ -63,6 +63,11 @@ test that guards it.
   `test_a_genome_with_no_large_group_leaves_no_figure_open` pins this.
 - **Unfocused Monte Carlo needs `sample_universe`.** It is computed once,
   before the loop, because one genome's rows cannot tell it.
+- **A `depth-plot` window costs six to seven times its depth array.** miint's
+  `compute_coverage_depth` aggregation peaks there whatever the thread count
+  or fetch route. Sized at 2**26 cells (256 MiB) as first designed, 10 Mb x
+  300 samples peaked at 3.15 GiB for no gain in speed; `_depth.WINDOW_CELLS`
+  is 2**22. Measure peak RSS before raising it ([depth-plot.md](depth-plot.md)).
 
 ## Inputs
 

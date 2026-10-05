@@ -73,7 +73,7 @@ join and filter predicates.
 | `_cov.py` | Ranking (`ordered_coverage`) and accumulation (`cumulative_covered`, `cumulative_curves`, `compute_cumulative`). Operates on dict-of-numpy tables; the accumulation itself is miint SQL |
 | `_plot.py` | `per_sample_plots` (the per-genome loop), `coverage_curve`, `add_monte`, `position_plot`, `ks_2samp`/`ks_table`, the single-sample `position-plot`, and `_write_delimited` |
 | `_quant.py` | `binning`'s SQL: `bin_list_sql`, `pos_to_bins`, `create_bin_list` |
-| `_depth.py` | `depth-plot`'s computation. So far `intersect_layers`: which samples and genomes are used, and the report of those left out. The command itself is not wired yet |
+| `_depth.py` | `depth-plot`'s computation ([depth-plot.md](depth-plot.md)): `intersect_layers` (which samples and genomes are used, and the report of those left out), then per genome `genome_bins`, binned group statistics from windowed per-base depth (`stage_depth`, `window_depth`) and merged breadth (`stage_breadth`, `coverage_counts`). The command itself is not wired yet |
 | `_constants.py` | Frozen column names (`COLUMN_*`) and the three presence states |
 | `_utils.py` | The `micov` logger, and `sql_string`, the one way a value enters a SQL string literal |
 
@@ -82,7 +82,8 @@ join and filter predicates.
 - **DuckDB relations and tables** are used for everything set-shaped: parsing,
   joins, filtering, aggregation, binning and presence.
 - **dict of numpy arrays**, the shape `DuckDBPyRelation.fetchnumpy()` returns,
-  is used on the curve and plot path (`_cov`, `_plot`). String columns arrive
+  is used on the curve and plot path (`_cov`, `_plot`) and for `depth-plot`'s
+  bins (`_depth`). String columns arrive
   as `object` arrays. `_cov.mask_table(table, keep)` applies a boolean mask or
   an index array to every column at once.
 
@@ -109,8 +110,9 @@ that connection choose names that cannot collide:
   `position-plot`), never on a `View`'s.
 - `depth-plot` never builds a `View`, because its inputs are not the Parquet
   pair. On its own connection it uses the views `depth_layer` and
-  `breadth_layer`, and the tables `depth_features`, `sample_groups`, `orfs`,
-  `depth_roster` and `depth_genomes`.
+  `breadth_layer`, the tables `depth_features`, `sample_groups`, `orfs`,
+  `depth_roster` and `depth_genomes`, and the temp tables `depth_alignments`
+  (one genome at a time) and `breadth_intervals`.
 
 ## Platform
 

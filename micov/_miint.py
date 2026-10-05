@@ -59,7 +59,8 @@ MIINT_REPOSITORY = "https://ftp.microbio.me/pub/miint"
 #: fails in the query -- catching that would mean calling each one, which is
 #: too much to do on every connection.
 REQUIRED_MIINT_FUNCTIONS = (
-    "compress_intervals",  # _io.compress_alignments, _view region positions
+    "compress_intervals",  # _io.compress_alignments, _view, _depth.stage_breadth
+    "compute_coverage_depth",  # _depth.window_depth, depth-plot's per-base depth
     "cumulative_coverage",  # _cov.cumulative_covered, the curve accumulation
     "ks_2samp",  # _plot.ks_2samp, the pairwise curve comparisons
     "read_alignments",  # _io.compress_alignments

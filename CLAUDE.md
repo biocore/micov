@@ -24,6 +24,7 @@ The compute runs on DuckDB plus the **miint** DuckDB extension. Runtime dependen
 | `commands.md` | Each CLI command, from click down to SQL |
 | `view.md` | `View`'s three filter modes, regions, presence, the header rule |
 | `curves-and-ks.md` | Ranking, the tie-break, accumulation, Monte Carlo, position plots, KS and Bonferroni |
+| `depth-plot.md` | `depth-plot`'s layers, windowed per-base depth, breadth, and bins |
 | `miint.md` | Loading the extension, the functions called, the stale-cache trap |
 | `testing.md` | Tiers, goldens, comparators, tolerances |
 | `traps.md` | **Read before any non-trivial change.** Each entry is a mistake already made once |
