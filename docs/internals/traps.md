@@ -34,6 +34,14 @@ test that guards it.
   dependence on row order anywhere on the curve path. `View` relations come
   from parallel scans, and their order changes between runs.
 
+## Plots
+
+- **Take group colours from `_plot.group_style`, never `C{n}` or a
+  matplotlib default.** The default cycle's orange and green are one colour
+  to a protanope, and micov overlays groups. `test_plot.GroupPaletteTests`
+  checks the palette, and [curves-and-ks.md](curves-and-ks.md#group-colours)
+  says why it has five colours.
+
 ## Performance
 
 - **Keep the scaled position plot's marks in numpy arrays.** Overlap
@@ -125,7 +133,9 @@ first.
 - **`binning --rank` does nothing.** The ranking is always written, and the
   help text says so.
 - **`coverage_curve` considers only the first 10 metadata values** in sorted
-  order: `zip(..., range(10), strict=False)`.
+  order (`MAX_GROUPS`), counting groups too small to plot. Groups past the
+  tenth that are big enough to plot are named in a warning, and are still
+  not plotted.
 - **Monte Carlo is unseeded**, so its rows differ between runs.
 - **`stats_by_variance_of_sample_hits.tsv` is ordered by
   `sample_hits_std DESC` alone**, so ties come out in arbitrary order.

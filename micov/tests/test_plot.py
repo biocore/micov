@@ -21,18 +21,28 @@ import math
 import os
 import shutil
 import unittest
+from itertools import combinations
 from tempfile import mkdtemp
 from unittest import mock
 
 import duckdb
+import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import to_hex
 
 from micov import _plot
 from micov._io import load_bed_cov, load_genome_lengths
 from micov._miint import connection
-from micov._plot import KS_HEADER, ks_2samp, ks_table, position_plot_segments
+from micov._plot import (
+    GROUP_COLORS,
+    KS_HEADER,
+    ks_2samp,
+    ks_table,
+    position_plot_segments,
+)
 from micov._view import View
 from micov.tests._golden import TSV_FLOAT_REL_TOL
+from micov.tests.test_cov import COVERAGE_COLUMNS, POSITION_COLUMNS, table
 
 #: Deliberately more awkward than `mini_sampleA.cov`: several intervals per
 #: genome, rows interleaved and out of order, two different genome lengths so a
@@ -110,6 +120,17 @@ class PositionPlotSegmentTests(unittest.TestCase):
 
     def test_every_genome_with_a_length_is_plotted(self):
         self.assertEqual(sorted(self.load()), ["G1", "G2"])
+
+    def test_the_plot_is_drawn_in_the_first_group_colour(self):
+        self.load()
+        colours = []
+
+        def capture(*args, **kwargs):
+            colours.extend(to_hex(c.get_color()[0]) for c in plt.gca().collections)
+
+        with mock.patch.object(_plot.plt, "savefig", capture):
+            _plot.single_sample_position_plot(self.con, f"{self.d}/out")
+        self.assertEqual(colours, [GROUP_COLORS[0].lower()] * 2, "one per genome")
 
 
 #: Two frozen curve pairs from `example/`, captured by recording what
@@ -649,6 +670,226 @@ class PerSamplePlotsPerGenomeTests(unittest.TestCase):
             sample_universe=np.unique(coverage["sample_id"]),
         )
         self.assertEqual(plt.get_fignums(), [])
+
+
+#: Machado, Oliveira & Fernandes (2009) dichromacy at severity 1.0, applied to
+#: linear RGB. This is the simulation the dataviz skill's `validate_palette.js`
+#: uses, and the thresholds below are calibrated to it.
+MACHADO = {
+    "protan": np.array([[0.152286, 1.052583, -0.204868],
+                        [0.114503, 0.786281, 0.099216],
+                        [-0.003882, -0.048116, 1.051998]]),
+    "deutan": np.array([[0.367322, 0.860646, -0.227968],
+                        [0.280085, 0.672501, 0.047413],
+                        [-0.011820, 0.042940, 0.968881]]),
+}
+
+#: OKLab Delta E x 100 that any two groups must keep: as a protanope or
+#: deuteranope sees them, and under normal vision.
+CVD_MIN_DELTA_E = 8.0
+NORMAL_MIN_DELTA_E = 15.0
+
+
+def _linear_rgb(hex_color):
+    srgb = np.array([int(hex_color[i:i + 2], 16) / 255 for i in (1, 3, 5)])
+    return np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+
+
+def _oklab(rgb):
+    lms = np.cbrt(np.array([[0.4122214708, 0.5363325363, 0.0514459929],
+                            [0.2119034982, 0.6806995451, 0.1073969566],
+                            [0.0883024619, 0.2817188376, 0.6299787005]]) @ rgb)
+    return np.array([[0.2104542553, 0.7936177850, -0.0040720468],
+                     [1.9779984951, -2.4285922050, 0.4505937099],
+                     [0.0259040371, 0.7827717662, -0.8086757660]]) @ lms
+
+
+def delta_e(a, b, deficiency=None):
+    """OKLab Delta E x 100 between two hex colours, optionally as a dichromat."""
+    a, b = _linear_rgb(a), _linear_rgb(b)
+    if deficiency is not None:
+        a = np.clip(MACHADO[deficiency] @ a, 0, 1)
+        b = np.clip(MACHADO[deficiency] @ b, 0, 1)
+    return 100 * np.linalg.norm(_oklab(a) - _oklab(b))
+
+
+class GroupPaletteTests(unittest.TestCase):
+    """Any two group colours stay distinct to a colour-blind reader.
+
+    micov overlays its groups, so any two of them can end up side by side. The
+    matplotlib default micov used before this fails exactly that: its orange
+    (C1) and green (C2) are the same colour under protanopia, and roughly one
+    man in twelve has a red-green deficiency.
+    """
+
+    def test_the_check_catches_the_palette_it_replaced(self):
+        # the validator measures 0.7: indistinguishable
+        self.assertLess(delta_e("#ff7f0e", "#2ca02c", "protan"), 1.0)
+
+    def test_the_check_agrees_with_the_palette_validator(self):
+        """Reproduce `validate_palette.js --pairs all` on Okabe-Ito's first five.
+
+        It reported 11.0 worst-case colour-blind and 15.6 worst-case normal
+        vision. If this port disagreed, the thresholds would not mean what
+        they say.
+        """
+        okabe_ito = ("#0072B2", "#E69F00", "#56B4E9", "#D55E00", "#009E73")
+        pairs = list(combinations(okabe_ito, 2))
+        worst_cvd = min(delta_e(a, b, d) for a, b in pairs for d in MACHADO)
+        worst_normal = min(delta_e(a, b) for a, b in pairs)
+        self.assertEqual(round(worst_cvd, 1), 11.0)
+        self.assertEqual(round(worst_normal, 1), 15.6)
+
+    def test_every_pair_of_group_colours_is_distinct(self):
+        for a, b in combinations(GROUP_COLORS, 2):
+            for deficiency in MACHADO:
+                with self.subTest(pair=(a, b), vision=deficiency):
+                    self.assertGreaterEqual(
+                        delta_e(a, b, deficiency), CVD_MIN_DELTA_E
+                    )
+            with self.subTest(pair=(a, b), vision="normal"):
+                self.assertGreaterEqual(delta_e(a, b), NORMAL_MIN_DELTA_E)
+
+
+class CoverageCurveGroupStyleTests(unittest.TestCase):
+    """How `coverage_curve` keeps up to ten overlaid groups apart.
+
+    Only five colours stay distinct on every pair, so groups six to ten reuse
+    them as dashed lines. Groups past the tenth have never been plotted and
+    still are not, because adding one would change the published `.ks.csv`
+    rows. What changes is that they are no longer dropped silently: a study
+    could otherwise lose a group from its figure and its KS table without
+    anyone noticing.
+    """
+
+    def setUp(self):
+        self.d = mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+
+    def curve(self, sizes, min_group_size=1):
+        """Draw a non-cumulative curve for one group of each size in `sizes`.
+
+        Groups are named g00, g01, ... so that sorted order is index order.
+        Returns the (colour, linestyle) of each line and the legend text.
+        """
+        metadata, coverage, positions = [], [], []
+        for g, size in enumerate(sizes):
+            for i in range(size):
+                sid = f"S{g:02d}_{i}"
+                metadata.append((sid, f"g{g:02d}"))
+                coverage.append([sid, "G1", 10 + i, 1000, (10 + i) / 1000 * 100])
+                positions.append([sid, "G1", 0, 10 + i])
+        metadata = {
+            "sample_id": np.array([m[0] for m in metadata], dtype=object),
+            "grp": np.array([m[1] for m in metadata], dtype=object),
+        }
+        coverage = table(COVERAGE_COLUMNS, coverage)
+
+        drawn = {}
+
+        def capture(*args, **kwargs):
+            ax = plt.gca()
+            drawn["lines"] = [(to_hex(ln.get_color()), ln.get_linestyle())
+                              for ln in ax.get_lines()]
+            drawn["legend"] = [t.get_text() for t in ax.get_legend().get_texts()]
+
+        with mock.patch.object(_plot.plt, "savefig", capture):
+            _plot.coverage_curve(
+                None,
+                metadata,
+                coverage,
+                table(POSITION_COLUMNS, positions),
+                "G1",
+                "grp",
+                f"{self.d}/out",
+                "name1",
+                False,
+                min_group_size=min_group_size,
+                sample_universe=np.unique(coverage["sample_id"]),
+            )
+        return drawn.get("lines", []), drawn.get("legend", [])
+
+    def test_groups_six_to_ten_reuse_the_colours_dashed(self):
+        lines, _ = self.curve([2] * 10)
+        expected = [(GROUP_COLORS[i % 5].lower(), "-" if i < 5 else "--")
+                    for i in range(10)]
+        self.assertEqual(lines, expected)
+
+    def test_an_eleventh_group_is_named_in_a_warning(self):
+        with self.assertLogs("micov", level="WARNING") as logged:
+            lines, legend = self.curve([2] * 12)
+        self.assertEqual(len(lines), 10, "groups past the tenth stay unplotted")
+        self.assertNotIn("g10 (n=2)", legend)
+        message = "\n".join(logged.output)
+        for expected in ("G1", "name1", "non-cumulative", "grp", "g10", "g11"):
+            self.assertIn(expected, message)
+
+    def test_ten_groups_report_nothing(self):
+        with self.assertNoLogs("micov", level="WARNING"):
+            self.curve([2] * 10)
+
+    def test_a_group_too_small_to_plot_is_not_reported(self):
+        """g10 has two samples against a minimum of three: the cap loses nothing.
+
+        Without this, a metadata column with many rare values would print a
+        line for nearly every genome of a large study.
+        """
+        with self.assertNoLogs("micov", level="WARNING"):
+            self.curve([3] * 10 + [2], min_group_size=3)
+
+
+class PositionPlotGroupColourTests(unittest.TestCase):
+    """Position plots colour groups like the curves, and name every block.
+
+    Groups six and up reuse colours here as well, and a block of samples
+    cannot be dashed. What tells two same-coloured groups apart is the group
+    name under each block, so that is pinned too.
+    """
+
+    def setUp(self):
+        self.d = mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+
+    def test_blocks_take_the_group_colours_and_are_named(self):
+        # g00 is the largest, so blocks are laid out g05 (1 sample) .. g00 (6)
+        sizes = [6, 5, 4, 3, 2, 1]
+        metadata, coverage, positions = [], [], []
+        for g, size in enumerate(sizes):
+            for i in range(size):
+                sid = f"S{g:02d}_{i}"
+                metadata.append((sid, f"g{g:02d}"))
+                coverage.append([sid, "G1", 10, 1000, 1.0])
+                positions.append([sid, "G1", 0, 10])
+        metadata = {
+            "sample_id": np.array([m[0] for m in metadata], dtype=object),
+            "grp": np.array([m[1] for m in metadata], dtype=object),
+        }
+
+        drawn = {}
+
+        def capture(*args, **kwargs):
+            ax = plt.gca()
+            drawn["colours"] = [to_hex(c.get_color()[0]) for c in ax.collections]
+            drawn["names"] = [t.get_text() for t in ax.get_xticklabels()]
+
+        with mock.patch.object(_plot.plt, "savefig", capture):
+            _plot.position_plot(
+                metadata,
+                table(COVERAGE_COLUMNS, coverage),
+                table(POSITION_COLUMNS, positions),
+                "G1",
+                "grp",
+                f"{self.d}/out",
+                "name1",
+                0,
+                1000,
+            )
+
+        layout = range(len(sizes) - 1, -1, -1)
+        expected = [GROUP_COLORS[g % 5].lower()
+                    for g in layout for _ in range(sizes[g])]
+        self.assertEqual(drawn["colours"], expected)
+        self.assertEqual(drawn["names"], [f"g{g:02d}" for g in layout])
 
 
 if __name__ == "__main__":

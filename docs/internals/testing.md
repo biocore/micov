@@ -19,15 +19,18 @@ make lint-fix                      # the only target that edits files
   `pip install -e ".[test]"`.
 - **Which micov the CLI tests run.** The CLI tests run the `micov` console
   script found **next to `sys.executable`**, and fall back to `PATH`. A stale
-  non-editable install would shadow the working tree, so check which micov
-  you are testing.
+  non-editable install, or an editable install of a different checkout, would
+  shadow the working tree. The unit tests would still pass against your
+  tree, because pytest puts the cwd first on `sys.path`, while the CLI goldens
+  tested other code. Check with `cd /tmp && python -c "import micov;
+  print(micov.__file__)"`, and if it is wrong, export `PYTHONPATH=$PWD`.
 
 At the time of writing:
 
 | Tier | Result |
 |---|---|
-| Fast | 195 passed, 10 skipped |
-| Full | 205 passed, 0 skipped |
+| Fast | 204 passed, 10 skipped |
+| Full | 214 passed, 0 skipped |
 
 The 10 fast-tier skips are the `requires_full_tier` tests. Any other skip
 needs a reason: `requires_miint_build` is legitimate, and a skip you caused
@@ -62,7 +65,7 @@ samples. Test those with synthetic data spanning thousands of genomes; see
 | `test_alignments.py` | The miint ingest: coordinates, merging, the reference-map guard, and the Parquet pair written by `compress` |
 | `test_cov.py` | Ranking, accumulation and the tie-break; `IntervalMergeTests` checks merge cases against `compress_intervals` |
 | `test_view.py` | `View` modes, region clipping and breadth, presence, feature names, the header rule |
-| `test_plot.py` | `position_plot_segments`, `ks_2samp`, `ks_table`, and the per-genome loop's slicing, Monte Carlo pool and figure closing |
+| `test_plot.py` | `position_plot_segments`, `ks_2samp`, `ks_table`, the per-genome loop's slicing, Monte Carlo pool and figure closing, and group colours: their colour-blind separation, dashes past five groups, the warning past ten |
 | `test_quant.py` | Bin edges and hit counts |
 | `test_io.py` | Lengths parsing and header detection; BED3 loading |
 | `test_miint.py` | Connection, overrides, error messages, capability check |
