@@ -218,6 +218,12 @@ def compress_alignments(con, sam, sample_id, disable_compression=False):
     else:
         intervals = "compress_intervals(position, stop_position)"
 
+    # An unmapped read keeps any RNAME and POS it was given -- aligners place
+    # an unmapped mate beside its partner -- and `read_alignments` reports it
+    # with stop_position 0. That backwards interval covers nothing, but
+    # `compress_intervals` widens [POS, 0) to [0, POS).
+    intervals += " FILTER (WHERE stop_position > position)"
+
     with _htslib_readable(sam) as readable:
         con.sql(f"""CREATE OR REPLACE TABLE alignment_groups AS
                     SELECT reference,
@@ -233,9 +239,11 @@ def compress_alignments(con, sam, sample_id, disable_compression=False):
     # yields nothing, so BED3 handed to `compress` used to produce two empty
     # parquet files and exit 0. The polars path this replaced errored here
     # too, and an empty result is never what the caller meant by asking to
-    # compress something.
+    # compress something. A genome whose reads were all unmapped has no
+    # intervals (NULL), so it does not count as aligned either.
     attributed = con.sql("""SELECT COUNT(*) FROM alignment_groups
-                            WHERE reference != '*'""").fetchone()[0]
+                            WHERE reference != '*'
+                                AND len(intervals) > 0""").fetchone()[0]
     if attributed == 0:
         raise ValueError(
             f"No alignments were read from '{sam}'. `micov compress` takes "

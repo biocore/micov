@@ -38,9 +38,11 @@ change goes in `ChangeLog.md`.
   `read_alignments(path, reference_lengths := genome_lengths)`, grouped by
   reference, with `compress_intervals(position, stop_position)` per group.
   `--disable-compression` uses `list({start, stop})` instead, so overlapping
-  intervals are kept.
+  intervals are kept. Both aggregates take only rows with
+  `stop_position > position`, which leaves out unmapped reads.
 - **Unattributed reads** have reference `*`. They are counted and warned
-  about, then dropped. If nothing is attributed at all, the command raises.
+  about, then dropped. If no genome is left with an interval, the command
+  raises. This includes a file whose reads are all unmapped.
 - **Output** is `{output}.covered_positions.parquet` and
   `{output}.coverage.parquet` for this one sample.
 - `cli_test.sh` checks that stdin and `--data` produce the same intervals.

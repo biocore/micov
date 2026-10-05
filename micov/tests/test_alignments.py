@@ -34,6 +34,18 @@ def sam(*records):
     )
 
 
+#: Paired-end SAM in which B's mate did not align. Aligners place an unmapped
+#: mate at its partner's position (flag 133, RNAME and POS set, CIGAR `*`), and
+#: `read_alignments` reports it with `stop_position` 0 -- an interval running
+#: backwards, [300, 0).
+PLACED_UNMAPPED_MATE = (
+    "A\t99\tX\t100\t60\t3M\t=\t200\t0\tAAA\tIII\n"
+    "A\t147\tX\t200\t60\t3M\t=\t100\t0\tAAA\tIII\n"
+    "B\t73\tX\t300\t60\t3M\t=\t300\t0\tAAA\tIII\n"
+    "B\t133\tX\t300\t0\t*\t=\t300\t0\tAAA\tIII\n"
+)
+
+
 class AlignmentIngestTests(unittest.TestCase):
     def setUp(self):
         self.d = mkdtemp()
@@ -139,6 +151,61 @@ class AlignmentIngestTests(unittest.TestCase):
             fp.write(sam(("A", "X", 1, "50M")))
 
         self.assertEqual(self.positions(path), [("X", 1, 51, "S1")])
+
+    def test_an_unmapped_mate_adds_no_breadth(self):
+        """An unmapped mate placed beside its partner covers nothing.
+
+        `compress_intervals` turns the backwards [300, 0) into [0, 300), so the
+        sample was reported as covering the genome from its first base to its
+        last read -- 303 bases here instead of 9. Paired-end SAM is full of
+        such mates, and released (pre-miint) micov counted them as zero width.
+        Nothing in `example/` has one, which is how it got through.
+        """
+        self.lengths(X=1000)
+        path = self.write_sam(PLACED_UNMAPPED_MATE)
+
+        self.assertEqual(
+            self.positions(path),
+            [("X", 100, 103, "S1"), ("X", 200, 203, "S1"), ("X", 300, 303, "S1")],
+        )
+
+    def test_without_compression_no_interval_runs_backwards(self):
+        """Uncompressed, [300, 0) was written as is.
+
+        `write_coverage_parquet` then fails on `stop - start` underflowing
+        UINTEGER, so `--disable-compression` crashed on paired-end input.
+        """
+        self.lengths(X=1000)
+        path = self.write_sam(PLACED_UNMAPPED_MATE)
+
+        positions = self.positions(path, disable_compression=True)
+        self.assertEqual(
+            positions,
+            [("X", 100, 103, "S1"), ("X", 200, 203, "S1"), ("X", 300, 303, "S1")],
+        )
+        write_coverage_parquet(
+            self.con, f"FROM {ALIGNMENT_POSITIONS_TABLE}", f"{self.d}/out"
+        )
+
+    def test_only_unmapped_reads_is_no_alignments(self):
+        """A file of unmapped reads aligned nothing, wherever they are placed.
+
+        Unplaced ones (RNAME `*`) already raise; placed ones must not instead
+        produce an empty Parquet pair and exit 0.
+        """
+        self.lengths(X=1000)
+        path = self.write_sam("B\t4\tX\t300\t0\t*\t*\t0\t0\tAAA\tIII\n")
+
+        with self.assertRaisesRegex(ValueError, "No alignments were read"):
+            compress_alignments(self.con, path, "S1")
+
+    def test_an_unmapped_mate_is_not_unattributed(self):
+        """It names a genome in `--lengths`, so the reference-map guard is quiet."""
+        self.lengths(X=1000)
+        path = self.write_sam(PLACED_UNMAPPED_MATE)
+
+        with self.assertNoLogs("micov", level="WARNING"):
+            compress_alignments(self.con, path, "S1")
 
 
 class ReferenceMapGuardTests(unittest.TestCase):
