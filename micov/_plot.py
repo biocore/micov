@@ -26,6 +26,11 @@ from ._io import BED_POSITIONS_TABLE
 #: `per_sample_plots`' genome-sorted copy of the positions, sliced per genome.
 PLOT_POSITIONS_TABLE = "plot_positions"
 
+#: The narrowest bucket in a scaled position plot. 1/10000 of a 145kb
+#: chloroplast is 15bp, narrower than the intervals being binned, and a genome
+#: under 10kb got buckets of less than a base.
+MIN_BUCKET_WIDTH = 100
+
 #: Header of every `.ks.csv`. The first four names are frozen; the Bonferroni
 #: column was appended in M11a so that readers taking columns by position were
 #: unaffected.
@@ -750,9 +755,9 @@ def position_plot(
     ymax : int
         For forcing ax.ylim.
     scale : int, optional
-        If specified, represent the genome as `scale` number of buckets. A
-        bucket is considered represented if any position within the bucket
-        is covered
+        If specified, represent the genome as `scale` number of buckets, or as
+        `MIN_BUCKET_WIDTH` buckets if those would be narrower. A bucket is
+        considered represented if any position within the bucket is covered
 
     """
     if scale is not None and scale <= 1:
@@ -764,6 +769,17 @@ def position_plot(
     colors = []
 
     length = ymax - ymin
+
+    if scale is not None:
+        if length >= scale * MIN_BUCKET_WIDTH:
+            # np.histogram's own edges, so long genomes keep the published `y`
+            edges = np.linspace(ymin, ymax, scale + 1, dtype=np.float64)
+        else:
+            # exactly MIN_BUCKET_WIDTH from ymin; the last bucket holds the rest
+            edges = np.append(
+                np.arange(ymin, ymax, MIN_BUCKET_WIDTH, dtype=np.float64),
+                np.float64(ymax),
+            )
 
     target_positions = mask_table(positions, positions[COLUMN_GENOME_ID] == target)
 
@@ -850,13 +866,19 @@ def position_plot(
                 )
                 ax.add_collection(lc)
             else:
-                # obs_bins = position_histogram(cur_positions, scale, ymin, ymax)
-                covered_positions = np.concatenate([starts, stops])
-
-                obs_count, obs_bins = np.histogram(
-                    covered_positions, bins=scale, range=(ymin, ymax)
-                )
-                obs_bins = obs_bins[:-1][obs_count > 0]
+                # every bucket [start, stop) overlaps: from the one holding
+                # `start` to the last one whose left edge is before `stop`.
+                # Above 1Mb edges are fractional, and one can fall inside the
+                # last base, so "the bucket holding stop - 1" would miss it. An
+                # alignment can run off the end of the genome; only the part
+                # before `ymax` is plotted.
+                first = np.searchsorted(edges, starts, side="right") - 1
+                last = np.searchsorted(edges, np.minimum(stops, ymax),
+                                       side="left") - 1
+                touched = np.zeros(len(edges), dtype=np.int64)
+                np.add.at(touched, first, 1)
+                np.add.at(touched, last + 1, -1)
+                obs_bins = edges[:-1][np.cumsum(touched[:-1]) > 0]
                 hist_x.extend([x for _ in obs_bins])
                 hist_y.extend(obs_bins)
 
@@ -884,7 +906,7 @@ def position_plot(
     else:
         filename = (
             f"{output}.{target_name}.{target}.{variable}."
-            f"position-plot-1_{scale}th-scale.tsv.gz"
+            "position-plot-scaled.tsv.gz"
         )
         _write_delimited(
             filename,
@@ -894,8 +916,8 @@ def position_plot(
             compress=True,
         )
         ax.set_title(f"Scaled position plot: {target} ({length}bp)", fontsize=20)
-        ax.set_ylabel(f"Coverage (1/{scale})th scale", fontsize=20)
-        scaletag = f"-1_{scale}th-scale"
+        ax.set_ylabel(f"Coverage ({edges[1] - edges[0]:.0f}bp buckets)", fontsize=20)
+        scaletag = "-scaled"
 
     ax.set_xlabel("Within group sample rank by coverage", fontsize=16)
     ax.set_xticks(label_pos, labels, rotation=45, ha="right", fontsize=16)

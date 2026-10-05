@@ -89,7 +89,8 @@ names cannot drift into separate implementations.
    (`WHERE genome_id = ?`), then calls:
    - `coverage_curve` twice: non-cumulative, then cumulative. The cumulative
      call writes the `.ks.csv`.
-   - `position_plot` twice: unscaled, then `scale=10000`. The scaled call
+   - `position_plot` twice: unscaled, then `scale=10000` (at most 10,000
+     buckets; see [curves-and-ks.md](curves-and-ks.md)). The scaled call
      writes the `.tsv.gz`.
 
    Plotting functions get **only their genome's rows**. That is a

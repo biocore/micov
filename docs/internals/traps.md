@@ -16,6 +16,11 @@ test that guards it.
   give different doubles, and the published values used the first. The order
   is the same in `_io.write_coverage_parquet`,
   `_cov.cumulative_curves` and `View`'s `proportion_covered * 100`.
+- **Scaled position plot buckets can have fractional edges.** Above 1Mb an
+  edge can fall inside an interval's last base. Mark buckets by overlap with
+  `[start, stop)`, never by "the bucket holding `stop - 1`": that dropped 259
+  marks from the `example/` goldens.
+  `test_a_bucket_edge_inside_the_last_base_still_marks_its_bucket` pins it.
 - **`ks-pvalue` is raw.** Bonferroni lives only in `ks-pvalue-bonferroni`.
   Never correct the published column in place.
 - **Do not widen the golden tolerance onto `ks-statistic`.** It matches
@@ -117,9 +122,6 @@ first.
   help text says so.
 - **`coverage_curve` considers only the first 10 metadata values** in sorted
   order: `zip(..., range(10), strict=False)`.
-- **The scaled position plot bins interval endpoints, not covered bases.** A
-  bucket that a long interval spans, but which contains neither of its ends,
-  is not marked.
 - **Monte Carlo is unseeded**, so its rows differ between runs.
 - **`stats_by_variance_of_sample_hits.tsv` is ordered by
   `sample_hits_std DESC` alone**, so ties come out in arbitrary order.

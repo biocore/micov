@@ -153,8 +153,8 @@ Per genome, under the `--output` prefix:
 {output}.{target_name}.{genome}.{variable}.{tag}.png
 {output}.{target_name}.{genome}.{variable}.{tag}.ks.csv          (cumulative only)
 {output}.{target_name}.{genome}.{variable}.position-plot.png
-{output}.{target_name}.{genome}.{variable}.position-plot-1_10000th-scale.png
-{output}.{target_name}.{genome}.{variable}.position-plot-1_10000th-scale.tsv.gz
+{output}.{target_name}.{genome}.{variable}.position-plot-scaled.png
+{output}.{target_name}.{genome}.{variable}.position-plot-scaled.tsv.gz
 ```
 
 - **`tag`** is `cumulative` or `non-cumulative`, with `-monte-{focused|unfocused}`
@@ -185,8 +185,13 @@ label_A,label_B,ks-statistic,ks-pvalue,ks-pvalue-bonferroni
 
 - `group`: the metadata value.
 - `x`: the sample's rank within the whole plot.
-- `y`: the left edge of each of the 10,000 histogram buckets the sample has
-  any coverage in.
+- `y`: the left edge of each bucket the sample has any coverage in. A
+  genome of 1Mb or more has 10,000 buckets, with `np.histogram`'s fractional
+  edges; a shorter genome or region has 100bp buckets from its start. See
+  [curves-and-ks.md](curves-and-ks.md).
+- Until 0.0.1-dev these files were `position-plot-1_10000th-scale.*`, with
+  10,000 buckets on every genome and only the buckets holding an interval's
+  ends marked.
 
 The bytes differ every run (the gzip mtime), so compare the decompressed
 content.

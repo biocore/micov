@@ -15,7 +15,10 @@ implementation before M5 replaced it -- this is Milestone 0's shape, freezing a
 baseline and then changing the code underneath it.
 """
 
+import csv
+import gzip
 import math
+import os
 import shutil
 import unittest
 from tempfile import mkdtemp
@@ -313,6 +316,94 @@ class KsTableTests(unittest.TestCase):
         rows = ks_table(self.con, {"a": LOW, monte: MONTE}, monte)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][4], "")
+
+
+class ScaledPositionPlotTests(unittest.TestCase):
+    """Which buckets the scaled position plot marks, and how wide they are.
+
+    Buckets were 1/10000 of the genome whatever the genome: 15bp on a 145kb
+    chloroplast, narrower than the peptides being plotted. Only the buckets
+    holding an interval's two ends were marked, which there dropped 49% of the
+    covered buckets. Buckets are now never narrower than 100bp, and every
+    bucket holding a covered base is marked.
+    """
+
+    def plot(self, intervals, ymin, ymax):
+        d = mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        n = len(intervals)
+        sample = np.array(["S0"], dtype=object)
+        _plot.position_plot(
+            {"sample_id": sample, "grp": np.array(["g"], dtype=object)},
+            {
+                "sample_id": sample,
+                "genome_id": np.array(["G1"], dtype=object),
+                "covered": np.array([1], dtype=np.uint32),
+                "length": np.array([ymax - ymin], dtype=np.uint32),
+                "percent_covered": np.array([1.0]),
+            },
+            {
+                "genome_id": np.full(n, "G1", dtype=object),
+                "start": np.array([s for s, _ in intervals], dtype=np.uint32),
+                "stop": np.array([e for _, e in intervals], dtype=np.uint32),
+                "sample_id": np.full(n, "S0", dtype=object),
+            },
+            "G1", "grp", f"{d}/out", "G1", ymin, ymax, scale=10000,
+        )
+        return f"{d}/out.G1.G1.grp.position-plot"
+
+    def marked(self, intervals, ymin=0, ymax=1000):
+        with gzip.open(f"{self.plot(intervals, ymin, ymax)}-scaled.tsv.gz",
+                       "rt") as fp:
+            return [float(row["y"]) for row in csv.DictReader(fp, delimiter="\t")]
+
+    def test_files_are_named_scaled_whatever_the_bucket_count(self):
+        prefix = self.plot([(150, 151)], 0, 1000)
+        self.assertTrue(os.path.exists(f"{prefix}-scaled.png"))
+        self.assertTrue(os.path.exists(f"{prefix}-scaled.tsv.gz"))
+
+    def test_a_short_genome_gets_100bp_buckets(self):
+        self.assertEqual(self.marked([(150, 151)]), [100.0])
+
+    def test_every_bucket_an_interval_covers_is_marked(self):
+        self.assertEqual(self.marked([(150, 420)]),
+                         [100.0, 200.0, 300.0, 400.0])
+
+    def test_stop_is_exclusive(self):
+        # [100, 200) covers nothing in the bucket that starts at 200
+        self.assertEqual(self.marked([(100, 200)]), [100.0])
+
+    def test_the_last_bucket_holds_the_remainder(self):
+        self.assertEqual(self.marked([(1020, 1050)], ymax=1050), [1000.0])
+
+    def test_an_interval_running_off_the_end_stops_at_the_last_bucket(self):
+        """`example/` has one: G000436435 is 5,348,036bp, an interval ends 5,348,037."""
+        self.assertEqual(self.marked([(850, 1001)]), [800.0, 900.0])
+
+    def test_region_buckets_start_at_the_region(self):
+        self.assertEqual(self.marked([(1060, 1100), (1150, 1151)], 1050, 1500),
+                         [1050.0, 1150.0])
+
+    def test_a_long_genome_keeps_its_published_bucket_edges(self):
+        """Above 1Mb the buckets are still np.histogram's 10,000.
+
+        The `example/` genomes are 4.7 and 5.3Mb, and the published plots were
+        drawn from them, so their `y` values must not move.
+        """
+        length = 4_719_737
+        _, edges = np.histogram([], bins=10000, range=(0, length))
+        self.assertEqual(self.marked([(1000, 1001)], ymax=length), [edges[2]])
+
+    def test_a_bucket_edge_inside_the_last_base_still_marks_its_bucket(self):
+        """Edges above 1Mb are fractional; 943.9474 falls inside base 943.
+
+        [900, 944) overlaps the bucket starting there, and the published plots
+        marked it. Asking which bucket holds `stop - 1` would not.
+        """
+        length = 4_719_737
+        _, edges = np.histogram([], bins=10000, range=(0, length))
+        self.assertEqual(self.marked([(900, 944)], ymax=length),
+                         [edges[1], edges[2]])
 
 
 class PerSamplePlotsPerGenomeTests(unittest.TestCase):

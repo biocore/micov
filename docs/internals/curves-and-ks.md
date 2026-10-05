@@ -131,11 +131,26 @@ Called twice per genome: `scale=None`, then `scale=10000`.
 5. `ymin` and `ymax` are `feature_metadata`'s `start` and `stop`. In genome
    mode those are 0 and the genome length; in region mode, the region.
 
-**What the scaled plot measures.** The scaled plot and its `.tsv.gz` take a
-`np.histogram` of each sample's interval **endpoints**, `starts` and `stops`
-concatenated, into `scale` buckets over `(ymin, ymax)`. They record the left
-edge of each non-empty bucket. A long interval that spans a bucket without
-an endpoint in it does **not** mark that bucket. This is frozen behaviour:
-the goldens carry it.
+**What the scaled plot measures.** The scaled plot and its `.tsv.gz` record,
+per sample, the left edge of every bucket that one of its intervals
+overlaps.
+
+- **Bucket width** is `(ymax - ymin) / scale`, but never less than
+  `_plot.MIN_BUCKET_WIDTH` (100bp). With `scale=10000`, a genome or region of
+  1Mb or more gets 10,000 buckets with `np.linspace` edges, which are the
+  edges `np.histogram` produced, so the published `y` values hold. Anything
+  shorter gets buckets exactly 100bp wide from `ymin`, and the last bucket
+  holds the remainder.
+- **Marking** is by overlap: `[start, stop)` marks every bucket from the one
+  holding `start` to the last one whose left edge is before `stop`. Fractional
+  edges can fall inside an interval's last base, so asking which bucket holds
+  `stop - 1` would drop a bucket the interval overlaps.
+- **An interval past `ymax`** is plotted up to `ymax`. `example/` has one,
+  1bp past the end of G000436435.
+- Before 0.0.1-dev, buckets were always 1/10,000 of the genome and only the
+  buckets holding an interval's `start` and `stop` were marked. On a 145kb
+  genome that is 15bp buckets, and half the covered buckets went unmarked.
+  The `example/` goldens gained 836 and 130 rows, and lost none.
+- `test_plot.ScaledPositionPlotTests` pins all of this.
 
 **Group size.** There is no minimum, so every genome gets position plots.
