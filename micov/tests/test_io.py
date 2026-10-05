@@ -1,578 +1,187 @@
-import io
-import sys
-import tarfile
+"""Tests for micov's input parsing.
+
+`load_genome_lengths` is the one that matters here. It is on the live
+`compress` and `cov-to-parquet` paths -- it supplies every coverage
+denominator, and doubles as htslib's reference map -- and until M5 it had no
+tests at all. Its four validation branches were covered only through
+`parse_genome_lengths`, the polars twin it was written to replace, so deleting
+that twin without moving these across would have silently stripped the
+coverage from the surviving function.
+
+The error messages are asserted verbatim, including the stray trailing quote in
+"is not integer'", because they are what a user sees when a length file is
+wrong and because they were the evidence that the two implementations agreed.
+"""
+
 import tempfile
-import time
 import unittest
 
-import polars as pl
-import polars.testing as plt
-
 from micov._constants import (
-    BED_COV_SCHEMA,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
-    COLUMN_NAME,
     COLUMN_START,
-    COLUMN_TAXONOMY,
-    GENOME_COVERAGE_SCHEMA,
-    GENOME_LENGTH_SCHEMA,
-    SAM_SUBSET_SCHEMA_PARSED,
+    COLUMN_STOP,
 )
-from micov._io import (
-    compress_from_stream,
-    parse_feature_names,
-    parse_genome_lengths,
-    parse_qiita_coverages,
-    parse_sam_to_df,
-    parse_taxonomy,
-    set_taxonomy_as_id,
-    write_qiita_cov,
-)
+from micov._io import load_bed_cov, load_genome_lengths
+from micov._miint import connection
 
 
-def _add_file(tf, name, data):
-    ti = tarfile.TarInfo(name)
-    ti.size = len(data)
-    ti.mtime = int(time.time())
-    tf.addfile(ti, io.BytesIO(data.encode("ascii")))
-
-
-def _create_qiita_cov(name):
-    tf = tarfile.open(name, "w:gz")
-
-    covdataname = "coverage_percentage.txt"
-    covdata = "foobar"
-
-    sample_a_name = "coverages/sample_a.cov"
-    sample_a_data = "G123\t1\t10\n" "G123\t100\t200\n" "G456\t5\t20\n" "G789\t2\t40\n"
-
-    sample_b_name = "coverages/sample_b.cov"
-    sample_b_data = "G123\t8\t15\n" "G123\t300\t400\n" "G789\t1\t100\n"
-
-    sample_c_name = "coverages/sample_c.cov"
-    sample_c_data = "G123\t1000\t10000\n"
-
-    _add_file(tf, covdataname, covdata)
-    _add_file(tf, sample_a_name, sample_a_data)
-    _add_file(tf, sample_b_name, sample_b_data)
-    _add_file(tf, sample_c_name, sample_c_data)
-
-    tf.close()
-
-
-class QiitaCovTests(unittest.TestCase):
-    def setUp(self):
-        kwargs = {}
-        if sys.version_info.minor >= 10:
-            kwargs.update({"ignore_cleanup_errors": True})
-
-        self.temp_dir = tempfile.TemporaryDirectory(**kwargs)
-        self.name = self.temp_dir.name + "/coverages.tgz"
-        _create_qiita_cov(self.name)
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def test_write_qiita_cov(self):
-        covs = [
-            (
-                "coverage_1.cov",
-                (
-                    "genome_id\tstart\tstop\n"
-                    "GXXX\t200\t300\n"
-                    "GXXX\t500\t600\n"
-                    "GXXX\t100\t200\n"
-                    "GYYY\t100\t200\n"
-                ),
-            ),
-            (
-                "coverage_2.cov",
-                (
-                    "genome_id\tstart\tstop\n"
-                    "GYYY\t500\t1000\n"
-                    "GYYY\t200\t400\n"
-                    "GXXX\t300\t400\n"
-                ),
-            ),
-            (
-                "coverage_3.cov",
-                (
-                    "genome_id\tstart\tstop\n"
-                    "GYYY\t500\t1000\n"
-                    "GXXX\t100\t400\n"
-                    "GZZZ\t200\t400\n"
-                ),
-            ),
-        ]
-        paths = []
-        for fname, data in covs:
-            path = self.temp_dir.name + f"/{fname}"
-            with open(path, "w") as fp:
-                fp.write(data)
-            paths.append(path)
-
-        lengths = pl.DataFrame(
-            [["GXXX", 600], ["GYYY", 1100], ["GZZZ", 2000]],
-            orient="row",
-            schema=GENOME_LENGTH_SCHEMA.dtypes_flat,
-        )
-
-        write_qiita_cov(self.name, paths, lengths)
-
-        tgz = tarfile.open(self.name)
-        obs_artifact_cov = pl.read_csv(
-            tgz.extractfile("artifact.cov").read(), separator="\t"
-        )
-        obs_cov_percent = pl.read_csv(
-            tgz.extractfile("coverage_percentage.txt").read(), separator="\t"
-        )
-
-        exp_artifact_cov = pl.DataFrame(
-            [
-                ["GXXX", 100, 400],
-                ["GXXX", 500, 600],
-                ["GYYY", 100, 400],
-                ["GYYY", 500, 1000],
-                ["GZZZ", 200, 400],
-            ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-
-        exp_cov_percent = pl.DataFrame(
-            [
-                ["GXXX", 400, 600, (400 / 600) * 100],
-                ["GYYY", 800, 1100, (800 / 1100) * 100],
-                ["GZZZ", 200, 2000, (200 / 2000) * 100],
-            ],
-            orient="row",
-            schema=GENOME_COVERAGE_SCHEMA.dtypes_flat,
-        )
-
-        obs_artifact_cov = obs_artifact_cov.sort([COLUMN_GENOME_ID, COLUMN_START])
-        obs_cov_percent = obs_cov_percent.sort(
-            [
-                COLUMN_GENOME_ID,
-            ]
-        )
-
-        # we disable type assertion as these are read from CSV, and the type
-        # is inferred
-        plt.assert_frame_equal(obs_artifact_cov, exp_artifact_cov, check_dtypes=False)
-        plt.assert_frame_equal(obs_cov_percent, exp_cov_percent, check_dtypes=False)
-
-        for name, exp in covs:
-            obs = tgz.extractfile(f"coverages/{name}")
-            self.assertEqual(obs.read().decode("utf-8").replace("\r\n", "\n"), exp)
-
-    def test_parse_qiita_coverages(self):
-        exp = pl.DataFrame(
-            [
-                ["G123", 1, 15],
-                ["G123", 100, 200],
-                ["G123", 300, 400],
-                ["G123", 1000, 10000],
-                ["G456", 5, 20],
-                ["G789", 1, 100],
-            ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        # always compress
-        obs = parse_qiita_coverages(self.name)
-        obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_qiita_coverages_always_compress(self):
-        exp = pl.DataFrame(
-            [
-                ["G123", 1, 15],
-                ["G123", 100, 200],
-                ["G123", 300, 400],
-                ["G123", 1000, 10000],
-                ["G456", 5, 20],
-                ["G789", 1, 100],
-            ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        # always compress
-        obs = parse_qiita_coverages(self.name, compress_size=0)
-        obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_qiita_coverages_never_compress(self):
-        exp = pl.DataFrame(
-            [
-                ["G123", 1, 10],
-                ["G123", 8, 15],
-                ["G123", 100, 200],
-                ["G123", 300, 400],
-                ["G123", 1000, 10000],
-                ["G456", 5, 20],
-                ["G789", 1, 100],
-                ["G789", 2, 40],
-            ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = parse_qiita_coverages(self.name, compress_size=None)
-        obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_qiita_coverages_keep(self):
-        exp = pl.DataFrame(
-            [
-                ["G123", 1, 15],
-                ["G123", 100, 200],
-                ["G123", 300, 400],
-                ["G456", 5, 20],
-                ["G789", 1, 100],
-            ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = parse_qiita_coverages(self.name, sample_keep={"sample_a", "sample_b"})
-        obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_qiita_coverages_drop(self):
-        exp = pl.DataFrame(
-            [
-                ["G123", 1, 15],
-                ["G123", 100, 200],
-                ["G123", 300, 400],
-                ["G456", 5, 20],
-                ["G789", 1, 100],
-            ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = parse_qiita_coverages(
-            self.name,
-            sample_drop={
-                "sample_c",
-            },
-        )
-        obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_qiita_coverages_keep_drop(self):
-        exp = pl.DataFrame(
-            [["G123", 1, 10], ["G123", 100, 200], ["G456", 5, 20], ["G789", 2, 40]],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = parse_qiita_coverages(
-            self.name,
-            sample_drop={
-                "sample_c",
-            },
-            sample_keep={
-                "sample_a",
-            },
-        )
-        obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_qiita_coverages_keep_feature(self):
-        exp = pl.DataFrame(
-            [
-                ["G123", 1, 15],
-                ["G123", 100, 200],
-                ["G123", 300, 400],
-                ["G123", 1000, 10000],
-            ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = parse_qiita_coverages(
-            self.name,
-            feature_keep={
-                "G123",
-            },
-        )
-        obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_qiita_coverages_drop_feature(self):
-        exp = pl.DataFrame(
-            [["G456", 5, 20], ["G789", 2, 40]],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = parse_qiita_coverages(
-            self.name,
-            sample_drop={
-                "sample_c",
-            },
-            sample_keep={
-                "sample_a",
-            },
-            feature_drop={
-                "G123",
-            },
-        )
-        obs = obs.sort([COLUMN_GENOME_ID, COLUMN_START])
-        plt.assert_frame_equal(obs, exp)
-
-
-class IOTests(unittest.TestCase):
+class GenomeLengthsTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.name = self.temp_dir.name + "/foo.tsv"
+        self.con = connection()
+        self.addCleanup(self.con.close)
 
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def test_parse_genome_lengths_good(self):
-        data = "foo\tbar\tbaz\n" "a\t10\txyz\n" "b\t20\txyz\n" "c\t30\txyz\n"
-
+    def write(self, data):
         with open(self.name, "w") as fp:
             fp.write(data)
+        return self.name
 
-        exp = pl.DataFrame(
-            [["a", 10], ["b", 20], ["c", 30]],
-            orient="row",
-            schema=[COLUMN_GENOME_ID, COLUMN_LENGTH],
+    def loaded(self):
+        return self.con.sql(
+            f"SELECT {COLUMN_GENOME_ID}, {COLUMN_LENGTH} "
+            "FROM genome_lengths ORDER BY 1"
+        ).fetchall()
+
+    def test_reads_a_headered_file(self):
+        """Columns are taken by position, not by name.
+
+        A length file is whatever the user had lying around -- the header here
+        is `foo/bar/baz`, and the third column is ignored entirely.
+        """
+        self.write("foo\tbar\tbaz\na\t10\txyz\nb\t20\txyz\nc\t30\txyz\n")
+        load_genome_lengths(self.con, self.name)
+        self.assertEqual(self.loaded(), [("a", 10), ("b", 20), ("c", 30)])
+
+    def test_reads_a_headerless_file(self):
+        """Header detection is a guess micov has to make.
+
+        There is no way to require a header -- released micov accepted both --
+        so the first line is sniffed, and a headerless file must not lose its
+        first genome to being mistaken for column names.
+        """
+        self.write("a\t10\txyz\nb\t20\txyz\nc\t30\txyz\n")
+        load_genome_lengths(self.con, self.name)
+        self.assertEqual(self.loaded(), [("a", 10), ("b", 20), ("c", 30)])
+
+    def test_a_genome_whose_id_is_part_of_genome_id_is_not_a_header(self):
+        """`id` is a substring of `genome_id`, and that is all it has in common.
+
+        Header detection used to test ``first_field in "genome_id"`` -- a
+        substring test on a plain string -- so a headerless file whose first
+        genome was `id`, `genome` or `e` read as having a header, and that
+        genome's row was silently dropped from every denominator.
+        """
+        for genome in ("id", "genome", "e"):
+            with self.subTest(first_genome=genome):
+                self.con.sql("DROP TABLE IF EXISTS genome_lengths")
+                self.write(f"{genome}\t10\nb\t20\n")
+                load_genome_lengths(self.con, self.name)
+                self.assertEqual(self.loaded(), sorted([(genome, 10), ("b", 20)]))
+
+    def test_the_canonical_header_is_a_header(self):
+        self.write("genome_id\tlength\na\t10\nb\t20\n")
+        load_genome_lengths(self.con, self.name)
+        self.assertEqual(self.loaded(), [("a", 10), ("b", 20)])
+
+    def test_a_commented_header_is_a_header(self):
+        self.write("#genome_id\tlength\na\t10\nb\t20\n")
+        load_genome_lengths(self.con, self.name)
+        self.assertEqual(self.loaded(), [("a", 10), ("b", 20)])
+
+    def test_renames_to_the_canonical_columns(self):
+        """Everything downstream joins on `genome_id` and divides by `length`."""
+        self.write("foo\tbar\tbaz\na\t10\txyz\n")
+        load_genome_lengths(self.con, self.name)
+        described = self.con.sql("DESCRIBE genome_lengths").fetchall()
+        self.assertEqual(
+            [(row[0], row[1]) for row in described],
+            [(COLUMN_GENOME_ID, "VARCHAR"), (COLUMN_LENGTH, "BIGINT")],
         )
-        obs = parse_genome_lengths(self.name)
-        plt.assert_frame_equal(obs, exp)
 
-    def test_parse_genome_lengths_noheader(self):
-        data = "a\t10\txyz\n" "b\t20\txyz\n" "c\t30\txyz\n"
+    def test_non_integer_lengths_are_rejected(self):
+        """A non-numeric length means the file's columns are not what micov thinks.
 
-        with open(self.name, "w") as fp:
-            fp.write(data)
-
-        exp = pl.DataFrame(
-            [["a", 10], ["b", 20], ["c", 30]],
-            orient="row",
-            schema=[COLUMN_GENOME_ID, COLUMN_LENGTH],
-        )
-        obs = parse_genome_lengths(self.name)
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_genome_lengths_not_numeric(self):
-        data = "foo\tbar\tbaz\n" "a\t10\txyz\n" "b\tXXX\txyz\n" "c\t30\txyz\n"
-
-        with open(self.name, "w") as fp:
-            fp.write(data)
-
+        Left alone it would produce a nonsense denominator rather than an
+        error, and the message names the column as the *file* labelled it.
+        """
+        self.write("foo\tbar\tbaz\na\t10\txyz\nb\tXXX\txyz\nc\t30\txyz\n")
         with self.assertRaisesRegex(ValueError, "'bar' is not integer"):
-            parse_genome_lengths(self.name)
+            load_genome_lengths(self.con, self.name)
 
-    def test_parse_genome_lengths_not_unique(self):
-        data = "foo\tbar\tbaz\n" "a\t10\txyz\n" "b\t20\txyz\n" "b\t30\txyz\n"
-
-        with open(self.name, "w") as fp:
-            fp.write(data)
-
+    def test_duplicate_genome_ids_are_rejected(self):
+        """A repeated genome silently multiplies rows at every join downstream."""
+        self.write("foo\tbar\tbaz\na\t10\txyz\nb\t20\txyz\nb\t30\txyz\n")
         with self.assertRaisesRegex(ValueError, "'foo' is not unique"):
-            parse_genome_lengths(self.name)
+            load_genome_lengths(self.con, self.name)
 
-    def test_parse_genome_lengths_bad_sizes(self):
-        data = "foo\tbar\tbaz\n" "a\t10\txyz\n" "b\t-5\txyz\n" "c\t30\txyz\n"
-
-        with open(self.name, "w") as fp:
-            fp.write(data)
-
+    def test_non_positive_lengths_are_rejected(self):
+        """Breadth divides by length; zero or negative is not a denominator."""
+        self.write("foo\tbar\tbaz\na\t10\txyz\nb\t-5\txyz\nc\t30\txyz\n")
         with self.assertRaisesRegex(ValueError, "Lengths of zero or less"):
-            parse_genome_lengths(self.name)
+            load_genome_lengths(self.con, self.name)
 
-    def test_parse_feature_names(self):
-        data = (
-            "some_id\tsomecolumn\tanothercolumn\n"
-            "abc\tthings and stuff\temtpy\n"
-            "x\tfoo; bar; baz thing\tdsf\n"
-        )
+
+class BedCovTests(unittest.TestCase):
+    """Reading `.cov` / BED3, which is `position-plot`'s only input.
+
+    A `.cov` file may or may not carry a header -- `micov compress` wrote one,
+    hand-made and third-party files often do not, and micov has always
+    accepted both. Getting that wrong does not fail loudly: a header row read
+    as data becomes a genome literally named "genome_id", and a data row read
+    as a header silently loses the first interval.
+    """
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.name = self.temp_dir.name + "/s.cov"
+        self.con = connection()
+        self.addCleanup(self.con.close)
+
+    def load(self, data):
         with open(self.name, "w") as fp:
             fp.write(data)
+        load_bed_cov(self.con, self.name)
+        return self.con.sql(
+            f"SELECT {COLUMN_GENOME_ID}, {COLUMN_START}, {COLUMN_STOP} "
+            "FROM bed_positions ORDER BY 1, 2"
+        ).fetchall()
 
-        exp = pl.DataFrame(
-            [["abc", "things_and_stuff"], ["x", "baz_thing"]],
-            orient="row",
-            schema=[COLUMN_GENOME_ID, COLUMN_NAME],
-        )
-        obs = parse_feature_names(self.name)
-        plt.assert_frame_equal(obs, exp)
+    ROWS = [("G1", 10, 20), ("G2", 5, 9)]  # noqa: RUF012
 
-    def test_parse_taxonomy_good(self):
-        data = (
-            "genome_id\ttaxonomy\tbaz\n"
-            "a\tspecies1\txyz\n"
-            "b\tspecies2\txyz\n"
-            "c\tspecies3\txyz\n"
+    def test_headered(self):
+        self.assertEqual(
+            self.load("genome_id\tstart\tstop\nG1\t10\t20\nG2\t5\t9\n"),
+            self.ROWS,
         )
 
-        with open(self.name, "w") as fp:
-            fp.write(data)
+    def test_headerless(self):
+        self.assertEqual(self.load("G1\t10\t20\nG2\t5\t9\n"), self.ROWS)
 
-        exp = pl.DataFrame(
-            [["a", "species1"], ["b", "species2"], ["c", "species3"]],
-            orient="row",
-            schema=[COLUMN_GENOME_ID, COLUMN_TAXONOMY],
-        )
-        obs = parse_taxonomy(self.name)
-        plt.assert_frame_equal(obs, exp)
-
-    def test_parse_taxonomy_noheader(self):
-        data = "a\tspecies1\txyz\n" "b\tspecies2\txyz\n" "c\tspecies3\txyz\n"
-
-        with open(self.name, "w") as fp:
-            fp.write(data)
-
-        exp = pl.DataFrame(
-            [["a", "species1"], ["b", "species2"], ["c", "species3"]],
-            orient="row",
-            schema=[COLUMN_GENOME_ID, COLUMN_TAXONOMY],
-        )
-        obs = parse_taxonomy(self.name)
-        plt.assert_frame_equal(obs, exp)
-
-    def test_set_taxonomy_as_id(self):
-        cov = pl.DataFrame(
-            {
-                "genome_id": ["G000006925", "G000007525", "G000008865"],
-                "covered": [2501356, 4378, 2582128],
-                "length": [4828820, 2260266, 5594477],
-                "percent_covered": [
-                    51.800564112971706,
-                    0.19369401654495533,
-                    46.154948889771106,
-                ],
-            }
+    def test_commented_header(self):
+        """`#`-prefixed headers are what a BED file conventionally carries."""
+        self.assertEqual(
+            self.load("#genome_id\tstart\tstop\nG1\t10\t20\nG2\t5\t9\n"),
+            self.ROWS,
         )
 
-        tax = pl.DataFrame(
-            {
-                "genome_id": [
-                    "G000009925",
-                    "G000010425",
-                    "G000006925",
-                    "G000007525",
-                    "G000008865",
-                ],
-                "taxonomy": [
-                    "species1",
-                    "species2",
-                    "species3",
-                    "species4",
-                    "species5",
-                ],
-            }
-        )
-
-        exp = pl.DataFrame(
-            {
-                "taxonomy": ["species3", "species4", "species5"],
-                "genome_id": ["G000006925", "G000007525", "G000008865"],
-                "covered": [2501356, 4378, 2582128],
-                "length": [4828820, 2260266, 5594477],
-                "percent_covered": [
-                    51.800564112971706,
-                    0.19369401654495533,
-                    46.154948889771106,
-                ],
-            }
-        )
-
-        obs = set_taxonomy_as_id(cov, tax)
-        plt.assert_frame_equal(obs, exp)
-
-    def test_taxonomy_as_id_missing_taxonomy(self):
-        cov = pl.DataFrame(
-            {
-                "genome_id": ["G000006925", "G000007525", "G000008865"],
-                "covered": [2501356, 4378, 2582128],
-                "length": [4828820, 2260266, 5594477],
-                "percent_covered": [
-                    51.800564112971706,
-                    0.19369401654495533,
-                    46.154948889771106,
-                ],
-            }
-        )
-
-        tax = pl.DataFrame(
-            {
-                "genome_id": ["G000009925", "G000010425", "G000006925", "G000007525"],
-                "taxonomy": ["species1", "species2", "species3", "species4"],
-            }
-        )
-
-        with self.assertRaisesRegex(ValueError, "[G000008865]"):
-            set_taxonomy_as_id(cov, tax)
-
-    def test_compress_from_stream(self):
-        data = io.BytesIO(
-            b"A\t0\tX\t1\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"B\t0\tY\t10\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"C\t0\tX\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"D\t0\tX\t90\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"E\t0\tY\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-        )
-        exp = pl.DataFrame(
-            [["X", 1, 51], ["X", 90, 150], ["Y", 10, 60], ["Y", 100, 150]],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
-        )
-        obs = compress_from_stream(data, bufsize=2)
-        plt.assert_frame_equal(
-            obs.sort(
-                [
-                    COLUMN_GENOME_ID,
-                ]
-            ),
-            exp,
-        )
-
-        obs = compress_from_stream(io.BytesIO())
-        self.assertEqual(obs, None)
-
-    def test_compress_from_stream_disable_compression(self):
-        data = io.BytesIO(
-            b"A\t0\tX\t1\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"B\t0\tY\t10\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"C\t0\tX\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"D\t0\tX\t90\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"E\t0\tY\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-        )
-        exp = pl.DataFrame(
+    def test_interval_bounds_are_unsigned(self):
+        """The rest of micov works in UINTEGER; a BIGINT here leaks into joins."""
+        self.load("genome_id\tstart\tstop\nG1\t10\t20\n")
+        described = self.con.sql("DESCRIBE bed_positions").fetchall()
+        self.assertEqual(
+            [(row[0], row[1]) for row in described],
             [
-                ["X", 1, 51],
-                ["X", 90, 140],
-                ["X", 100, 150],
-                ["Y", 10, 60],
-                ["Y", 100, 150],
+                (COLUMN_GENOME_ID, "VARCHAR"),
+                (COLUMN_START, "UINTEGER"),
+                (COLUMN_STOP, "UINTEGER"),
             ],
-            orient="row",
-            schema=BED_COV_SCHEMA.dtypes_flat,
         )
-        obs = compress_from_stream(data, bufsize=2, disable_compression=True)
-        plt.assert_frame_equal(obs.sort([COLUMN_GENOME_ID, COLUMN_START]), exp)
-
-        obs = compress_from_stream(io.BytesIO())
-        self.assertEqual(obs, None)
-
-    def test_parse_sam_to_df(self):
-        data = io.BytesIO(
-            b"A\t0\tX\t1\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"B\t0\tY\t10\t1\t50M\t*\t0\t0\t*\t*\n"
-            b"C\t0\tX\t100\t1\t50M\t*\t0\t0\t*\t*\n"
-        )
-        exp = pl.DataFrame(
-            [
-                ["A", 0, "X", 1, "50M", 51],
-                ["B", 0, "Y", 10, "50M", 60],
-                ["C", 0, "X", 100, "50M", 150],
-            ],
-            orient="row",
-            schema=SAM_SUBSET_SCHEMA_PARSED.dtypes_flat,
-        )
-        obs = parse_sam_to_df(data)
-        plt.assert_frame_equal(obs, exp)
 
 
 if __name__ == "__main__":

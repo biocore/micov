@@ -1,23 +1,27 @@
 import os
 
-import duckdb
-import polars as pl
-
 from micov._constants import (
-    ABSENT,
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
-    COLUMN_LENGTH_DTYPE,
     COLUMN_NAME,
+    COLUMN_PERCENT_COVERED,
     COLUMN_REGION_ID,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
     COLUMN_STOP,
-    NOT_APPLICABLE,
-    PRESENT,
 )
-from micov._cov import compress_per_sample, coverage_percent_per_sample
+from micov._miint import connection
+from micov._utils import sql_string
+
+#: What the first column of a feature file (`--features-to-keep`,
+#: `--target-names`) must be called. Region files already had their `start`
+#: and `stop` matched by name; this makes the id column consistent with them.
+FEATURE_ID_COLUMNS = (COLUMN_GENOME_ID,)
+
+#: What the first column of `--sample-metadata` may be called: micov's own
+#: name, and `sample_name`, which Qiita exports and `example/` use.
+SAMPLE_ID_COLUMNS = (COLUMN_SAMPLE_ID, "sample_name")
 
 
 class View:
@@ -35,43 +39,132 @@ class View:
         self.dbbase = dbbase
         self.sample_metadata = sample_metadata
         self.features_to_keep = features_to_keep
-        self.feature_names_df = feature_names
+        self.feature_names_source = feature_names
 
         self.constrain_positions = False
         self.constrain_features = False
 
-        self.con = duckdb.connect(
-            ":memory:", config={"threads": threads, "memory_limit": f"{memory}"}
-        )
+        self.con = connection(memory=memory, threads=threads)
         self._init()
 
     def close(self):
         self.con.close()
 
     def __del__(self):
-        self.close()
+        # opening the connection can now fail -- it requires the miint
+        # extension -- which leaves `con` unset. A finaliser that raises buries
+        # micov's authored message under "Exception ignored in __del__".
+        if getattr(self, "con", None) is not None:
+            self.close()
+
+    def _read_tsv(self, path, rename, first_column, all_varchar=False):
+        """Build a SELECT over a TSV, renaming its leading columns.
+
+        The leading columns are renamed to micov's canonical names -- for
+        feature names the second column too -- but the file must have a
+        header, and its first column must be one of `first_column`.
+
+        That requirement is the fix for a silent loss. A headerless file, such
+        as a taxonomy `lineages.txt`, had its first *row* read as column names,
+        so that genome or sample disappeared from every output with no error.
+        Insisting on the name is what makes a missing header detectable at
+        all: a data row's first field is not `genome_id`.
+
+        Returns SQL rather than a relation so callers can compose it into a
+        larger statement.
+        """
+        varchar = ", all_varchar=true" if all_varchar else ""
+        source = f"read_csv({sql_string(path)}, delim='\t', header=true{varchar})"
+        columns = [row[0] for row in self.con.sql(f"DESCRIBE FROM {source}").fetchall()]
+        if columns[0] not in first_column:
+            expected = " or ".join(repr(name) for name in first_column)
+            raise ValueError(
+                f"'{path}' must begin with a header line whose first column is "
+                f"named {expected}, but its first column is {columns[0]!r}. If "
+                "the file has no header, add one: micov would otherwise read "
+                "the first row as column names and silently drop it."
+            )
+        # not strict: `rename` covers only the leading columns, and the file
+        # carries however many more it likes
+        selected = [
+            f'"{old}" AS {new}' for old, new in zip(columns, rename, strict=False)
+        ]
+        selected += [f'"{column}"' for column in columns[len(rename) :]]
+        return f"SELECT {', '.join(selected)} FROM {source}"
 
     def _feature_filters(self):
+        """Load the feature constraints and decide which filter mode applies.
+
+        Three modes: no constraint, genome-level, and sub-genome region. Only
+        the last needs interval clipping, and it is selected by the presence of
+        a `start`/`stop` pair in the feature file.
+        """
+        coverage = f"{self.dbbase}.coverage.parquet"
+
         if self.features_to_keep is None:
+            self.con.sql(f"""CREATE TABLE feature_constraint AS
+                             SELECT DISTINCT {COLUMN_GENOME_ID},
+                                    NULL AS {COLUMN_START},
+                                    NULL AS {COLUMN_STOP}
+                             FROM {sql_string(coverage)}""")
             return
 
-        if COLUMN_START in self.features_to_keep.columns:
-            if COLUMN_STOP not in self.features_to_keep.columns:
+        query = self._read_tsv(
+            self.features_to_keep, [COLUMN_GENOME_ID], FEATURE_ID_COLUMNS
+        )
+        columns = [row[0] for row in self.con.sql(f"DESCRIBE {query}").fetchall()]
+
+        if COLUMN_START in columns:
+            if COLUMN_STOP not in columns:
                 raise KeyError(f"'{COLUMN_START}' found but missing '{COLUMN_STOP}'")
             self.constrain_positions = True
-        elif COLUMN_STOP in self.features_to_keep.columns:
-            if COLUMN_START not in self.features_to_keep.columns:
-                raise KeyError(f"'{COLUMN_STOP}' found but missing '{COLUMN_START}'")
-        else:
-            self.features_to_keep = self.features_to_keep.with_columns(
-                pl.lit(None).alias(COLUMN_START), pl.lit(None).alias(COLUMN_STOP)
+            # read_csv infers BIGINT for the interval bounds, but the rest of
+            # the View works in UINTEGER and feature_metadata's dtypes are
+            # visible to downstream consumers.
+            query = (
+                f"SELECT * EXCLUDE ({COLUMN_START}, {COLUMN_STOP}), "
+                f"{COLUMN_START}::UINTEGER AS {COLUMN_START}, "
+                f"{COLUMN_STOP}::UINTEGER AS {COLUMN_STOP} FROM ({query})"
             )
+        elif COLUMN_STOP in columns:
+            raise KeyError(f"'{COLUMN_STOP}' found but missing '{COLUMN_START}'")
+        else:
+            # the downstream SQL always names start/stop, so supply them as
+            # typed NULLs. INTEGER matches what a bare NULL literal resolves to
+            # in the `features_to_keep is None` branch above.
+            query = (f"SELECT *, NULL::INTEGER AS {COLUMN_START}, "
+                     f"NULL::INTEGER AS {COLUMN_STOP} FROM ({query})")
 
-        if len(self.features_to_keep) > 0:
+        self.con.sql(f"CREATE TABLE feature_constraint AS {query}")
+
+        if self.constrain_positions:
+            # A region is half-open [start, stop), so stop has to exceed start.
+            # Checked here, with the rest of the feature-file validation, and
+            # in the user's terms: a transposed pair of columns used to surface
+            # as `Out of Range Error: Overflow in subtraction of UINT32
+            # (40 - 60)` from `feature_metadata` below, and a zero-width region
+            # as `No positions left after filtering.` -- neither of which names
+            # the offending row. miint rejects both too, but phrases its error
+            # as advice about its own SQL API, which is not what the user wrote.
+            malformed = self.con.sql(f"""SELECT {COLUMN_GENOME_ID},
+                                                {COLUMN_START}, {COLUMN_STOP}
+                                         FROM feature_constraint
+                                         WHERE {COLUMN_STOP} <= {COLUMN_START}
+                                         ORDER BY ALL
+                                         LIMIT 1""").fetchall()
+            if malformed:
+                genome_id, start, stop = malformed[0]
+                raise ValueError(
+                    f"Region for '{genome_id}' is not a valid interval: "
+                    f"[{start}, {stop}). Regions are half-open, so 'stop' must "
+                    "be greater than 'start'."
+                )
+
+        count = self.con.sql("SELECT COUNT(*) FROM feature_constraint").fetchone()[0]
+        if count > 0:
             self.constrain_features = True
 
     def _init(self):
-        self._feature_filters()
         self._load_db()
 
     def _load_db(self):
@@ -86,79 +179,119 @@ class View:
 
         # constrain the metadata before any feature filtering as the unfocused
         # monte carlo curve assumes access to _any_ sample with _any_ coverage
-        md_df = self.sample_metadata  # noqa: F841
+        metadata = self._read_tsv(
+            self.sample_metadata,
+            [COLUMN_SAMPLE_ID],
+            SAMPLE_ID_COLUMNS,
+            all_varchar=True,
+        )
         self.con.sql(f"""CREATE TABLE metadata AS
                          SELECT md.*
-                         FROM md_df md
-                             SEMI JOIN '{coverage}' cov
+                         FROM ({metadata}) md
+                             SEMI JOIN {sql_string(coverage)} cov
                                  ON md.{COLUMN_SAMPLE_ID}=cov.{COLUMN_SAMPLE_ID}""")
 
-        feat_df = self.features_to_keep
-        if feat_df is None:
-            self.con.sql(f"""CREATE TABLE feature_constraint AS
-                             SELECT DISTINCT {COLUMN_GENOME_ID},
-                                    NULL AS {COLUMN_START},
-                                    NULL AS {COLUMN_STOP}
-                             FROM '{coverage}'""")
-        else:
-            self.con.sql("CREATE TABLE feature_constraint AS FROM feat_df")
+        self._feature_filters()
 
         # views are "free". Let's establish a common reference point for unmodified
         # position data'
-        self.con.sql(f"CREATE VIEW unconstrained_positions AS FROM '{positions}'")
+        self.con.sql(
+            f"CREATE VIEW unconstrained_positions AS FROM {sql_string(positions)}"
+        )
 
         if self.constrain_positions:
-            # limit the samples considered
-            # limit the set of features considered
-            # limit the intervals considered
-            # force the min/max of the intervals to be of the defined bounds
-            # to cover the case where the requested interval range is contained
-            # within a wider interal.
-            self.con.sql(f"""CREATE VIEW positions AS
-                             SELECT pos.* EXCLUDE ({COLUMN_START}, {COLUMN_STOP}),
-                                    LEAST(pos.{COLUMN_STOP},
-                                          fc.{COLUMN_STOP}) AS {COLUMN_STOP},
-                                    GREATEST(pos.{COLUMN_START},
-                                             fc.{COLUMN_START}) AS {COLUMN_START}
+            # `region_coverage` and `region_presence` are table macros built on
+            # `query_table()`, so each argument has to name a table or a view
+            # -- a subquery is a Binder Error. Hence the two views below rather
+            # than inlining either of them at the call site.
+            self.con.sql(f"""CREATE VIEW selected_positions AS
+                             SELECT pos.*
                              FROM unconstrained_positions pos
-                                 JOIN feature_constraint fc
-                                     ON pos.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
-                                         AND pos.{COLUMN_START} <= fc.{COLUMN_STOP}
-                                         AND pos.{COLUMN_STOP} > fc.{COLUMN_START}
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
 
-            # pull the new position data, compress, and reconstruct the view
-            # we "wrap" a table so "positions" is a consistent entity in the database
-            # TODO: replace with duckdb native per sample compression
-            #   Do we stream to parquet? this could be large
-            positions_df = self.con.sql(f"""SELECT * FROM positions
-                                            ORDER BY {COLUMN_SAMPLE_ID},
-                                                     {COLUMN_GENOME_ID},
-                                                     {COLUMN_START}""").pl()
+            # `region_id` is spelled out here rather than read from
+            # feature_metadata, which cannot exist yet -- it is filtered by the
+            # coverage this view is about to produce. The two use the same
+            # expression, so the ids agree.
+            self.con.sql(f"""CREATE VIEW regions AS
+                             SELECT {COLUMN_GENOME_ID},
+                                    {COLUMN_START} AS region_start,
+                                    {COLUMN_STOP} AS region_stop,
+                                    CONCAT_WS('_',
+                                              {COLUMN_GENOME_ID},
+                                              {COLUMN_START},
+                                              {COLUMN_STOP}) AS {COLUMN_REGION_ID}
+                             FROM feature_constraint""")
 
-            if len(positions_df) == 0:
+            # Clip to the region bounds, so an interval wider than the region
+            # contributes only the part inside it.
+            #
+            # `pos.start < fc.stop`, not `<=`: the region is half-open, so an
+            # interval beginning exactly at `stop` falls outside it. The `<=`
+            # this replaces admitted that interval, clipped it to a zero-width
+            # [stop, stop) worth no bases, and still reported the sample
+            # present in the region. `<` is also the predicate miint's macros
+            # use, so micov's positions and its coverage agree on what overlaps.
+            self.con.sql(f"""CREATE VIEW clipped_positions AS
+                             SELECT pos.{COLUMN_SAMPLE_ID}, pos.{COLUMN_GENOME_ID},
+                                    GREATEST(pos.{COLUMN_START},
+                                             fc.{COLUMN_START}) AS {COLUMN_START},
+                                    LEAST(pos.{COLUMN_STOP},
+                                          fc.{COLUMN_STOP}) AS {COLUMN_STOP}
+                             FROM selected_positions pos
+                                 JOIN feature_constraint fc
+                                     ON pos.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
+                                         AND pos.{COLUMN_START} < fc.{COLUMN_STOP}
+                                         AND pos.{COLUMN_STOP} > fc.{COLUMN_START}""")
+
+            # Clipping can leave overlapping intervals, so re-compress per
+            # sample. `compress_intervals` is the same primitive
+            # `_io.compress_alignments` uses -- which is the point of doing it
+            # this way: micov has one interval merge, not a second hand-written
+            # one that has to be kept agreeing with the first. Touching
+            # intervals collapse, as test_cov.py pins.
+            #
+            # We "wrap" a table so "positions" is a consistent entity in the
+            # database.
+            self.con.sql(f"""CREATE TABLE recompressed_positions AS
+                SELECT {COLUMN_GENOME_ID},
+                       interval.start::UINTEGER AS {COLUMN_START},
+                       interval.stop::UINTEGER AS {COLUMN_STOP},
+                       {COLUMN_SAMPLE_ID}
+                FROM (SELECT {COLUMN_SAMPLE_ID}, {COLUMN_GENOME_ID},
+                             UNNEST(compress_intervals({COLUMN_START},
+                                                       {COLUMN_STOP}))
+                                 AS interval
+                      FROM clipped_positions
+                      GROUP BY {COLUMN_SAMPLE_ID}, {COLUMN_GENOME_ID})""")
+
+            empty = self.con.sql(
+                "SELECT COUNT(*) FROM recompressed_positions"
+            ).fetchone()[0]
+            if empty == 0:
                 msg = "No positions left after filtering."
                 raise ValueError(msg)
 
-            positions_df = compress_per_sample(positions_df)
-            self.con.sql("CREATE TABLE recompressed_positions AS FROM positions_df")
-            self.con.sql("""CREATE OR REPLACE VIEW positions AS
+            self.con.sql("""CREATE VIEW positions AS
                             SELECT * FROM recompressed_positions""")
 
-            # obtain the length of the constrained regions for computing coverage
-            # percent
-            diff = pl.col(COLUMN_STOP) - pl.col(COLUMN_START)
-            lengths = (
-                self.features_to_keep.lazy()
-                .with_columns(diff.cast(COLUMN_LENGTH_DTYPE).alias(COLUMN_LENGTH))
-                .drop([COLUMN_START, COLUMN_STOP])
-                .collect()
-            )
-
-            coverage_df = coverage_percent_per_sample(positions_df, lengths)  # noqa: F841
-            self.con.sql("CREATE TABLE recomputed_coverage AS FROM coverage_df")
-            self.con.sql("""CREATE OR REPLACE VIEW coverage AS
+            # breadth against the *region* length rather than the genome
+            # length. `region_coverage` clips and merges internally, so it
+            # takes the unclipped positions rather than the view above.
+            #
+            # `proportion_covered` is 0..1 where micov reports 0..100, and the
+            # `* 100` is applied after the division rather than folded into it.
+            # `covered * 100 / length` is a different double -- test_view.py
+            # pins the difference with a literal.
+            self.con.sql(f"""CREATE TABLE recomputed_coverage AS
+                SELECT {COLUMN_GENOME_ID},
+                       covered::UINTEGER AS {COLUMN_COVERED},
+                       region_length::UINTEGER AS {COLUMN_LENGTH},
+                       proportion_covered * 100 AS {COLUMN_PERCENT_COVERED},
+                       {COLUMN_SAMPLE_ID}
+                FROM region_coverage(selected_positions, regions)""")
+            self.con.sql("""CREATE VIEW coverage AS
                             SELECT * FROM recomputed_coverage""")
 
             self.con.sql(f"""CREATE TABLE feature_metadata AS
@@ -177,14 +310,14 @@ class View:
             # express start/stop of the genomes as the full genome
             self.con.sql(f"""CREATE VIEW coverage AS
                              SELECT cov.*
-                             FROM '{coverage}' cov
+                             FROM {sql_string(coverage)} cov
                                  JOIN feature_constraint fc
                                      ON cov.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
                                  JOIN metadata md
                                      ON cov.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
             self.con.sql(f"""CREATE VIEW positions AS
                              SELECT pos.*
-                             FROM '{positions}' pos
+                             FROM {sql_string(positions)} pos
                                  JOIN feature_constraint fc
                                      ON pos.{COLUMN_GENOME_ID}=fc.{COLUMN_GENOME_ID}
                                  JOIN metadata md
@@ -212,12 +345,12 @@ class View:
             # limit the samples considered
             self.con.sql(f"""CREATE VIEW coverage AS
                              SELECT cov.*
-                             FROM '{coverage}' cov
+                             FROM {sql_string(coverage)} cov
                                  JOIN metadata md
                                      ON cov.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
             self.con.sql(f"""CREATE VIEW positions AS
                              SELECT pos.*
-                             FROM '{positions}' pos
+                             FROM {sql_string(positions)} pos
                                  JOIN metadata md
                                      ON pos.{COLUMN_SAMPLE_ID}=md.{COLUMN_SAMPLE_ID}""")
 
@@ -269,9 +402,8 @@ class View:
 
     def coverages(self):
         schema = self.con.sql(f"""DESCRIBE SELECT {COLUMN_COVERED}, {COLUMN_LENGTH}
-                                  FROM coverage""").pl()
-        schema = schema.filter(pl.col("column_type") == "BIGINT")
-        if len(schema) > 0:
+                                  FROM coverage""").fetchall()
+        if any(column_type == "BIGINT" for _, column_type, *_ in schema):
             # old files used int64
             # UINTEGER is UInt32
             # TODO: guarentee we are consistent with _constansts.py
@@ -285,9 +417,8 @@ class View:
 
     def positions(self):
         schema = self.con.sql(f"""DESCRIBE SELECT {COLUMN_START}, {COLUMN_STOP}
-                                  FROM positions""").pl()
-        schema = schema.filter(pl.col("column_type") == "BIGINT")
-        if len(schema) > 0:
+                                  FROM positions""").fetchall()
+        if any(column_type == "BIGINT" for _, column_type, *_ in schema):
             # old files used int64
             # UINTEGER is UInt32
             # TODO: guarentee we are consistent with _constansts.py
@@ -300,118 +431,82 @@ class View:
             return self.con.sql("SELECT * from positions")
 
     def feature_names(self):
-        if self.feature_names_df is None:
+        if self.feature_names_source is None:
             return self.con.sql(f"""
                 SELECT DISTINCT {COLUMN_GENOME_ID}, {COLUMN_GENOME_ID} AS {COLUMN_NAME}
                 FROM feature_metadata
             """)
         else:
-            feature_names = self.feature_names_df  # noqa
+            names = self._read_tsv(
+                self.feature_names_source,
+                [COLUMN_GENOME_ID, COLUMN_NAME],
+                FEATURE_ID_COLUMNS,
+            )
+            # A name that looks like a lineage keeps only its last element.
+            # '^.*; ' is greedy, so it consumes through the *final* delimiter
+            # and leaves a plain name untouched -- both cases in one pass.
+            names = (
+                f"SELECT {COLUMN_GENOME_ID}, "
+                f"regexp_replace(regexp_replace({COLUMN_NAME}, '^.*; ', ''), "
+                r"'[ \[\]]', '_', 'g')"
+                f" AS {COLUMN_NAME} FROM ({names})"
+            )
             return self.con.sql(f"""
                 SELECT DISTINCT
                     fm.{COLUMN_GENOME_ID},
                     COALESCE(fn.{COLUMN_NAME}, fm.{COLUMN_GENOME_ID}) AS {COLUMN_NAME}
                 FROM feature_metadata fm
-                LEFT JOIN feature_names fn
+                LEFT JOIN ({names}) fn
                     USING ({COLUMN_GENOME_ID})""")
 
     def sample_presence_absence(self):
         if not self.constrain_positions:
             raise ValueError("Cannot calculate presence/absence without positions.")
 
-        self.con.sql(f"""
-            -- define a view which describes whether a sample is present in a particular
-            -- region.
-            CREATE OR REPLACE VIEW has_region AS (
-                SELECT
-                    pos.{COLUMN_SAMPLE_ID},
-                    fm.{COLUMN_REGION_ID},
-                    CASE
-                        WHEN pos.{COLUMN_START} <= fm.{COLUMN_STOP}
-                            AND pos.{COLUMN_STOP} > fm.{COLUMN_START}
-                        THEN '{PRESENT}'
-                        ELSE '{ABSENT}'
-                    END AS painfo
-                FROM unconstrained_positions pos
-                    LEFT JOIN feature_metadata fm
-                        ON pos.{COLUMN_GENOME_ID}=fm.{COLUMN_GENOME_ID}
-            );
-        """)
+        # feature_metadata, not the `regions` view: this is the set of regions
+        # that survived the coverage filter, and so the set the wide output has
+        # a column for. `regions` would add a column for every requested region
+        # no sample covers.
+        self.con.sql(f"""CREATE OR REPLACE VIEW presence_regions AS
+                         SELECT {COLUMN_GENOME_ID},
+                                {COLUMN_START} AS region_start,
+                                {COLUMN_STOP} AS region_stop,
+                                {COLUMN_REGION_ID}
+                         FROM feature_metadata""")
 
         self.con.sql(f"""
-            -- extract the samples which are "present" and "absent" and the
-            -- regions they are present -- in. Note that a sample is present in a
-            -- region if it has coverage in that -- region. It is considered absent
-            -- if it nas nonzero coverage for the genome -- AND lacks coverage
-            -- within the focus region.
-
-            -- n.b. we have to materialize as pivot elements cannot be used in views
-            -- without explicilty naming the columns. Since we do not know the regions
-            -- in advance, we cannot readily define the columns. As far as I know,
-            -- the only way would be a clunky dynamic SQL query.
-            CREATE OR REPLACE TABLE present AS (
-                SELECT
-                    {COLUMN_SAMPLE_ID},
-                    CASE
-                        WHEN COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}) > 0
-                        THEN '{PRESENT}'
-                        ELSE NULL
-                    END
-                FROM (PIVOT (SELECT * EXCLUDE (painfo)
-                             FROM has_region
-                             WHERE painfo='{PRESENT}')
-                      ON {COLUMN_REGION_ID})
+            -- One row per sample, one column per region.
+            --
+            -- `region_presence` classifies every sample against every region:
+            -- present if it has coverage inside the region, absent if it
+            -- covers the genome but nothing within the region, and not
+            -- applicable if it has no coverage of that genome at all. It emits
+            -- those three strings verbatim, so `_constants.py`'s values are
+            -- what lands in the file rather than a translation of them.
+            --
+            -- A sample can be both present and absent in one region, via two
+            -- intervals of which only one overlaps; the macro resolves that to
+            -- present, which is the precedence micov has always had.
+            --
+            -- Every sample/region pair gets a row, so there is nothing for the
+            -- PIVOT to leave NULL and no COALESCE here. The previous
+            -- implementation needed one: it derived presence from a join that
+            -- simply had no row for a sample lacking the genome, and filled
+            -- the resulting hole with 'not applicable' afterwards.
+            --
+            -- n.b. we have to materialize as pivot elements cannot be used in
+            -- views without explicilty naming the columns. Since we do not
+            -- know the regions in advance, we cannot readily define the
+            -- columns. As far as I know, the only way would be a clunky
+            -- dynamic SQL query.
+            CREATE OR REPLACE TABLE sample_presence_absence AS (
+                PIVOT (
+                    SELECT {COLUMN_SAMPLE_ID}, {COLUMN_REGION_ID}, state
+                    FROM region_presence(selected_positions,
+                                         presence_regions,
+                                         metadata)
+                ) ON {COLUMN_REGION_ID} USING FIRST(state)
             );
-            CREATE OR REPLACE TABLE absent AS (
-                SELECT
-                    {COLUMN_SAMPLE_ID},
-                    CASE
-                        WHEN COLUMNS(* EXCLUDE {COLUMN_SAMPLE_ID}) > 0
-                        THEN '{ABSENT}'
-                        ELSE NULL
-                    END
-                FROM (PIVOT (SELECT * EXCLUDE (painfo)
-                             FROM has_region
-                             WHERE painfo='{ABSENT}')
-                      ON {COLUMN_REGION_ID})
-            );
-            """)
-
-        # Joining, coalescing, and filling nulls as far as I could tell requires
-        # clunky dynamic SQL in order to determine the set of columns to
-        # coalesce. It's easy to do within Polars.'
-        present = self.con.sql("SELECT * FROM present").pl()
-        absent = self.con.sql("SELECT * FROM absent").pl()
-
-        # columns in common are ones where there is a mix of samples which are present
-        # and absent
-        common = (set(present.columns) & set(absent.columns)) - {
-            COLUMN_SAMPLE_ID,
-        }
-
-        # when there are duplicates, the left column receives the original name
-        # and the right column is suffixed. The default suffix is "_right".
-        exprs = [pl.coalesce([c, c + "_right"]).alias(c) for c in common]
-
-        # after we coalesce, the right columns are unnecessary
-        drops = [c + "_right" for c in common]
-
-        joined = (  # noqa
-            present.lazy()
-            .join(absent.lazy(), on={COLUMN_SAMPLE_ID}, how="full", coalesce=True)
-            .with_columns(exprs)
-            .drop(drops)
-            .fill_null(pl.lit(NOT_APPLICABLE))
-            .collect()
-        )
-
-        # clean up, and createa an object which can be pulled like the other access
-        # methods of this class.
-        self.con.sql("""
-            DROP VIEW has_region;
-            DROP TABLE present;
-            DROP TABLE absent;
-            CREATE OR REPLACE TABLE sample_presence_absence AS FROM joined;
             """)
 
         return self.con.sql("SELECT * FROM sample_presence_absence")

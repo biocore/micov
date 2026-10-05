@@ -1,8 +1,14 @@
 include README.md
 include LICENSE
 include ChangeLog.md
+include CLAUDE.md
 include pyproject.toml
+# CLAUDE.md points here, so the two ship together
+graft docs
 prune example
+# local-only working files; setuptools otherwise sweeps loose .py files in
+# here into the sdist even though the directory is gitignored
+prune localdocs
 
 graft micov
 graft ci
@@ -17,3 +23,9 @@ global-exclude .DS_Store
 global-exclude .gitignore
 global-exclude *.sh
 global-exclude Makefile
+
+# after the global-excludes, which would otherwise drop them: `make test` runs
+# `pytest micov` and then `bash cli_test.sh`, so an unpacked sdist needs both
+# to be testable at all
+include Makefile
+include cli_test.sh

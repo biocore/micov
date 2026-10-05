@@ -1,9 +1,8 @@
+import csv
 import gzip
 
 import matplotlib.pyplot as plt
 import numpy as np
-import polars as pl
-import scipy.stats as ss
 from matplotlib import collections as mc
 
 from ._constants import (
@@ -16,9 +15,133 @@ from ._constants import (
 )
 from ._cov import (
     compute_cumulative,
+    cumulative_curves,
     get_covered,
+    mask_table,
     ordered_coverage,
+    slice_positions,
 )
+from ._io import BED_POSITIONS_TABLE
+
+#: `per_sample_plots`' genome-sorted copy of the positions, sliced per genome.
+PLOT_POSITIONS_TABLE = "plot_positions"
+
+#: Header of every `.ks.csv`. The first four names are frozen; the Bonferroni
+#: column was appended in M11a so that readers taking columns by position were
+#: unaffected.
+KS_HEADER = (
+    "label_A",
+    "label_B",
+    "ks-statistic",
+    "ks-pvalue",
+    "ks-pvalue-bonferroni",
+)
+
+
+def _write_delimited(path, header, rows, delimiter=",", compress=False):
+    """Write `rows` as a delimited text file, optionally gzipped.
+
+    Replaces two polars `write_csv` calls, and reproduces them byte for byte
+    across all sixteen frozen files under `example/plots/`.
+
+    **Do not reach for `repr()` or an f-string to format the values here.**
+    `csv.writer` renders with `str()`, which for a float is the shortest form
+    that round-trips -- exactly what polars wrote. The values arriving here are
+    numpy scalars (the position values come from `np.histogram`; the KS
+    values were `np.float64` too until M9 moved them from scipy to miint),
+    and under numpy 2 `repr()` of one of those is the string
+    `np.float64(0.3)`. That would corrupt every float in every `.ks.csv` and
+    `.tsv.gz` micov writes, and it is the sort of thing a tidy-up refactor
+    does without noticing.
+
+    `lineterminator` is set because the csv module defaults to CRLF.
+    """
+    opener = gzip.open if compress else open
+    with opener(path, "wt", newline="") as fp:
+        writer = csv.writer(fp, delimiter=delimiter, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerows(rows)
+
+
+def ks_2samp(con, curve_a, curve_b):
+    """Two-sample Kolmogorov-Smirnov test, by miint's `ks_2samp`.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension.
+    curve_a, curve_b : sequence of float
+        The two samples.
+
+    Returns
+    -------
+    tuple of (float, float)
+        The statistic and the two-sided exact p-value.
+
+    Notes
+    -----
+    These numbers are cited in the paper, which computed them with
+    `scipy.stats.ks_2samp` (1.17.1). The statistic is reproduced exactly:
+    miint returns D as the exact lattice value ``h / lcm(n1, n2)``, as that
+    scipy did. The p-value agrees to a few ULP, not bit for bit -- miint
+    derives it independently rather than transcribing scipy.
+
+    miint implements only the exact method and raises above 10000
+    observations per sample, where scipy fell back to an approximation.
+    Here that is 10000 samples in one metadata group.
+    """
+    return con.execute(
+        "SELECT ks.statistic, ks.pvalue "
+        "FROM (SELECT ks_2samp(?::DOUBLE[], ?::DOUBLE[]) AS ks)",
+        [np.asarray(curve_a, dtype=np.float64), np.asarray(curve_b, dtype=np.float64)],
+    ).fetchone()
+
+
+def ks_table(con, curves, monte_label=None):
+    """Compare every pair of curves by KS, Bonferroni-correcting the groups.
+
+    Parameters
+    ----------
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension.
+    curves : dict of str to sequence of float
+        Curve per label, in the order the comparisons are written.
+    monte_label : str, optional
+        The label of the Monte Carlo curve, if there is one.
+
+    Returns
+    -------
+    list of list
+        One row per pair, ordered as `KS_HEADER`.
+
+    Notes
+    -----
+    The Bonferroni family is the group-vs-group comparisons in this table,
+    so ``m`` is their count and the corrected value is ``min(1, p * m)``.
+    Comparisons against the Monte Carlo curve are a null-model check rather
+    than a hypothesis: they are left out of ``m`` and their corrected field
+    is empty. Counting them would give the same pair of groups a different
+    corrected p-value depending on whether ``--monte`` was passed.
+
+    The Monte Carlo curve is identified by `monte_label`, not by its label
+    text, so a metadata group whose value happens to start "Monte Carlo" is
+    corrected like any other group.
+    """
+    labels = list(curves)
+    pairs = [
+        (a, b) for idx, a in enumerate(labels) for b in labels[idx + 1 :]
+    ]
+    m = sum(monte_label not in pair for pair in pairs)
+
+    rows = []
+    for label_a, label_b in pairs:
+        statistic, pvalue = ks_2samp(con, curves[label_a], curves[label_b])
+        if monte_label in (label_a, label_b):
+            corrected = ""
+        else:
+            corrected = min(1.0, pvalue * m)
+        rows.append([label_a, label_b, statistic, pvalue, corrected])
+    return rows
 
 
 def per_sample_plots(
@@ -49,34 +172,59 @@ def per_sample_plots(
     monte_iters : int
         The number of Monte Carlo iterations to perform.
     """
-    all_covered_positions = view.positions().pl()
-    all_coverage = view.coverages().pl()
-    metadata = view.metadata().pl()
-    feature_metadata = view.feature_metadata().pl()
-    feature_names = view.feature_names().pl()
-    target_lookup = dict(feature_names.iter_rows())
+    # Positions stay in DuckDB and only one genome's rows are fetched at a
+    # time. Fetching the whole table and masking it per genome was four full
+    # numpy string scans per genome: on 9,388 genomes and 29.7M intervals
+    # that alone was ~2 h, and `per-sample` ran 2.5x slower than the polars
+    # release it replaced. Sorted by genome, each genome's rows sit in a
+    # row group or two, so `WHERE genome_id = ?` reads only those.
+    view.con.sql(f"""CREATE OR REPLACE TEMP TABLE {PLOT_POSITIONS_TABLE} AS
+                     SELECT * FROM ({view.positions().sql_query()})
+                     ORDER BY {COLUMN_GENOME_ID}""")
+
+    # Coverage is one row per sample x genome, small enough to hold in memory.
+    # Its row order does not matter: `ordered_coverage` breaks breadth ties by
+    # sample_id.
+    all_coverage = view.coverages().fetchnumpy()
+    by_genome = np.argsort(all_coverage[COLUMN_GENOME_ID], kind="stable")
+    genomes, firsts = np.unique(
+        all_coverage[COLUMN_GENOME_ID][by_genome], return_index=True
+    )
+    bounds = np.append(firsts, len(by_genome))
+
+    # "unfocused" Monte Carlo draws from every sample with any coverage, which
+    # no single genome's rows can tell it
+    sample_universe = np.unique(all_coverage[COLUMN_SAMPLE_ID])
+
+    metadata = view.metadata().fetchnumpy()
+    feature_metadata = view.feature_metadata().fetchnumpy()
+    target_lookup = dict(view.feature_names().fetchall())
 
     if view.constrain_positions:
-        n_genomes = len(feature_metadata[COLUMN_GENOME_ID].unique())
-        n_regions = len(feature_metadata)
+        n_genomes = len(np.unique(feature_metadata[COLUMN_GENOME_ID]))
+        n_regions = len(feature_metadata[COLUMN_GENOME_ID])
 
         if n_genomes != n_regions:
             raise ValueError(
                 "Plotting does not yet support desribing multiple regions."
             )
 
-    for genome in all_coverage[COLUMN_GENOME_ID].unique():
+    for genome, lo, hi in zip(genomes, bounds[:-1], bounds[1:], strict=True):
+        target_coverage = mask_table(all_coverage, by_genome[lo:hi])
+        target_positions = view.con.execute(
+            f"SELECT * FROM {PLOT_POSITIONS_TABLE} WHERE {COLUMN_GENOME_ID} = ?",
+            [genome],
+        ).fetchnumpy()
         target_name = target_lookup[genome]
-        ymin, ymax = (
-            feature_metadata.filter(pl.col(COLUMN_GENOME_ID) == genome)
-            .select([COLUMN_START, COLUMN_STOP])
-            .row(0)
-        )
+        is_genome = feature_metadata[COLUMN_GENOME_ID] == genome
+        ymin = feature_metadata[COLUMN_START][is_genome][0]
+        ymax = feature_metadata[COLUMN_STOP][is_genome][0]
 
         coverage_curve(
+            view.con,
             metadata,
-            all_coverage,
-            all_covered_positions,
+            target_coverage,
+            target_positions,
             genome,
             sample_metadata_column,
             output,
@@ -85,11 +233,13 @@ def per_sample_plots(
             monte_iters,
             monte,
             False,
+            sample_universe=sample_universe,
         )
         coverage_curve(
+            view.con,
             metadata,
-            all_coverage,
-            all_covered_positions,
+            target_coverage,
+            target_positions,
             genome,
             sample_metadata_column,
             output,
@@ -98,11 +248,12 @@ def per_sample_plots(
             monte_iters,
             monte,
             True,
+            sample_universe=sample_universe,
         )
         position_plot(
             metadata,
-            all_coverage,
-            all_covered_positions,
+            target_coverage,
+            target_positions,
             genome,
             sample_metadata_column,
             output,
@@ -113,8 +264,8 @@ def per_sample_plots(
         )
         position_plot(
             metadata,
-            all_coverage,
-            all_covered_positions,
+            target_coverage,
+            target_positions,
             genome,
             sample_metadata_column,
             output,
@@ -126,6 +277,7 @@ def per_sample_plots(
 
 
 def add_monte(
+    con,
     monte_type,
     ax,
     max_x,
@@ -133,10 +285,11 @@ def add_monte(
     metadata_full,
     target,
     target_positions,
-    coverage_full,
+    coverage,
     accumulate,
     lengths,
     percentile,
+    sample_universe,
 ):
     """Perform a Monte Carlo simulation over coverage.
 
@@ -153,21 +306,23 @@ def add_monte(
         The maximum number of samples to sample
     iters : int
         The number of iterations to perform
-    metadata_full : pl.DataFrame
+    metadata_full : dict of np.ndarray
         The metadata for all samples with nonzero coverage to any target
     target : str
         The genome of iterest
-    target_positions : pl.DataFrame
+    target_positions : dict of np.ndarray
         The per sample per genome regions covered for the target of interest
-    coverage_full : pl.DataFrame
-        The per sample per genome coverage for all samples and genomes
+    coverage : dict of np.ndarray
+        The per sample coverage of the target
     accumulate : bool
         If true, construct a cumulative curve. If false, construct a non
         cumulative curve.
-    lengths : pl.DataFrame
+    lengths : dict of np.ndarray
         genome to length data
     percentile : bool
         If true, use percentiles (0-100) on x-axis instead of sample counts.
+    sample_universe : np.ndarray
+        Every sample with coverage of any genome: the "unfocused" pool.
 
     Notes
     -----
@@ -176,59 +331,66 @@ def add_monte(
     (3) repeat `monte_iter` times. This gathers a distribution of coverage
     and provides a null for context for interpreration of the true curves.
 
+    The permutation is unseeded, so the envelope does not reproduce run to
+    run. That is unchanged from the polars shuffle this replaces, and the
+    golden suite treats Monte Carlo rows accordingly.
+
     """
-    length = (
-        lengths.filter(pl.col(COLUMN_GENOME_ID) == target)
-        .select(pl.col(COLUMN_LENGTH))
-        .row(0)[0]
-    )
+    length = lengths[COLUMN_LENGTH][lengths[COLUMN_GENOME_ID] == target][0]
 
     color = "k"
     line_alpha = 0.6
     fill_alpha = 0.1
+
+    is_target = coverage[COLUMN_GENOME_ID] == target
 
     if monte_type == "focused":
         ls_median = "dotted"
         ls_bound = "--"
 
         # constrain to the target
-        sample_set = (
-            coverage_full.lazy()
-            .filter(pl.col(COLUMN_GENOME_ID) == target)
-            .select(pl.col(COLUMN_SAMPLE_ID))
-            .collect()
-        )
+        sample_set = coverage[COLUMN_SAMPLE_ID][is_target]
 
     elif monte_type == "unfocused":
         ls_median = "dashed"
         ls_bound = "-."
 
         # take all samples
-        sample_set = coverage_full.select(pl.col(COLUMN_SAMPLE_ID).unique())
+        sample_set = sample_universe
     else:
         raise ValueError(f"Unknown monte_type='{monte_type}'")
 
-    coverage = coverage_full.filter(pl.col(COLUMN_GENOME_ID) == target)
+    coverage = mask_table(coverage, is_target)
 
     max_x += 1  # it comes in as zero index but we need count
-    monte_y = []
     monte_x = list(range(max_x))
+    rng = np.random.default_rng()
 
-    for _ in range(iters):
-        monte = (sample_set.select(pl.col(COLUMN_SAMPLE_ID).shuffle()).head(max_x))[
-            COLUMN_SAMPLE_ID
-        ]
-        grp_monte = sample_set.filter(pl.col(COLUMN_SAMPLE_ID).is_in(monte))
-        if accumulate:
-            _, cur_y = compute_cumulative(
-                coverage, grp_monte, target, target_positions, lengths
-            )
-        else:
-            grp_coverage = ordered_coverage(coverage, grp_monte, target, length)
-            cur_y = grp_coverage[COLUMN_PERCENT_COVERED].to_list()
-        monte_y.append(cur_y)
+    # The selection stays in numpy. Moving it into SQL would change the RNG,
+    # and with it the published Monte Carlo envelopes; only the accumulation
+    # needed to move. `np.isin` keeps `sample_set`'s order rather than the
+    # permuted one, which is deliberate -- the permutation chooses *which*
+    # samples take part, and `ordered_coverage` then ranks them by breadth.
+    groups = [
+        sample_set[np.isin(sample_set, rng.permutation(sample_set)[:max_x])]
+        for _ in range(iters)
+    ]
 
-    monte_y = np.asarray(monte_y)
+    if accumulate:
+        # every iteration accumulates in one aggregate call rather than one
+        # O(n^2) pass each -- this is where the Monte Carlo cost was
+        _, monte_y = cumulative_curves(
+            con, coverage, groups, target, target_positions, lengths
+        )
+    else:
+        # non-cumulative is a per-sample breadth lookup, not an accumulation,
+        # so there is nothing here for the aggregate to do
+        monte_y = np.asarray([
+            ordered_coverage(coverage, {COLUMN_SAMPLE_ID: grp}, target, length)[
+                COLUMN_PERCENT_COVERED
+            ]
+            for grp in groups
+        ])
     median = np.median(monte_y, axis=0)
     std = np.std(monte_y, axis=0)
 
@@ -259,8 +421,9 @@ def add_monte(
 
 
 def coverage_curve(
+    con,
     metadata_full,
-    coverage_full,
+    coverage,
     positions,
     target,
     variable,
@@ -271,17 +434,23 @@ def coverage_curve(
     with_monte=None,
     accumulate=False,
     min_group_size=10,
+    *,
+    sample_universe,
 ):
     """Construct coverage curves.
 
     Parameters
     ----------
-    metadata_full : pl.DataFrame
+    con : duckdb.DuckDBPyConnection
+        A connection carrying the miint extension, for the accumulation.
+    metadata_full : dict of np.ndarray
         The metadata for all samples with nonzero coverage to any target
-    coverage_full : pl.DataFrame
-        The per sample per genome coverage for all samples and genomes
-    positions : pl.DataFrame
-        The per sample per genome regions covered
+    coverage : dict of np.ndarray
+        The per sample coverage of the target. Only the target's rows: callers
+        slice per genome, since filtering the whole table here for every genome
+        was the cost that made `per-sample` slow on studies with many genomes.
+    positions : dict of np.ndarray
+        The per sample regions covered on the target, likewise only its rows
     target : str
         The genome of interest
     variable : str
@@ -299,6 +468,8 @@ def coverage_curve(
     accumulate : bool
         If true, construct a cumulative curve. If false, construct a non
         cumulative curve.
+    sample_universe : np.ndarray
+        Every sample with coverage of any genome, for "unfocused" Monte Carlo.
     min_group_size : int, optional
         The minimum number of samples to have coverage against the target
         in order to be plotted
@@ -325,38 +496,46 @@ def coverage_curve(
     labels = []
     curves = {}
 
-    target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target)
-    coverage = coverage_full.filter(pl.col(COLUMN_GENOME_ID) == target)
-    cov_samples = coverage.select(pl.col(COLUMN_SAMPLE_ID).unique())[COLUMN_SAMPLE_ID]
-    metadata = metadata_full.filter(pl.col(COLUMN_SAMPLE_ID).is_in(cov_samples))
+    target_positions = mask_table(positions, positions[COLUMN_GENOME_ID] == target)
+    coverage = mask_table(coverage, coverage[COLUMN_GENOME_ID] == target)
+    cov_samples = np.unique(coverage[COLUMN_SAMPLE_ID])
+    metadata = mask_table(
+        metadata_full, np.isin(metadata_full[COLUMN_SAMPLE_ID], cov_samples)
+    )
 
-    if len(target_positions) == 0:
+    if len(target_positions[COLUMN_GENOME_ID]) == 0:
         raise ValueError("Target genome has no associated coverage")
 
-    if len(coverage) == 0:
+    if len(coverage[COLUMN_GENOME_ID]) == 0:
         raise ValueError("No sample has coverage on the target genome")
 
-    lengths = coverage[[COLUMN_GENOME_ID, COLUMN_LENGTH]].unique()
+    # `coverage` is already constrained to the one target genome, so the
+    # distinct (genome_id, length) pairs reduce to the distinct lengths
+    distinct_lengths = np.unique(coverage[COLUMN_LENGTH])
 
-    if len(lengths) > 1:
+    if len(distinct_lengths) > 1:
         raise ValueError("More than one length provided for the genome")
 
-    length = lengths[COLUMN_LENGTH].item(0)
-    value_order = metadata.select(pl.col(variable).unique().sort())[variable]
+    length = distinct_lengths[0]
+    lengths = {
+        COLUMN_GENOME_ID: np.array([target], dtype=object),
+        COLUMN_LENGTH: distinct_lengths,
+    }
+    value_order = np.unique(metadata[variable])
 
     max_x = 0
     for name, color in zip(value_order, range(10), strict=False):
         color = f"C{color}"
 
-        grp = metadata.filter(pl.col(variable) == name)
+        grp = mask_table(metadata, metadata[variable] == name)
 
-        n = len(grp)
+        n = len(grp[COLUMN_SAMPLE_ID])
         if n < min_group_size:
             continue
 
         if accumulate:
             cur_x, cur_y = compute_cumulative(
-                coverage, grp, target, target_positions, lengths
+                con, coverage, grp, target, target_positions, lengths
             )
         else:
             grp_coverage = ordered_coverage(coverage, grp, target, length)
@@ -366,7 +545,9 @@ def coverage_curve(
         if cur_x is None:
             continue
 
-        max_x = max(max_x, cur_x.max())
+        # int(): the ranks are uint64, and numpy promotes uint64 + int to
+        # float64, which `add_monte` then cannot hand to range()
+        max_x = max(max_x, int(cur_x.max()))
 
         labels.append(f"{name} (n={len(cur_x)})")
 
@@ -378,10 +559,16 @@ def coverage_curve(
         curves[name] = cur_y
 
     if not labels:
+        # no group reached `min_group_size`. Most genomes of a large study
+        # land here, and an unclosed figure stays alive until the process
+        # exits -- thousands of them, before this close.
+        plt.close()
         return
 
+    monte_label = None
     if with_monte is not None:
-        label, median_curve = add_monte(
+        monte_label, median_curve = add_monte(
+            con,
             with_monte,
             ax,
             max_x,
@@ -389,13 +576,14 @@ def coverage_curve(
             metadata_full,
             target,
             target_positions,
-            coverage_full,
+            coverage,
             accumulate,
             lengths,
             percentile,
+            sample_universe,
         )
-        labels.append(label)
-        curves[label] = median_curve
+        labels.append(monte_label)
+        curves[monte_label] = median_curve
 
     tag = "cumulative" if accumulate else "non-cumulative"
 
@@ -423,75 +611,106 @@ def coverage_curve(
     plt.close()
 
     if accumulate:
-        ksresults = []
-        curve_items = list(curves.items())
-
-        for idx, (label_a, curve_a) in enumerate(curve_items):
-            for label_b, curve_b in curve_items[idx + 1 :]:
-                ks = ss.ks_2samp(curve_a, curve_b)
-                ksresults.append([label_a, label_b, ks.statistic, ks.pvalue])
-
-        outf = f"{output}.{target_name}.{target}.{variable}.{tag}.ks.tsv"
-        pl.DataFrame(
-            ksresults,
-            schema=[
-                ("label_A", str),
-                ("label_B", str),
-                ("ks-statistic", float),
-                ("ks-pvalue", float),
-            ],
-            orient="row",
-        ).write_csv(outf)
+        outf = f"{output}.{target_name}.{target}.{variable}.{tag}.ks.csv"
+        _write_delimited(outf, KS_HEADER, ks_table(con, curves, monte_label))
 
 
-def single_sample_position_plot(positions, lengths, output, scale=None):
-    """Construct a metadata-independent position plot.
+def position_plot_segments(con):
+    """Compute normalized covered intervals per genome, ready to draw.
+
+    Split out from `single_sample_position_plot` so the numbers can be
+    asserted without rendering: `position-plot` writes only PNGs, whose bytes
+    are not comparable across matplotlib versions, so before this existed the
+    command's values were guarded by nothing at all.
+
+    Requires the `bed_positions` and `genome_lengths` tables, from
+    `_io.load_bed_cov` and `_io.load_genome_lengths`.
+
+    Returns
+    -------
+    dict of str to np.ndarray
+        Keyed by genome, each an `(n, 3)` array of `(x, start / length,
+        stop / length)` ordered by start. `x` is the constant the plot draws
+        every segment at; positions are unit-normalized against **their own**
+        genome's length.
+
+    Notes
+    -----
+    Genomes with coverage but no entry in `genome_lengths` are dropped, not
+    reported. That is an inner join and it is what micov has always done here:
+    without a length there is no denominator, and passing a length file
+    covering only the genomes of interest is an ordinary way to use this
+    command.
+
+    """
+    genomes = [
+        row[0]
+        for row in con.sql(f"""SELECT DISTINCT p.{COLUMN_GENOME_ID}
+                               FROM {BED_POSITIONS_TABLE} p
+                                   JOIN genome_lengths l
+                                       USING ({COLUMN_GENOME_ID})
+                               ORDER BY 1""").fetchall()
+    ]
+
+    segments = {}
+    for genome in genomes:
+        # ORDER BY is explicit because DuckDB's sort is not stable and these
+        # arrive in whatever order the scan produced; the polars sort this
+        # replaced was stable, so unordered output would be a silent change.
+        columns = con.execute(
+            f"""SELECT 0.5 AS x,
+                       p.{COLUMN_START} / l.{COLUMN_LENGTH} AS {COLUMN_START},
+                       p.{COLUMN_STOP} / l.{COLUMN_LENGTH} AS {COLUMN_STOP}
+                FROM {BED_POSITIONS_TABLE} p
+                    JOIN genome_lengths l USING ({COLUMN_GENOME_ID})
+                WHERE p.{COLUMN_GENOME_ID} = ?
+                ORDER BY p.{COLUMN_START}, p.{COLUMN_STOP}""",
+            [genome],
+        ).fetchnumpy()
+        segments[genome] = np.column_stack(
+            [columns["x"], columns[COLUMN_START], columns[COLUMN_STOP]]
+        )
+
+    return segments
+
+
+def single_sample_position_plot(con, output):
+    """Construct a metadata-independent position plot, one PNG per genome.
 
     Parameters
     ----------
-    positions : pl.DataFrame
-        The genome positions to plot
-    lengths : pl.DataFrame
-        The genome lengths
+    con : duckdb.DuckDBPyConnection
+        A connection carrying `bed_positions` and `genome_lengths`.
     output : str
-        A prefix to use on plotting. This can include a directory, for instance,
-        "foo/bar/theprefix"
-    scale : int, optional
-        If specified, represent the genome as `scale` number of buckets. A
-        bucket is considered represented if any position within the bucket
-        is covered
+        A prefix to use on plotting. This can include a directory, for
+        instance, "foo/bar/theprefix"
+
+    Notes
+    -----
+    The `scale` parameter this used to take was never read by the body and
+    never passed by the CLI; it went with the rewrite.
 
     """
-    positions = (
-        positions.lazy().join(lengths.lazy(), on=COLUMN_GENOME_ID).with_columns(x=0.5)
-    ).collect()
-    for name, grp in positions.group_by(COLUMN_GENOME_ID):
+    for genome, coordinates in position_plot_segments(con).items():
         plt.figure(figsize=(12, 8))
         ax = plt.gca()
-        grp = (
-            grp.lazy()
-            .sort(by=COLUMN_START)
-            .select(
-                pl.col("x"),
-                pl.col(COLUMN_START) / pl.col(COLUMN_LENGTH),
-                pl.col(COLUMN_STOP) / pl.col(COLUMN_LENGTH),
-            )
-        )
 
-        covered_positions = get_covered(grp.collect().to_numpy())
-        lc = mc.LineCollection(covered_positions, linewidths=2, alpha=0.7)
+        lc = mc.LineCollection(get_covered(coordinates), linewidths=2, alpha=0.7)
         ax.add_collection(lc)
 
         ax.set_xlim(-0.01, 1.0)
         ax.set_ylim(0, 1.0)
 
-        ax.set_title(f"Position plot: {name}", fontsize=20)
+        ax.set_title(f"Position plot: {genome}", fontsize=20)
         ax.set_ylabel("Unit normalized position", fontsize=20)
 
         ax.tick_params(axis="both", which="major", labelsize=16)
         ax.tick_params(axis="both", which="minor", labelsize=16)
         plt.tight_layout()
-        plt.savefig(f"{output}.{name}.position-plot.png")
+        # `genome` is a scalar here. It used to be the key polars `group_by`
+        # yields -- a one-element tuple -- which went straight into this
+        # f-string, so every file was named `out.('G1',).position-plot.png`.
+        plt.savefig(f"{output}.{genome}.position-plot.png")
         plt.close()
 
 
@@ -511,12 +730,12 @@ def position_plot(
 
     Parameters
     ----------
-    metadata : pl.DataFrame
+    metadata : dict of np.ndarray
         The metadata for all samples with nonzero coverage to any target
-    coverage : pl.DataFrame
-        The per sample per genome coverage for all samples and genomes
-    positions : pl.DataFrame
-        The per sample per genome regions covered
+    coverage : dict of np.ndarray
+        The per sample coverage of the target; only its rows
+    positions : dict of np.ndarray
+        The per sample regions covered on the target; only its rows
     target : str
         The genome of interest
     variable : str
@@ -546,25 +765,23 @@ def position_plot(
 
     length = ymax - ymin
 
-    target_positions = positions.filter(pl.col(COLUMN_GENOME_ID) == target).lazy()
+    target_positions = mask_table(positions, positions[COLUMN_GENOME_ID] == target)
 
-    samples_with_positions = (
-        target_positions.select(pl.col(COLUMN_SAMPLE_ID)).unique().collect()
-    )[COLUMN_SAMPLE_ID]
-    metadata = metadata.filter(pl.col(COLUMN_SAMPLE_ID).is_in(samples_with_positions))
+    samples_with_positions = np.unique(target_positions[COLUMN_SAMPLE_ID])
+    metadata = mask_table(
+        metadata, np.isin(metadata[COLUMN_SAMPLE_ID], samples_with_positions)
+    )
 
     # TODO: expose to allow ordering by a variable rather than coverage
     custom_xorder = None
 
-    group_order = metadata.group_by(variable).len().sort(by="len")
-    max_x = group_order["len"].sum()
-
-    color_order = (
-        metadata.select(pl.col(variable).unique().sort())
-        .with_row_index(name="color")
-        .select([pl.col(variable), pl.col("color")])
-    )
-    order = group_order.join(color_order, on=variable).sort(by="len")
+    # np.unique sorts, so a group's position here is also its color index --
+    # which is what joining against a separately sorted color order produced.
+    # Groups are then laid out smallest first; the sort is stable, so groups
+    # tied on size stay in value order.
+    names, counts = np.unique(metadata[variable], return_counts=True)
+    max_x = int(counts.sum())
+    order = np.argsort(counts, kind="stable")
 
     label_pos = []
     x_offset = 0
@@ -575,32 +792,38 @@ def position_plot(
 
     invert = len(order) == 2
 
-    selection = [variable, "len", "color"]
-    for oidx, (name, count, color) in enumerate(order[selection].iter_rows()):
-        grp = metadata.filter(pl.col(variable) == name)
-        color = f"C{color}"
+    for oidx, row in enumerate(order):
+        name = names[row]
+        count = int(counts[row])
+        grp = mask_table(metadata, metadata[variable] == name)
+        color = f"C{row}"
 
         if custom_xorder is not None:
-            grp_coverage = (
-                grp.filter(pl.col(custom_xorder).is_not_null())
-                .sort(by=custom_xorder)
-                .with_row_index(name="x_unscaled", offset=x_offset)
-                .with_columns(pl.lit(target).alias(COLUMN_GENOME_ID))
+            has_order = np.array([v is not None for v in grp[custom_xorder]])
+            grp_coverage = mask_table(grp, has_order)
+            grp_coverage = mask_table(
+                grp_coverage, np.argsort(grp_coverage[custom_xorder], kind="stable")
             )
+            n = len(grp_coverage[COLUMN_SAMPLE_ID])
+            grp_coverage["x_unscaled"] = np.arange(
+                x_offset, x_offset + n, dtype=np.uint64
+            )
+            grp_coverage[COLUMN_GENOME_ID] = np.full(n, target, dtype=object)
         else:
             grp_coverage = ordered_coverage(coverage, grp, target, length)
-            grp_coverage = grp_coverage.with_columns(pl.col("x_unscaled") + x_offset)
+            # np.uint64 rather than a plain int: numpy promotes uint64 + int
+            # to float64, and the ranks must stay integral
+            grp_coverage["x_unscaled"] += np.uint64(x_offset)
 
-        if len(grp_coverage) == 0:
+        n = len(grp_coverage[COLUMN_SAMPLE_ID])
+        if n == 0:
             continue
 
         # reverse plot order if we have two groups and in second group
         if invert and oidx == 1:
-            grp_coverage = (
-                grp_coverage.sort(by="x_unscaled", descending=True)
-                .with_row_index("x_rev", offset=x_offset)
-                .drop(pl.col("x_unscaled"))
-                .with_columns(pl.col("x_rev").alias("x_unscaled"))
+            grp_coverage = mask_table(grp_coverage, np.arange(n - 1, -1, -1))
+            grp_coverage["x_unscaled"] = np.arange(
+                x_offset, x_offset + n, dtype=np.uint64
             )
 
         colors.append(color)
@@ -608,32 +831,27 @@ def position_plot(
         hist_x = []
         hist_y = []
 
-        col_selection = [COLUMN_SAMPLE_ID, "x_unscaled"]
-        for sid, x in grp_coverage[col_selection].rows():
-            cur_positions = (
-                target_positions.filter(pl.col(COLUMN_SAMPLE_ID) == sid)
-                .join(grp_coverage.lazy(), on=COLUMN_SAMPLE_ID)
-                .select(
-                    pl.col("x_unscaled"),
-                    pl.col(COLUMN_START),
-                    pl.col(COLUMN_STOP),
-                )
-            )
+        # the ranks are unique per sample, so the join this replaces only ever
+        # paired a sample's intervals with its own x -- which the loop has
+        for sid, x in zip(
+            grp_coverage[COLUMN_SAMPLE_ID], grp_coverage["x_unscaled"], strict=True
+        ):
+            x = int(x)
+            cur_positions = slice_positions(target_positions, sid)
+            starts = cur_positions[COLUMN_START]
+            stops = cur_positions[COLUMN_STOP]
 
             if scale is None:
-                covered_positions = get_covered(cur_positions.collect().to_numpy())
+                covered_positions = get_covered(
+                    np.column_stack([np.full(len(starts), x), starts, stops])
+                )
                 lc = mc.LineCollection(
                     covered_positions, color=color, linewidths=0.5, alpha=0.7
                 )
                 ax.add_collection(lc)
             else:
                 # obs_bins = position_histogram(cur_positions, scale, ymin, ymax)
-                covered_positions = pl.concat(
-                    [
-                        cur_positions.select(pl.col("start").alias("common")),
-                        cur_positions.select(pl.col("stop").alias("common")),
-                    ]
-                ).collect()
+                covered_positions = np.concatenate([starts, stops])
 
                 obs_count, obs_bins = np.histogram(
                     covered_positions, bins=scale, range=(ymin, ymax)
@@ -664,13 +882,17 @@ def position_plot(
         ax.set_ylabel("Genome position", fontsize=20)
         scaletag = ""
     else:
-        df = pl.DataFrame({"group": tsv_group, "x": tsv_x, "y": tsv_y})
         filename = (
             f"{output}.{target_name}.{target}.{variable}."
             f"position-plot-1_{scale}th-scale.tsv.gz"
         )
-        with gzip.open(filename, "wb") as fo:
-            df.write_csv(fo, separator="\t")
+        _write_delimited(
+            filename,
+            ("group", "x", "y"),
+            zip(tsv_group, tsv_x, tsv_y, strict=True),
+            delimiter="\t",
+            compress=True,
+        )
         ax.set_title(f"Scaled position plot: {target} ({length}bp)", fontsize=20)
         ax.set_ylabel(f"Coverage (1/{scale})th scale", fontsize=20)
         scaletag = f"-1_{scale}th-scale"
