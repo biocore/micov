@@ -60,6 +60,14 @@ Backward incompatible changes:
 
 Other changes:
 
+* **Unmapped mates add no breadth.** Aligners place an unmapped mate at its
+  partner's position. After the move to miint, `micov compress` read such a
+  mate as an interval running back to the start of the genome, so a single
+  one made the sample cover everything up to its partner, and
+  `--disable-compression` failed on it outright. Unmapped reads now cover
+  nothing, and a file whose reads are all unmapped is reported as having no
+  alignments. Released micov was not affected, and neither is `example/`,
+  which has no unmapped reads.
 * **`micov per-sample` no longer slows down with the number of genomes.** Every
   plotting step filtered the whole positions table for its one genome, four
   times per genome. On a 100-sample study with 9,388 genomes and 29.7M

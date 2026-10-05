@@ -55,6 +55,14 @@ test that guards it.
   Otherwise a headerless file, such as a taxonomy `lineages.txt`, would have
   its first row read as column names, and that genome or sample would vanish
   from every output with no error. Released micov has this bug.
+- **`read_alignments` reports an unmapped read with `stop_position` 0.** It
+  keeps any RNAME and POS the read was given, and aligners place an unmapped
+  mate beside its partner. `compress_intervals` turns the backwards
+  `[POS, 0)` into `[0, POS)`, so after the move to miint one such mate made a
+  sample cover its genome from base 0. Filter
+  `stop_position > position` in any aggregate over alignments.
+  `test_alignments.test_an_unmapped_mate_adds_no_breadth` pins it; `example/`
+  has no unmapped reads and could not show it.
 - **`_test_has_header` uses `==`, not `in`.** `COLUMN_GENOME_ID` is a plain
   string, so `x in COLUMN_GENOME_ID` is a substring test. A headerless
   lengths file whose first genome was `id` or `genome` silently lost that

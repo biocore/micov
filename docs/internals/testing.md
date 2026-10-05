@@ -26,8 +26,8 @@ At the time of writing:
 
 | Tier | Result |
 |---|---|
-| Fast | 191 passed, 10 skipped |
-| Full | 201 passed, 0 skipped |
+| Fast | 195 passed, 10 skipped |
+| Full | 205 passed, 0 skipped |
 
 The 10 fast-tier skips are the `requires_full_tier` tests. Any other skip
 needs a reason: `requires_miint_build` is legitimate, and a skip you caused

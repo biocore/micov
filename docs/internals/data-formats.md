@@ -14,6 +14,11 @@ These conventions hold everywhere in micov:
   reference; `D` and `N` advance the reference only, so deletions and skipped
   regions count as covered.
 - **Breadth is `sum(stop - start)`** over merged intervals, with no `+1`.
+- **Unmapped reads cover nothing, even when placed.** An aligner places an
+  unmapped mate at its partner's RNAME and POS (flag 4, CIGAR `*`), and
+  `read_alignments` reports it with `stop_position` 0. `compress` drops every
+  row with `stop_position <= position` before merging; see
+  [traps.md](traps.md).
 - **Touching intervals merge.** When `stop1 == start2` the two become one
   interval. This is miint's behaviour in both `compress_intervals` and
   `cumulative_coverage`, and `test_cov.IntervalMergeTests` and
