@@ -24,6 +24,7 @@ from micov._depth_plot import (
     CONTRAST_MID,
     DEPTH_LINTHRESH,
     INK,
+    MAX_ARC,
     ORF_CATEGORY_COLORS,
     ORF_NEUTRAL,
     ORF_OTHER,
@@ -33,8 +34,11 @@ from micov._depth_plot import (
     assign_label_lanes,
     bp_formatter,
     check_orf_mode,
+    circular_layout,
+    circular_plot,
     clip_spans,
     contrast_colors,
+    densify,
     depth_ymax,
     detail_plot,
     highlight_mask,
@@ -46,8 +50,15 @@ from micov._depth_plot import (
     orf_track,
     orf_value,
     parse_highlight,
+    place_ring_labels,
     plot_path,
+    polar_steps,
+    radial_symlog,
+    radial_text,
+    spread_angles,
     symlog_ticks,
+    tangential_text,
+    theta,
     true_runs,
 )
 from micov._plot import GROUP_COLORS, group_style
@@ -388,7 +399,6 @@ class PlotPathTests(unittest.TestCase):
             plot_path("out/run", "E_coli", "GC", "group", "detail-1001-1501"),
             "out/run.E_coli.GC.group.depth-plot-detail-1001-1501.png",
         )
-
 
 
 def bins_table(groups, edges):
@@ -764,6 +774,479 @@ class DrawingGuardTests(DrawingTestCase):
                     overview=bins_table(["a", "b"],
                                         display_bin_edges(1, 10_001, 1000)),
                     regions=[(1001, 2001)], track=track)
+        with open(path, "rb") as fp:
+            self.assertEqual(fp.read(8), b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(plt.get_fignums(), [])
+
+
+TAU = 2 * np.pi
+
+
+class RingGeometryTests(unittest.TestCase):
+    def test_theta_runs_once_round_per_genome(self):
+        """x 0 is the top; an ORF across the origin carries on past 2 pi,
+        which the polar axes wrap."""
+        np.testing.assert_allclose(
+            theta(np.array([0, 2500, 10_000, 10_500]), 10_000),
+            [0, TAU / 4, TAU, TAU * 1.05],
+        )
+
+    def test_densify_closes_a_ring(self):
+        """Polar axes join points with straight chords, so a ring given by
+        its two ends alone would not be drawn at all."""
+        angles, radii = densify([0, TAU], [0.6, 0.6])
+        self.assertEqual((angles[0], angles[-1]), (0, TAU))
+        self.assertLessEqual(np.diff(angles).max(), MAX_ARC + 1e-12)
+        self.assertTrue((radii == 0.6).all())
+
+    def test_densify_traces_arcs_either_way_and_slants_evenly(self):
+        """A polygon's far side runs back round; an arrowhead's edges change
+        radius as they turn."""
+        angles, radii = densify([TAU, 0], [0.6, 0.6])
+        self.assertLessEqual(np.abs(np.diff(angles)).max(), MAX_ARC + 1e-12)
+        angles, radii = densify([0, 2 * MAX_ARC], [0.5, 0.7])
+        np.testing.assert_allclose(angles, [0, MAX_ARC, 2 * MAX_ARC])
+        np.testing.assert_allclose(radii, [0.5, 0.6, 0.7])
+
+    def test_densify_leaves_a_radial_line_alone(self):
+        angles, radii = densify([1.0, 1.0], [0.2, 0.9])
+        self.assertEqual(angles.tolist(), [1.0, 1.0])
+        self.assertEqual(radii.tolist(), [0.2, 0.9])
+
+    def test_polar_steps_hold_each_bin_then_step(self):
+        """Bins [0, 10) at 1 and [10, 20) at 3 on a 40 bp genome: an arc at
+        1 to a quarter turn, a radial step, then an arc at 3 to a half."""
+        angles, values = polar_steps(np.array([0, 10, 20]), np.array([1.0, 3.0]),
+                                     40)
+        self.assertEqual(angles[0], 0)
+        self.assertAlmostEqual(angles[-1], TAU / 2)
+        quarter = np.isclose(angles, TAU / 4)
+        self.assertEqual(values[quarter].tolist(), [1.0, 3.0])
+        self.assertTrue((values[~quarter & (angles < TAU / 4)] == 1).all())
+        self.assertTrue((values[~quarter & (angles > TAU / 4)] == 3).all())
+        self.assertTrue((np.diff(angles) >= 0).all())
+        self.assertLessEqual(np.diff(angles).max(), MAX_ARC + 1e-12)
+
+    def test_rings_run_outside_in_without_touching(self):
+        """Labels, coordinates, depth, the ORFs either side of the backbone,
+        a union arc per group, then prevalence: strictly outside in, with a
+        hole left in the middle."""
+        for n in (1, 2, 3):
+            with self.subTest(groups=n):
+                radii = circular_layout(n)
+                values = list(radii.values())
+                self.assertTrue(all(a > b for a, b in itertools.pairwise(values)),
+                                radii)
+                self.assertGreater(values[-1], 0.2)
+                self.assertEqual([k for k in radii if k.startswith("union")],
+                                 [f"union:{g}" for g in range(n)])
+
+    def test_ring_text_reads_outward_and_never_upside_down(self):
+        for angle, rotation, ha in ((0, 90, "left"), (TAU / 4, 0, "left"),
+                                    (TAU / 2, 90, "right"),
+                                    (3 * TAU / 4, 0, "right")):
+            with self.subTest(angle=angle):
+                got = radial_text(angle)
+                self.assertAlmostEqual(got[0], rotation)
+                self.assertEqual(got[1], ha)
+        for angle in np.linspace(0, TAU, 73, endpoint=False):
+            rotation, ha = radial_text(angle)
+            self.assertTrue(-90 < rotation <= 90)
+            # the text runs from its anchor away from the centre: clockwise
+            # from the top, outward is (sin, cos)
+            runs = (1 if ha == "left" else -1) * np.array(
+                [np.cos(np.radians(rotation)), np.sin(np.radians(rotation))])
+            np.testing.assert_allclose(runs, [np.sin(angle), np.cos(angle)],
+                                       atol=1e-12)
+
+
+    def test_coordinates_run_along_the_ring_inside_it(self):
+        """Along the ring, so a label takes one line of the depth band
+        however long it is, and hanging inward, clear of the highlighted
+        ORFs' leaders outside; never upside down."""
+        for angle, rotation, va in ((0, 0, "top"), (TAU / 4, -90, "top"),
+                                    (TAU / 2, 0, "bottom"),
+                                    (3 * TAU / 4, 90, "top")):
+            with self.subTest(angle=angle):
+                got = tangential_text(angle)
+                self.assertAlmostEqual(got[0], rotation)
+                self.assertEqual(got[1], va)
+        for angle in np.linspace(0, TAU, 73, endpoint=False):
+            rotation, va = tangential_text(angle)
+            self.assertTrue(-90 <= rotation <= 90)
+            up = np.array([-np.sin(np.radians(rotation)),
+                           np.cos(np.radians(rotation))])
+            # the text's body lies inward of its anchor: clockwise from the
+            # top, inward is (-sin, -cos)
+            body = -up if va == "top" else up
+            np.testing.assert_allclose(body, [-np.sin(angle), -np.cos(angle)],
+                                       atol=1e-12)
+
+
+class RingLabelTests(unittest.TestCase):
+    def test_spaced_labels_stay_put(self):
+        angles = np.array([0.5, 1.0, 3.0])
+        np.testing.assert_allclose(spread_angles(angles, 0.1), angles)
+
+    def test_a_tie_spreads_evenly_about_its_angle(self):
+        """Moved as little as possible: two labels at 1.0, 0.1 apart, go to
+        0.95 and 1.05."""
+        np.testing.assert_allclose(spread_angles(np.array([1.0, 1.0]), 0.1),
+                                   [0.95, 1.05])
+
+    def test_a_cluster_across_the_top_spreads_there(self):
+        """0.01 and 2 pi - 0.01 are neighbours across the top. Cut the circle
+        anywhere but its widest gap and they would be spread apart from
+        either end of the cut, or averaged to pi."""
+        np.testing.assert_allclose(
+            spread_angles(np.array([0.01, TAU - 0.01]), 0.1),
+            [0.05, TAU - 0.05],
+        )
+
+    def test_placed_labels_keep_their_gap_and_stay_near_their_orf(self):
+        """Random clusters: each placed label is a gap from its neighbours,
+        across the top too, and within `max_shift` of its ORF; the rest are
+        NaN, to be counted. Past 78 labels the ring is full, and they are
+        thinned first."""
+        rng = np.random.default_rng(1)
+        for trial in range(40):
+            n = int(rng.integers(1, 200))
+            centres = rng.uniform(0, TAU, 4)
+            angles = (rng.choice(centres, n) + rng.normal(0, 0.05, n)) % TAU
+            placed = place_ring_labels(angles, 0.08, 0.25)
+            on = ~np.isnan(placed)
+            with self.subTest(trial=trial, n=n):
+                self.assertTrue(on.any())
+                ring = np.sort(placed[on])
+                gaps = np.diff(np.append(ring, ring[0] + TAU))
+                self.assertGreaterEqual(gaps.min(), 0.08 - 1e-9)
+                shift = np.abs((placed[on] - angles[on] + np.pi) % TAU - np.pi)
+                self.assertLessEqual(shift.max(), 0.25 + 1e-9)
+
+    def test_a_cluster_too_big_loses_its_farthest_labels(self):
+        """Nine labels at one angle, 0.1 apart and moving at most 0.32:
+        seven fit, from 0.7 to 1.3, and the two pushed farthest are not."""
+        placed = place_ring_labels(np.full(9, 1.0), 0.1, 0.32)
+        self.assertEqual(int(np.isnan(placed).sum()), 2)
+        np.testing.assert_allclose(np.sort(placed[~np.isnan(placed)]),
+                                   np.linspace(0.7, 1.3, 7))
+
+    def test_more_labels_than_the_ring_holds_are_thinned_not_moved(self):
+        """31 labels evenly round a ring that holds ten: ten stay, about every
+        third, each on its own ORF rather than pushed off it."""
+        angles = np.arange(31) * TAU / 31
+        placed = place_ring_labels(angles, TAU / 10.5, 0.5)
+        on = ~np.isnan(placed)
+        self.assertEqual(int(on.sum()), 10)
+        np.testing.assert_allclose(placed[on], angles[on])
+
+    def test_a_crowd_loses_labels_before_a_label_on_its_own(self):
+        """Five labels at 1.0 and one at 1.6, 0.1 apart and moving at most
+        0.15: the crowd's ends, moved farthest, go; the loner stays put."""
+        angles = np.array([1.0] * 5 + [1.6])
+        placed = place_ring_labels(angles, 0.1, 0.15)
+        self.assertEqual(placed[-1], 1.6)
+        self.assertEqual(int(np.isnan(placed).sum()), 1)
+
+    def test_crowds_that_would_spread_into_each_other_are_thinned(self):
+        """Five labels at the top, one a third of the way round, and five
+        just short of two thirds. Spread freely, both fives would push past
+        the cut and into each other; labels are dropped until none do."""
+        angles = np.array([0.0] * 5 + [TAU / 3] + [2 * TAU / 3 - 0.01] * 5)
+        placed = place_ring_labels(angles, TAU / 11, 2.0)
+        ring = np.sort(placed[~np.isnan(placed)])
+        self.assertGreaterEqual(np.diff(np.append(ring, ring[0] + TAU)).min(),
+                                TAU / 11 - 1e-9)
+
+    def test_thinning_starts_after_the_widest_gap(self):
+        """Forty labels 0.1 apart from 5.0 round past the top, on a ring that
+        holds 25 at 0.25 apart: every third from 5.0 stays, on its ORF."""
+        angles = (5.0 + 0.1 * np.arange(40)) % TAU
+        placed = place_ring_labels(angles, 0.25, 0.5)
+        on = ~np.isnan(placed)
+        self.assertEqual(np.flatnonzero(on).tolist(), list(range(0, 40, 3)))
+        np.testing.assert_allclose(placed[on], angles[on])
+
+    def test_independent_of_order(self):
+        angles = np.array([0.2, 0.25, 0.26, 3.0, 6.25, 6.27])
+        order = np.array([3, 0, 5, 1, 4, 2])
+        np.testing.assert_allclose(place_ring_labels(angles[order], 0.1, 0.3),
+                                   place_ring_labels(angles, 0.1, 0.3)[order])
+
+
+class RingTestCase(DrawingTestCase):
+    def ring(self, groups=("case", "control"), length=4_500_000, **kwargs):
+        sizes = {g: self.SIZES.get(g, 4) for g in groups}
+        table = bins_table(groups, display_bin_edges(1, length + 1,
+                                                     overview_bin_bp(length)))
+        fig = self.draw(circular_plot, length=length, sizes=sizes,
+                        overview=table, **kwargs)
+        return fig, table, axes_by_gid(fig, "ring")
+
+    @staticmethod
+    def edges(rows):
+        return np.append(rows["bin_start"], rows["bin_stop"][-1:]) - 1
+
+
+class CircularPlotTests(RingTestCase):
+    def test_polar_from_the_top_clockwise(self):
+        _, _, ax = self.ring()
+        self.assertEqual(ax.name, "polar")
+        self.assertAlmostEqual(ax.get_theta_offset(), np.pi / 2)
+        self.assertEqual(ax.get_theta_direction(), -1)
+
+    def test_one_iqr_median_and_mean_per_group_in_its_colour(self):
+        _, _, ax = self.ring()
+        for g, group in enumerate(("case", "control")):
+            colour = group_style(g)[0].lower()
+            with self.subTest(group=group):
+                self.assertEqual(to_hex(artist(ax, f"median:{group}").get_color()),
+                                 colour)
+                self.assertEqual(to_hex(artist(ax, f"iqr:{group}")
+                                        .get_facecolor()[0]), colour)
+                mean = artist(ax, f"mean:{group}")
+                self.assertEqual(to_hex(mean.get_color()), colour)
+                self.assertEqual(mean.get_linestyle(), ":")
+
+    def test_the_iqr_runs_from_q1_to_q3(self):
+        _, table, ax = self.ring()
+        rows = group_rows(table, "control")
+        radii = circular_layout(2)
+        band = depth_ymax([table]), radii["depth_base"], radii["depth_top"]
+        _, q1 = polar_steps(self.edges(rows), rows["q1"], 4_500_000)
+        _, q3 = polar_steps(self.edges(rows), rows["q3"], 4_500_000)
+        (path,) = artist(ax, "iqr:control").get_paths()
+        self.assertAlmostEqual(path.vertices[:, 1].min(),
+                               radial_symlog(q1, *band).min())
+        self.assertAlmostEqual(path.vertices[:, 1].max(),
+                               radial_symlog(q3, *band).max())
+
+    def test_depth_rises_outward_from_the_backbone_on_the_linear_scale(self):
+        """The median traces each bin round the ring, at the radius of its
+        depth on the same symlog scale as the linear plot."""
+        _, table, ax = self.ring()
+        rows = group_rows(table, "control")
+        radii = circular_layout(2)
+        angles, values = polar_steps(self.edges(rows), rows["median"],
+                                     4_500_000)
+        median = artist(ax, "median:control")
+        np.testing.assert_array_equal(median.get_xdata(), angles)
+        np.testing.assert_allclose(
+            median.get_ydata(),
+            radial_symlog(values, depth_ymax([table]), radii["depth_base"],
+                          radii["depth_top"]),
+        )
+        self.assertGreaterEqual(min(median.get_ydata()), radii["depth_base"])
+
+    def test_a_depth_sits_where_the_linear_plot_puts_it(self):
+        """The same fraction of the ring's depth band as of the linear plot's
+        depth axis, so the two plots of a genome read alike."""
+        fig, table = self.overview()
+        ax = axes_by_gid(fig, "depth:0")
+        ymax = depth_ymax([table])
+        for depth in (0, 1, 2, 5, ymax):
+            with self.subTest(depth=depth):
+                linear = ax.transAxes.inverted().transform(
+                    ax.transData.transform((0, depth)))[1]
+                ring = (radial_symlog(depth, ymax, 0.5, 0.9) - 0.5) / 0.4
+                self.assertAlmostEqual(ring, linear)
+
+    def test_union_arcs_and_prevalence_hang_inward(self):
+        """Each group's union arcs on its own ring inside the backbone;
+        prevalence 0 just inside them, and 1 farthest in."""
+        _, table, ax = self.ring()
+        radii = circular_layout(2)
+        for g, group in enumerate(("case", "control")):
+            rows = group_rows(table, group)
+            edges = self.edges(rows)
+            with self.subTest(group=group):
+                starts, stops = true_runs(rows["union"])
+                arcs = artist(ax, f"union:{group}").get_segments()
+                np.testing.assert_allclose(
+                    [(arc[0, 0], arc[-1, 0]) for arc in arcs],
+                    np.column_stack([theta(edges[starts], 4_500_000),
+                                     theta(edges[stops], 4_500_000)]),
+                )
+                self.assertEqual({r for arc in arcs for r in arc[:, 1]},
+                                 {radii[f"union:{g}"]})
+                prevalence = artist(ax, f"prevalence:{group}")
+                _, values = polar_steps(edges, rows["prevalence"], 4_500_000)
+                r = np.asarray(prevalence.get_ydata())
+                np.testing.assert_allclose(r[values == 0], radii["prevalence_0"])
+                np.testing.assert_allclose(r[values == 1], radii["prevalence_1"])
+
+    def test_coordinates_round_the_outside(self):
+        _, _, ax = self.ring()
+        ticks = artists(ax, "tick")
+        self.assertEqual([t.get_text() for t in ticks],
+                         ["0", "1 Mb", "2 Mb", "3 Mb", "4 Mb"])
+        np.testing.assert_allclose([t.get_position()[0] for t in ticks],
+                                   theta(np.arange(5) * 1e6, 4_500_000))
+
+    def test_the_end_is_not_labelled_over_the_start(self):
+        """10 kb ends on a tick, which is the top again."""
+        _, _, ax = self.ring(length=10_000)
+        self.assertEqual([t.get_text() for t in artists(ax, "tick")],
+                         ["0", "2,000 bp", "4,000 bp", "6,000 bp", "8,000 bp"])
+
+    def test_a_legend_names_each_group_and_its_size(self):
+        fig, _, _ = self.ring()
+        (legend,) = fig.legends
+        self.assertEqual([t.get_text() for t in legend.get_texts()],
+                         ["case  n=3", "control  n=2", "group mean"])
+
+    def test_more_than_three_groups_are_refused_before_drawing(self):
+        """A ring of four overlaid groups is unreadable, and lanes do not
+        bend round; the linear plot carries them."""
+        groups = ("a", "b", "c", "d")
+        with mock.patch.object(Figure, "savefig", autospec=True) as save, \
+                self.assertRaisesRegex(ValueError, "three"):
+            circular_plot("out.png", title="G", length=2000,
+                          sizes=dict.fromkeys(groups, 1),
+                          overview=bins_table(groups, np.array([1, 1001, 2001])))
+        save.assert_not_called()
+
+    def test_masked_values_are_refused_before_drawing(self):
+        table = bins_table(["a"], np.array([1, 1001, 2001]))
+        table["mean"] = np.ma.masked_array(table["mean"], [True, False])
+        with mock.patch.object(Figure, "savefig", autospec=True) as save, \
+                self.assertRaisesRegex(ValueError, "mean"):
+            circular_plot("out.png", title="G", length=2000, sizes={"a": 1},
+                          overview=table)
+        save.assert_not_called()
+
+    def test_a_failed_save_leaves_no_figure_and_no_style_behind(self):
+        before = dict(plt.rcParams)
+        with mock.patch.object(Figure, "savefig", side_effect=OSError("full")), \
+                self.assertRaises(OSError):
+            circular_plot("out.png", title="G", length=2000, sizes={"a": 1},
+                          overview=bins_table(["a"], np.array([1, 1001, 2001])))
+        self.assertEqual(plt.get_fignums(), [])
+        self.assertEqual(dict(plt.rcParams), before)
+
+
+class RingOrfTests(RingTestCase):
+    def track(self, highlight=(False,) * 5, **kwargs):
+        return orf_track(TRACK_ORFS(), np.array(highlight), **kwargs)
+
+    def test_orfs_sit_on_the_backbone_by_strand(self):
+        """+ outside the backbone, - inside, . across it, and neutral."""
+        _, _, ax = self.ring(length=10_000, track=self.track())
+        radii = circular_layout(2)
+        sides = {"+": (radii["backbone"], radii["orfs_out"]),
+                 "-": (radii["orfs_in"], radii["backbone"])}
+        for strand, count in (("+", 3), ("-", 1), (".", 1)):
+            with self.subTest(strand=strand):
+                orfs = artist(ax, f"orfs:{strand}")
+                self.assertEqual(len(orfs.get_paths()), count)
+                r = np.concatenate([p.vertices[:, 1] for p in orfs.get_paths()])
+                if strand in sides:
+                    self.assertGreaterEqual(r.min(), sides[strand][0] - 1e-12)
+                    self.assertLessEqual(r.max(), sides[strand][1] + 1e-12)
+                else:
+                    self.assertLess(r.min(), radii["backbone"])
+                    self.assertGreater(r.max(), radii["backbone"])
+                self.assertEqual({to_hex(c) for c in orfs.get_facecolor()},
+                                 {ORF_NEUTRAL})
+        self.assertTrue(artists(ax, "backbone"))
+
+    def test_orfs_follow_the_colour_mode(self):
+        contrast = np.array([-3.0, 3.0, 0.0, 1.0, np.nan])
+        track = self.track(contrast=contrast)
+        fig, _, ax = self.ring(length=10_000, track=track)
+        np.testing.assert_allclose(artist(ax, "orfs:+").get_facecolor(),
+                                   contrast_colors(contrast[:3]))
+        self.assertTrue(axes_by_gid(fig, "contrast-scale"))
+        track = orf_track(orfs_of((1, 101, "+", "a", {"COG": "J"}),
+                                  (201, 301, "-", "b", {"COG": "X"})),
+                          np.zeros(2, bool), color_by="COG")
+        _, _, ax = self.ring(length=1000, track=track)
+        self.assertEqual(
+            [t.get_text() for t in artist(ax, "orf-legend").get_texts()],
+            ["J", "X", ORF_OTHER_LABEL],
+        )
+
+    def test_an_orf_across_the_origin_is_one_shape(self):
+        """On the ring the origin is no edge: 9,501-10,500 on a 10,000 bp
+        genome runs on past 2 pi, which the axes wrap."""
+        track = orf_track(orfs_of((9501, 10501, "+", "a", {})), np.zeros(1, bool))
+        _, _, ax = self.ring(length=10_000, track=track)
+        (path,) = artist(ax, "orfs:+").get_paths()
+        self.assertAlmostEqual(path.vertices[:, 0].min(), theta(9500, 10_000))
+        self.assertAlmostEqual(path.vertices[:, 0].max(), theta(10_500, 10_000))
+
+    def test_a_short_genome_shows_which_way_its_genes_run(self):
+        """As on the linear plot, arrows up to `ARROW_MAX_BP`: an arrow's tip
+        runs on past the end of its outer edge, where a box's is square."""
+        outer = circular_layout(2)["orfs_out"]
+
+        def tip_ahead(length):
+            _, _, ax = self.ring(length=length, track=self.track())
+            (path, *_) = artist(ax, "orfs:+").get_paths()
+            edge = np.isclose(path.vertices[:, 1], outer)
+            return path.vertices[:, 0].max() - path.vertices[edge, 0].max()
+
+        self.assertGreater(tip_ahead(16_569), 0)
+        self.assertAlmostEqual(tip_ahead(4_500_000), 0)
+
+    def test_highlights_get_ink_a_wedge_and_a_label(self):
+        """dnaA, dnaB and dnaC are within a point of each other at the
+        backbone, so their wedges merge: one from 100 to 2,300, through
+        depth and breadth."""
+        track = self.track(highlight=(True, True, True, False, False))
+        _, _, ax = self.ring(length=4_500_000, track=track)
+        self.assertEqual(
+            [to_hex(c) for c in artist(ax, "orfs:+").get_facecolor()], [INK] * 3
+        )
+        radii = circular_layout(2)
+        (wedge,) = artist(ax, "highlight").get_paths()
+        np.testing.assert_allclose(
+            [wedge.vertices[:, 0].min(), wedge.vertices[:, 0].max()],
+            theta(np.array([100, 2300]), 4_500_000),
+        )
+        np.testing.assert_allclose(
+            [wedge.vertices[:, 1].min(), wedge.vertices[:, 1].max()],
+            [radii["prevalence_1"], radii["depth_top"]],
+        )
+        labels = artists(ax, "label")
+        unlabelled = artists(ax, "unlabelled")
+        self.assertEqual(
+            len(labels) + (int(unlabelled[0].get_text().split()[0])
+                           if unlabelled else 0), 3)
+        self.assertIn("dnaA", [t.get_text() for t in labels])
+
+    def test_labels_that_fit_nowhere_are_counted(self):
+        """Sixty highlighted ORFs within 6 kb: some labelled, the rest
+        counted, none lost."""
+        orfs = orfs_of(*[(1 + 100 * i, 91 + 100 * i, "+", f"g{i}", {})
+                         for i in range(60)])
+        track = orf_track(orfs, np.ones(60, bool))
+        _, _, ax = self.ring(length=4_500_000, track=track)
+        labels = artists(ax, "label")
+        (unlabelled,) = artists(ax, "unlabelled")
+        self.assertGreater(len(labels), 0)
+        self.assertEqual(unlabelled.get_text(),
+                         f"+{60 - len(labels)} unlabelled")
+        # each label sits at the end of its leader, which starts at its ORF
+        leaders = artists(ax, "leader")
+        self.assertEqual(len(leaders), len(labels))
+        names = [t.get_text() for t in labels]
+        for label, leader in zip(labels, leaders, strict=True):
+            i = int(label.get_text()[1:])
+            self.assertAlmostEqual(leader.get_xdata()[0],
+                                   theta(100 * i + 45, 4_500_000))
+            self.assertAlmostEqual(leader.get_xdata()[-1], label.get_position()[0])
+        self.assertEqual(len(set(names)), len(names))
+
+    def test_a_real_png(self):
+        d = mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        path = f"{d}/o'brien.png"
+        circular_plot(path, title="GC", length=10_000, sizes={"a": 1, "b": 2},
+                      overview=bins_table(["a", "b"],
+                                          display_bin_edges(1, 10_001, 5)),
+                      track=self.track(highlight=(True, False, False, True,
+                                                  False)))
         with open(path, "rb") as fp:
             self.assertEqual(fp.read(8), b"\x89PNG\r\n\x1a\n")
         self.assertEqual(plt.get_fignums(), [])

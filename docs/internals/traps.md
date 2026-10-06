@@ -52,6 +52,11 @@ test that guards it.
   a missing strand to `.` for the same reason.
 - **An unfilled `StepPatch` reports C0 as its facecolor.** Read a line's
   colour with `get_edgecolor()`, and a fill's with `get_facecolor()`.
+- **Polar axes draw a line between two points as a straight chord.** Only
+  gridlines and patches are bent into arcs. A ring given by its two ends is
+  not drawn at all, and a long arc cuts across the plot. `_depth_plot`
+  traces every arc in half-degree steps (`densify`, `polar_steps`);
+  `test_depth_plot.RingGeometryTests` checks it.
 - **A matplotlib colormap has no exact midpoint.** Its 256-entry table puts
   0.5 between entries, so a diverging map's "no difference" came out
   `#e6e6e5`, not the grey asked for. `_depth_plot.contrast_colors`

@@ -133,9 +133,10 @@ by `_add_span_sums`, which touches only the spans a window overlaps.
 
 ## Drawing: `_depth_plot`
 
-`linear_plot` draws one genome's overview and `detail_plot` one region, each
-from that genome's tables only. x is `position − 1`, so base p spans
-[p − 1, p) and a bin's edges are its coordinates less one.
+`linear_plot` draws one genome's overview, `detail_plot` one region, and
+`circular_plot` a circular genome's ring, each from that genome's tables
+only. x is `position − 1`, so base p spans [p − 1, p) and a bin's edges are
+its coordinates less one.
 
 - **Layout.** Each row has depth on top, the ORFs on the genome line, and
   breadth below. Up to `OVERLAY_MAX_GROUPS` (3) groups share one set of
@@ -173,10 +174,43 @@ from that genome's tables only. x is `position − 1`, so base p spans
 - **Regions** are shaded on the overview where they fall; each gets its own
   `detail_plot`, at its own bins and depth scale.
 - **Files** (`plot_path`): `{output}.{target_name}.{genome}.{variable}.depth-plot.png`,
-  and `...depth-plot-detail-{start}-{stop}.png`, like micov's other plots.
+  `...depth-plot-circular.png` and `...depth-plot-detail-{start}-{stop}.png`,
+  like micov's other plots.
 - **Guards.** Masked values, or bins that do not tile the same span for
   every group, raise before a figure opens. Drawing happens inside
   `rc_context(STYLE)` on a `Figure` that pyplot never tracks.
+
+### The ring: `circular_plot`
+
+A circular genome also gets a ring, from the overview's bins: the linear
+plot's anatomy bent round, the mirror layout approved from the mockups.
+
+- **Outside in** (`circular_layout`): the highlighted ORFs' labels, the
+  coordinates (labelled along the ring, inside it, by `tangential_text`),
+  depth, the ORFs either side of the backbone, a union arc per group, then
+  prevalence from 0 hanging inward to 1. Polar axes run clockwise from the
+  top (`theta`); an ORF across the origin is one shape, past 2π, which the
+  axes wrap.
+- **Depth** is on the linear plot's scale: `radial_symlog` puts a depth the
+  same fraction of the way up the ring's depth band as up the linear depth
+  axis, headroom (`DEPTH_HEADROOM`) included.
+- **Chords.** Polar axes join points with straight lines, so every arc is
+  traced in steps of at most `MAX_ARC` (half a degree) by `densify`, and
+  a step function by `polar_steps`. A ring given by its two ends alone is
+  not drawn at all.
+- **ORFs** keep the linear plot's colours, outlines and shapes
+  (`orf_polygons`), arrows included up to `ARROW_MAX_BP`. Highlights get a
+  wedge from prevalence 1 out to the top of depth, merged within a point.
+- **Labels** (`place_ring_labels`) are spread round the ring by least
+  squares (`spread_angles`), the ring cut at its widest gap so labels
+  either side of the top stay neighbours. A label moved more than
+  `RING_LABEL_SHIFT` label widths is dropped, farthest first, and counted
+  as "+N unlabelled"; more labels than the ring holds are thinned first, so
+  thousands cost milliseconds. `radial_text` reads them outward, never
+  upside down.
+- **At most three groups.** A ring can only overlay, so more raise
+  `ValueError` before drawing; the linear plot gives them lanes. (The
+  command will skip the ring with a warning.)
 
 `test_depth_plot` reads each drawing back by artist gid (`depth:{row}`,
 `median:{group}`, `orfs:+`, `past-end`, `region:{i}` and so on) with

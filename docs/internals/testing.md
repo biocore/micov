@@ -29,8 +29,8 @@ At the time of writing:
 
 | Tier | Result |
 |---|---|
-| Fast | 377 passed, 10 skipped |
-| Full | 387 passed, 0 skipped |
+| Fast | 414 passed, 10 skipped |
+| Full | 424 passed, 0 skipped |
 
 The 10 fast-tier skips are the `requires_full_tier` tests. Any other skip
 needs a reason: `requires_miint_build` is legitimate, and a skip you caused
@@ -69,7 +69,7 @@ samples. Test those with synthetic data spanning thousands of genomes; see
 | `test_quant.py` | Bin edges and hit counts |
 | `test_io.py` | Lengths parsing and header detection; BED3 loading; the shared header rule; `depth-plot`'s readers and its per-ORF writer, whose columns and types are pinned literally |
 | `test_depth.py` | `depth-plot`'s computation: which samples and genomes are used and what is reported, windowed per-base depth, merged breadth, the binned group statistics and the per-ORF statistics and contrast, hand-computed on the `dp_*` fixtures and on literal reads, plus window-size invariance and a CIGAR-walking oracle for both |
-| `test_depth_plot.py` | `depth-plot`'s drawing: the layout helpers, then the overview and detail plots, read back from the figure by artist gid with `Figure.savefig` patched; guards on masked or untiled bins, on global style, and on open figures |
+| `test_depth_plot.py` | `depth-plot`'s drawing: the layout helpers, then the overview, detail and circular plots, read back from the figure by artist gid with `Figure.savefig` patched; the ring's geometry, its depth scale against the linear axis, and label placement as a property over random clusters; guards on masked or untiled bins, on too many groups for a ring, on global style, and on open figures |
 | `test_miint.py` | Connection, overrides, error messages, capability check |
 | `test_quoting.py` | `sql_string`, and every SQL literal site driven with a path containing `'` |
 | `test_dependencies.py` | No module imports `polars`, `numba`, `pyarrow` or `scipy` |
