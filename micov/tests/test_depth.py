@@ -28,8 +28,9 @@ from micov._depth import (
     DEPTH_ALIGNMENTS_TABLE,
     DETAIL_MAX_BINS,
     GENOMES_TABLE,
-    OVERVIEW_BIN_BP,
+    OVERVIEW_ROW_BINS,
     ROSTER_TABLE,
+    ROW_BP,
     WINDOW_CELLS,
     coverage_counts,
     detail_bin_bp,
@@ -39,6 +40,8 @@ from micov._depth import (
     intersect_layers,
     orf_contrast,
     orf_segments,
+    overview_bin_bp,
+    overview_row_bp,
     quartiles_x4,
     stage_breadth,
     stage_depth,
@@ -522,6 +525,26 @@ class BinEdgesTests(unittest.TestCase):
                 self.assertLessEqual(len(edges) - 1, DETAIL_MAX_BINS)
                 self.assertEqual((edges[0], edges[-1]), (start, stop))
 
+    def test_an_overview_row_is_the_genome_up_to_two_megabases(self):
+        """A mitochondrion is one row of its own length, not a sliver of a
+        2 Mb row; a larger genome wraps into rows of `ROW_BP`."""
+        for length, row in ((16_569, 16_569), (ROW_BP, ROW_BP),
+                            (10_000_000, ROW_BP)):
+            with self.subTest(length=length):
+                self.assertEqual(overview_row_bp(length), row)
+
+    def test_an_overview_row_has_at_most_two_thousand_bins(self):
+        """1 kb on any genome of 2 Mb or more; a 16.6 kb mitochondrion gets
+        9 bp, resolving its genes rather than 17 blocks."""
+        for length, bp in ((1, 1), (2_000, 1), (2_001, 2), (16_569, 9),
+                           (50_000, 25), (ROW_BP, 1_000), (ROW_BP + 1, 1_000),
+                           (10_000_000, 1_000)):
+            with self.subTest(length=length):
+                self.assertEqual(overview_bin_bp(length), bp)
+                row = overview_row_bp(length)
+                self.assertLessEqual(len(display_bin_edges(1, row + 1, bp)) - 1,
+                                     OVERVIEW_ROW_BINS)
+
 
 class GenomeBinsTests(SyntheticTestCase):
     COLUMNS: ClassVar[list] = ["group", "bin_start", "bin_stop", "q1", "median",
@@ -981,14 +1004,15 @@ class FixtureOrfTests(DepthTestCase):
             with self.assertNoLogs("micov"):
                 _, table = genome_statistics(
                     self.con, "depth_layer", genome, length,
-                    [display_bin_edges(1, length + 1, OVERVIEW_BIN_BP)], orfs,
+                    [display_bin_edges(1, length + 1, overview_bin_bp(length))],
+                    orfs,
                 )
             return table, ""
         with self.assertLogs("micov", level="WARNING") as logged:
             _, table = genome_statistics(
                 self.con, "depth_layer", genome, length,
-                [display_bin_edges(1, length + 1, OVERVIEW_BIN_BP)], orfs,
-                warn_contrast=True,
+                [display_bin_edges(1, length + 1, overview_bin_bp(length))],
+                orfs, warn_contrast=True,
             )
         return table, "\n".join(logged.output)
 

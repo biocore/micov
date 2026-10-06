@@ -40,8 +40,14 @@ BREADTH_INTERVALS_TABLE = "breadth_intervals"
 #: larger was no faster on 10 Mb x 300 samples, and peaked at 3 GiB.
 WINDOW_CELLS = 2**22
 
-#: Bin width of the overview, which spans the whole genome.
-OVERVIEW_BIN_BP = 1_000
+#: The overview wraps a genome into rows of this many bases, so every genome
+#: at least this long is drawn at one resolution. A shorter genome, such as a
+#: mitochondrion, is one row of its own length (`overview_row_bp`).
+ROW_BP = 2_000_000
+
+#: The most bins in a row of the overview: 1 kb bins on a genome of 2 Mb or
+#: more, 9 bp on a 16.6 kb mitochondrion (`overview_bin_bp`).
+OVERVIEW_ROW_BINS = 2_000
 
 #: The most bins a detail panel has; short regions show single bases.
 DETAIL_MAX_BINS = 1_500
@@ -320,6 +326,16 @@ def display_bin_edges(start, stop, bin_bp):
 def detail_bin_bp(start, stop):
     """Return the narrowest bin keeping [start, stop) to `DETAIL_MAX_BINS`."""
     return max(1, -(-(stop - start) // DETAIL_MAX_BINS))
+
+
+def overview_row_bp(length):
+    """Return the overview's row width: the whole genome, up to `ROW_BP`."""
+    return min(length, ROW_BP)
+
+
+def overview_bin_bp(length):
+    """Return the narrowest bin keeping a row to `OVERVIEW_ROW_BINS`."""
+    return -(-overview_row_bp(length) // OVERVIEW_ROW_BINS)
 
 
 def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,

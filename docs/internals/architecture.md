@@ -74,6 +74,7 @@ join and filter predicates.
 | `_plot.py` | `per_sample_plots` (the per-genome loop), `coverage_curve`, `add_monte`, `position_plot`, `ks_2samp`/`ks_table`, the single-sample `position-plot`, and `_write_delimited` |
 | `_quant.py` | `binning`'s SQL: `bin_list_sql`, `pos_to_bins`, `create_bin_list` |
 | `_depth.py` | `depth-plot`'s computation ([depth-plot.md](depth-plot.md)): `intersect_layers` (which samples and genomes are used, and the report of those left out), then per genome `genome_statistics`: binned group statistics from windowed per-base depth (`stage_depth`, `window_depth`) and merged breadth (`stage_breadth`, `coverage_counts`), and per-ORF statistics (`genome_orfs`, `orf_segments`, `orf_contrast`) from the same pass. The command itself is not wired yet |
+| `_depth_plot.py` | `depth-plot`'s drawing ([depth-plot.md](depth-plot.md)): `linear_plot` (the overview, in rows of up to 2 Mb) and `detail_plot` (one region), and the pure helpers they use: ticks, spans, highlights (`parse_highlight`, `highlight_mask`), ORF colours (`orf_track`, `orf_categories`, `contrast_colors`), shapes and label lanes. The command itself is not wired yet |
 | `_constants.py` | Frozen column names (`COLUMN_*`) and the three presence states |
 | `_utils.py` | The `micov` logger, and `sql_string`, the one way a value enters a SQL string literal |
 

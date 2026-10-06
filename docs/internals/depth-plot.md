@@ -1,7 +1,7 @@
 # depth-plot
 
-**Read this when** you touch `_depth.py`, or `depth-plot`'s readers in
-`_io.py`. The command is not wired into the CLI yet; this describes the
+**Read this when** you touch `_depth.py` or `_depth_plot.py`, or
+`depth-plot`'s readers in `_io.py`. The command is not wired into the CLI yet; this describes the
 pieces built so far. [data-formats.md](data-formats.md) has the input formats.
 
 `depth-plot` draws, along each genome, per-base **depth** from one alignment
@@ -62,9 +62,12 @@ samples, not the genome's length.
 `genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None)`
 makes one pass of windows and fills every bin set at once, returning
 `(bins, orf_table)`: the overview,
-`display_bin_edges(1, L + 1, OVERVIEW_BIN_BP)`, and each detail region,
+`display_bin_edges(1, L + 1, overview_bin_bp(L))`, and each detail region,
 `display_bin_edges(start, stop, detail_bin_bp(start, stop))`, which has at
 most `DETAIL_MAX_BINS` bins (single bases for a region up to 1,500 bp).
+`overview_bin_bp` keeps each overview row to `OVERVIEW_ROW_BINS` (2,000)
+bins: 1 kb on any genome of 2 Mb or more, 9 bp on a 16.6 kb mitochondrion,
+25 bp on a 50 kb phage.
 
 - **At each base, per group:** depth Q1, median and Q3 across the group's
   samples (numpy's default linear method), with a sample without reads counted
@@ -127,6 +130,57 @@ by `_add_span_sums`, which touches only the spans a window overlaps.
 - `OrfWindowInvarianceTests` checks the ORF table bit-identical for windows
   of 1, 2, 3, 7 and L bases, ORFs across window edges and the origin
   included, and against a Python oracle.
+
+## Drawing: `_depth_plot`
+
+`linear_plot` draws one genome's overview and `detail_plot` one region, each
+from that genome's tables only. x is `position − 1`, so base p spans
+[p − 1, p) and a bin's edges are its coordinates less one.
+
+- **Layout.** Each row has depth on top, the ORFs on the genome line, and
+  breadth below. Up to `OVERLAY_MAX_GROUPS` (3) groups share one set of
+  axes; more get a lane each, every lane on the same depth scale. The
+  overview's rows are `overview_row_bp(L)` wide: the whole genome, up to
+  `ROW_BP` (2 Mb). A larger genome wraps into rows of exactly 2 Mb, so all
+  of them share one resolution, and the last row is masked past the
+  genome's end. A shorter one, such as a mitochondrion, is one row of its
+  own length rather than a sliver, at its own finer bins; up to 150 kb its
+  ORFs are arrows.
+- **Depth.** Per group, the IQR as a filled `stairs` from Q1 to Q3, the
+  median as a line in `_plot.group_style`'s colour and dash, and the mean
+  dotted. The axis is symlog: linear below `DEPTH_LINTHRESH` (2), with
+  `symlog_ticks`, and shared by every row. The label says "alignments",
+  because secondary alignments count.
+- **Breadth.** The union as segments in a strip above 0 (`true_runs` of the
+  bins' `union`), and prevalence hanging down from 0 to 1.
+- **ORFs.** Boxes, or arrows when the panel spans at most `ARROW_MAX_BP`
+  (150 kb). + above the line, − below, `.` across it. An ORF across a
+  circular genome's origin is drawn as its two parts, both boxes.
+  `orf_track` decides each ORF's fill:
+  - neutral grey, highlighted ORFs in ink;
+  - `--orf-color-by`: the top three values (ties to the value that sorts
+    first) in `ORF_CATEGORY_COLORS` plus a grey Other, with a legend;
+  - `--orf-contrast`: `contrast_colors`, from the first group's colour
+    through grey to the second's, clipped at ±3 (8-fold), with a scale.
+  In the two colour modes a highlighted ORF keeps its fill and gains an ink
+  outline.
+- **Highlights** (`parse_highlight`): `KEY=VALUE` matches exactly and
+  `KEY~REGEX` searches; the first operator wins. KEY is `type` or `strand`,
+  else a GFF attribute. A highlighted ORF gets a faint band through depth and
+  breadth (merged within a point), and a label in one of two lanes per side
+  (`assign_label_lanes`); labels that fit nowhere are counted as
+  "+N unlabelled".
+- **Regions** are shaded on the overview where they fall; each gets its own
+  `detail_plot`, at its own bins and depth scale.
+- **Files** (`plot_path`): `{output}.{target_name}.{genome}.{variable}.depth-plot.png`,
+  and `...depth-plot-detail-{start}-{stop}.png`, like micov's other plots.
+- **Guards.** Masked values, or bins that do not tile the same span for
+  every group, raise before a figure opens. Drawing happens inside
+  `rc_context(STYLE)` on a `Figure` that pyplot never tracks.
+
+`test_depth_plot` reads each drawing back by artist gid (`depth:{row}`,
+`median:{group}`, `orfs:+`, `past-end`, `region:{i}` and so on) with
+`Figure.savefig` patched.
 
 ## Cost
 

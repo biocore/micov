@@ -41,6 +41,21 @@ test that guards it.
   to a protanope, and micov overlays groups. `test_plot.GroupPaletteTests`
   checks the palette, and [curves-and-ks.md](curves-and-ks.md#group-colours)
   says why it has five colours.
+- **Never set global `rcParams`.** micov is also a library, and its callers'
+  settings are theirs. `_depth_plot` draws inside
+  `matplotlib.rc_context(STYLE)` on `matplotlib.figure.Figure` objects, which
+  pyplot never tracks, so there is nothing to close.
+  `test_depth_plot.DrawingGuardTests` checks both.
+- **numpy hands NULLs back as masked arrays, which matplotlib draws as gaps
+  without complaint.** `fetchnumpy` does this for any NULL. `_depth_plot`
+  refuses masked input before opening a figure; `_io.load_orfs` coalesces
+  a missing strand to `.` for the same reason.
+- **An unfilled `StepPatch` reports C0 as its facecolor.** Read a line's
+  colour with `get_edgecolor()`, and a fill's with `get_facecolor()`.
+- **A matplotlib colormap has no exact midpoint.** Its 256-entry table puts
+  0.5 between entries, so a diverging map's "no difference" came out
+  `#e6e6e5`, not the grey asked for. `_depth_plot.contrast_colors`
+  interpolates its three anchors directly.
 
 ## Performance
 
