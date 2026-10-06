@@ -322,7 +322,8 @@ def detail_bin_bp(start, stop):
     return max(1, -(-(stop - start) // DETAIL_MAX_BINS))
 
 
-def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None):
+def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
+                      warn_contrast=False):
     """Bin one genome's per-base group statistics, in one pass of windows.
 
     At each base, each group's depth Q1, median, Q3 and mean are taken across
@@ -347,6 +348,9 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None):
         and each detail region.
     orfs : dict of np.ndarray, optional
         This genome's ORFs, as `genome_orfs` returns them.
+    warn_contrast : bool, optional
+        Warn when the genome has no contrast (`orf_contrast`); for runs that
+        asked for --orf-contrast. The column is filled either way.
 
     Returns
     -------
@@ -445,7 +449,8 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None):
         "n_samples": np.tile(sizes[:, 0], len(bp)),
         **{key: values.T.ravel() for key, values in columns.items()},
         "contrast": np.repeat(
-            orf_contrast(quartiles[:, 1], groups, genome_id), len(groups)
+            orf_contrast(quartiles[:, 1], groups, genome_id, warn_contrast),
+            len(groups),
         ),
     }
     return tables, orf_table
@@ -495,7 +500,7 @@ def orf_segments(starts, stops, length):
             np.concatenate([np.minimum(stops, length + 1), stops[wraps] - length]))
 
 
-def orf_contrast(median, groups, genome_id):
+def orf_contrast(median, groups, genome_id, warn=False):
     """Compare two groups' depth, ORF by ORF, each scaled by its typical ORF.
 
     ``log2((B / norm B + c) / (A / norm A + c))``, where A and B are the
@@ -509,11 +514,15 @@ def orf_contrast(median, groups, genome_id):
     median : np.ndarray
         Groups x ORFs.
 
+    warn : bool, optional
+        Warn, naming the genome and group, when a norm of 0 leaves no
+        contrast.
+
     Returns
     -------
     np.ndarray
-        Per ORF; NaN unless there are exactly two groups, and NaN with a
-        warning if either group's norm is 0.
+        Per ORF; NaN unless there are exactly two groups and both norms are
+        above 0.
     """
     contrast = np.full(median.shape[1], np.nan)
     if len(groups) != 2 or median.shape[1] == 0:
@@ -521,10 +530,12 @@ def orf_contrast(median, groups, genome_id):
     norm = np.median(median, axis=1)
     zero = [group for group, value in zip(groups, norm, strict=True) if value == 0]
     if zero:
-        logger.warning(
-            f"No ORF contrast for {genome_id}: its median ORF has median depth "
-            f"0 in {', '.join(zero)}, so there is no typical depth to scale by."
-        )
+        if warn:
+            logger.warning(
+                f"No ORF contrast for {genome_id}: its median ORF has median "
+                f"depth 0 in {', '.join(zero)}, so there is no typical depth to "
+                "scale by."
+            )
         return contrast
     a, b = median / norm[:, None]
     return np.log2((b + CONTRAST_PSEUDOCOUNT) / (a + CONTRAST_PSEUDOCOUNT))

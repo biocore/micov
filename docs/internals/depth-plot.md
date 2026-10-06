@@ -118,9 +118,12 @@ by `_add_span_sums`, which touches only the spans a window overlaps.
   with no depth in one group finite.
 - **A norm of 0** -- at least half the genome's ORFs have median depth 0 in
   that group -- leaves nothing to scale by: the genome's contrasts are NaN
-  (NULL in the file) and a warning names the genome and the group. On the
-  `dp_*` fixture this is every genome, so contrast is tested on literal
-  reads.
+  (NULL in the file). Only a run that asked for `--orf-contrast`
+  (`warn_contrast`) is warned, naming the genome and the group; the column
+  is written either way. On the `dp_*` fixture this is every genome, so
+  contrast is tested on literal reads. On `example/` too: the median `Yes`
+  sample has 2,701 alignments on G000154205 against 6,870 for `No`, and 94%
+  of its ORFs have median depth 0.
 - `OrfWindowInvarianceTests` checks the ORF table bit-identical for windows
   of 1, 2, 3, 7 and L bases, ORFs across window edges and the origin
   included, and against a Python oracle.

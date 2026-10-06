@@ -818,12 +818,25 @@ class OrfStatisticsTests(SyntheticTestCase):
     """One row per ORF and group; each sample's mean depth over the ORF first,
     then the group's quantiles of those."""
 
-    def orf_table(self, spans, length=8):
+    def orf_table(self, spans, length=8, **kwargs):
         _, table = genome_statistics(
             self.con, "layer", "G", length,
             [display_bin_edges(1, length + 1, length)], synthetic_orfs(spans),
+            **kwargs,
         )
         return table
+
+    def test_a_missing_contrast_is_reported_only_when_asked_for(self):
+        """The table always has a contrast column, but a run that did not ask
+        for --orf-contrast should not be told why it is empty."""
+        self.build({"S0": "a", "S1": "b"}, [("S1", 1, 3, "2M")])
+        with self.assertNoLogs("micov"):
+            table = self.orf_table([(1, 3), (3, 5)])
+        self.assertTrue(np.isnan(table["contrast"]).all())
+        with self.assertLogs("micov", level="WARNING") as logged:
+            table = self.orf_table([(1, 3), (3, 5)], warn_contrast=True)
+        self.assertTrue(np.isnan(table["contrast"]).all())
+        self.assertIn("No ORF contrast for G", "\n".join(logged.output))
 
     def row(self, table, orf_id, group):
         (i,) = np.flatnonzero(
@@ -938,7 +951,8 @@ class OrfContrastTests(unittest.TestCase):
         typical depth to scale by."""
         median = np.array([[0.0, 0.0, 3.0], [1.0, 2.0, 3.0]])
         with self.assertLogs("micov", level="WARNING") as logged:
-            contrast = orf_contrast(median, ["case", "control"], "GQ1")
+            contrast = orf_contrast(median, ["case", "control"], "GQ1",
+                                    warn=True)
         self.assertTrue(np.isnan(contrast).all())
         message = "\n".join(logged.output)
         self.assertIn("GQ1", message)
@@ -950,7 +964,7 @@ class OrfContrastTests(unittest.TestCase):
             with self.subTest(groups=groups), self.assertNoLogs("micov"):
                 median = np.ones((len(groups), 3))
                 self.assertTrue(
-                    np.isnan(orf_contrast(median, groups, "G")).all()
+                    np.isnan(orf_contrast(median, groups, "G", warn=True)).all()
                 )
 
 
@@ -958,15 +972,23 @@ class FixtureOrfTests(DepthTestCase):
     """The dp ORFs, worked by hand from `dp.sam` and `dp.gff`. Case is S1-S3
     (n 3), control S4 and S5 (n 2)."""
 
-    def orf_table(self, genome, length):
+    def orf_table(self, genome, length, warn_contrast=False):
         with self.assertLogs("micov", level="WARNING"):
             self.resolve(orfs=DATA / "dp_orfs.parquet")
         stage_breadth(self.con, "breadth_layer")
         orfs = genome_orfs(self.con, genome)
+        if not warn_contrast:
+            with self.assertNoLogs("micov"):
+                _, table = genome_statistics(
+                    self.con, "depth_layer", genome, length,
+                    [display_bin_edges(1, length + 1, OVERVIEW_BIN_BP)], orfs,
+                )
+            return table, ""
         with self.assertLogs("micov", level="WARNING") as logged:
             _, table = genome_statistics(
                 self.con, "depth_layer", genome, length,
                 [display_bin_edges(1, length + 1, OVERVIEW_BIN_BP)], orfs,
+                warn_contrast=True,
             )
         return table, "\n".join(logged.output)
 
@@ -1023,7 +1045,7 @@ class FixtureOrfTests(DepthTestCase):
 
     def test_gc_has_no_contrast(self):
         """Most GC ORFs have median 0 in both groups: nothing to scale by."""
-        table, warned = self.orf_table("GC", 3000)
+        table, warned = self.orf_table("GC", 3000, warn_contrast=True)
         self.assertTrue(np.isnan(table["contrast"]).all())
         for name in ("GC", "case", "control"):
             self.assertIn(name, warned)
