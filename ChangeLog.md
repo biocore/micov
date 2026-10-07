@@ -4,6 +4,25 @@ micov ChangeLog
 micov 0.0.1-dev
 ---------------
 
+New features:
+
+* **`micov depth-plot` draws per-base depth and breadth along each genome,
+  by sample group.** Depth and breadth may come from different alignment
+  files -- metatranscriptomic depth over metagenomic breadth, say -- each
+  `read_alignments` output saved as Parquet with a `sample_id` column. For
+  each genome in `--features-to-keep`, which gives its `length` and
+  optionally `is_circular` and detail regions, it writes an overview
+  (`{output}.{target_name}.{genome}.{variable}.depth-plot.png`), a ring for
+  a circular genome (`...depth-plot-circular.png`, three groups at most),
+  and a panel per region (`...depth-plot-detail-{start}-{stop}.png`). Depth
+  is each group's per-base median, IQR and mean, on a symlog axis; breadth
+  is where any sample covers and the share of samples that do. With
+  `--orfs`, a `read_gff` Parquet, it draws the ORFs, which `--highlight`,
+  `--orf-color-by` and `--orf-contrast` can mark or colour, and writes a
+  per-ORF table, `{output}.{variable}.depth-plot-orfs.parquet`. This is an
+  addition to the frozen command set, approved by the maintainer; its
+  options and the per-ORF table's columns are frozen from this release.
+
 Backward incompatible changes:
 
 * **The scaled position plot is now `position-plot-scaled.{png,tsv.gz}`,** not

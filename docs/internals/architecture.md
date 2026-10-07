@@ -57,6 +57,18 @@ per_sample_                                                        not the Parqu
 plots
 ```
 
+`depth-plot` reads none of these:
+
+```
+read_alignments Parquet + sample_id (depth layer, breadth layer), read_gff
+Parquet, features (with lengths), metadata
+   │ micov depth-plot: _io readers → _depth.intersect_layers
+   ▼ _depth.stage_breadth, stage_depth_reads (once, by genome)
+per genome: _depth.genome_statistics → _depth_plot.linear_plot,
+            circular_plot, detail_plot → PNGs
+            _io.add_orf_table ──→ _io.write_orf_table (once) → per-ORF Parquet
+```
+
 The two-file Parquet split is load-bearing. `coverage.parquet` has one row
 per sample × genome, and drives ranking and filtering.
 `covered_positions.parquet` is large, and is only read through views with
@@ -66,15 +78,15 @@ join and filter predicates.
 
 | Module | Owns |
 |---|---|
-| `cli.py` | The click command surface: argument parsing and glue only. `compress` input-source logic, plus the hidden `nonqiita-to-parquet` alias (a `copy.copy` of the command object) |
+| `cli.py` | The click command surface: argument parsing and glue only. `compress` input-source logic, `depth-plot`'s usage errors, plus the hidden `nonqiita-to-parquet` alias (a `copy.copy` of the command object) |
 | `_miint.py` | `connection()`, **the only place micov opens a DuckDB connection** and the only place the extension's install source (`MIINT_REPOSITORY`) is named. `REQUIRED_MIINT_FUNCTIONS` is checked on every connection |
-| `_io.py` | Input parsers (`load_genome_lengths`, `load_bed_cov`, `_test_has_header`, and the header rule `read_tsv_with_header`), the SAM/BAM ingest (`compress_alignments`), `write_coverage_parquet`, `depth-plot`'s readers (`load_alignment_layer`, `load_depth_features`, `load_sample_groups`, `load_orfs`), and its per-ORF writer `write_orf_table` |
+| `_io.py` | Input parsers (`load_genome_lengths`, `load_bed_cov`, `_test_has_header`, and the header rule `read_tsv_with_header`), the SAM/BAM ingest (`compress_alignments`), `write_coverage_parquet`, `target_names_query` (the `--target-names` transform, shared by `View` and `depth-plot`), `depth-plot`'s readers (`load_alignment_layer`, `load_depth_features`, `load_sample_groups`, `load_orfs`), and its per-ORF table (`add_orf_table` per genome, `write_orf_table` once; the frozen `ORF_STATISTICS_COLUMNS`) |
 | `_view.py` | `View`: loads the Parquet pair, metadata and feature constraints into one connection, and exposes `coverages()`, `positions()`, `metadata()`, `feature_metadata()`, `feature_names()`, `sample_presence_absence()` as relations |
 | `_cov.py` | Ranking (`ordered_coverage`) and accumulation (`cumulative_covered`, `cumulative_curves`, `compute_cumulative`). Operates on dict-of-numpy tables; the accumulation itself is miint SQL |
 | `_plot.py` | `per_sample_plots` (the per-genome loop), `coverage_curve`, `add_monte`, `position_plot`, `ks_2samp`/`ks_table`, the single-sample `position-plot`, and `_write_delimited` |
 | `_quant.py` | `binning`'s SQL: `bin_list_sql`, `pos_to_bins`, `create_bin_list` |
-| `_depth.py` | `depth-plot`'s computation ([depth-plot.md](depth-plot.md)): `intersect_layers` (which samples and genomes are used, and the report of those left out), then per genome `genome_statistics`: binned group statistics from windowed per-base depth (`stage_depth`, `window_depth`) and merged breadth (`stage_breadth`, `coverage_counts`), and per-ORF statistics (`genome_orfs`, `orf_segments`, `orf_contrast`) from the same pass. The command itself is not wired yet |
-| `_depth_plot.py` | `depth-plot`'s drawing ([depth-plot.md](depth-plot.md)): `linear_plot` (the overview, in rows of up to 2 Mb), `detail_plot` (one region) and `circular_plot` (a circular genome's ring), and the pure helpers they use: ticks, spans, highlights (`parse_highlight`, `highlight_mask`), ORF colours (`orf_track`, `orf_categories`, `contrast_colors`), shapes, label lanes, and the ring's geometry and label placement. The command itself is not wired yet |
+| `_depth.py` | `depth-plot`'s computation ([depth-plot.md](depth-plot.md)): `intersect_layers` (which samples and genomes are used, and the report of those left out), then per genome `genome_statistics`: binned group statistics from windowed per-base depth (`stage_depth_reads` once, `stage_depth`, `window_depth`) and merged breadth (`stage_breadth`, `coverage_counts`), and per-ORF statistics (`genome_orfs`, `orf_segments`, `orf_contrast`) from the same pass |
+| `_depth_plot.py` | `depth-plot`'s drawing ([depth-plot.md](depth-plot.md)): `linear_plot` (the overview, in rows of up to 2 Mb), `detail_plot` (one region) and `circular_plot` (a circular genome's ring), and the pure helpers they use: ticks, spans, highlights (`parse_highlight`, `highlight_mask`), ORF colours (`orf_track`, `orf_categories`, `contrast_colors`), shapes, label lanes, and the ring's geometry and label placement; and `depth_plots`, the per-genome run the command calls |
 | `_constants.py` | Frozen column names (`COLUMN_*`) and the three presence states |
 | `_utils.py` | The `micov` logger, and `sql_string`, the one way a value enters a SQL string literal |
 
@@ -112,9 +124,11 @@ that connection choose names that cannot collide:
 - `depth-plot` never builds a `View`, because its inputs are not the Parquet
   pair. On its own connection it uses the views `depth_layer` and
   `breadth_layer`, the tables `depth_features`, `sample_groups`, `orfs`,
-  `depth_roster` and `depth_genomes`, the temp tables `depth_alignments`
-  (one genome at a time) and `breadth_intervals`, and the relation
-  `depth_orf_statistics`, registered while the per-ORF table is written.
+  `depth_roster` and `depth_genomes`, the temp tables `depth_reads` (every
+  plotted genome's reads, by genome), `depth_alignments` (one genome at a
+  time), `breadth_intervals` and `depth_orf_statistics` (the per-ORF table,
+  a genome at a time), and the relation `depth_orf_genome`, registered while
+  one genome's per-ORF table is copied in.
 
 ## Platform
 

@@ -1,8 +1,9 @@
 # depth-plot
 
 **Read this when** you touch `_depth.py` or `_depth_plot.py`, or
-`depth-plot`'s readers in `_io.py`. The command is not wired into the CLI yet; this describes the
-pieces built so far. [data-formats.md](data-formats.md) has the input formats.
+`depth-plot`'s readers and writer in `_io.py`. [commands.md](commands.md) has
+the command and its errors, [data-formats.md](data-formats.md) the input
+formats and the per-ORF table.
 
 `depth-plot` draws, along each genome, per-base **depth** from one alignment
 layer and **breadth** from another (say metatranscriptomic over
@@ -19,7 +20,7 @@ metagenomic), for each group of a metadata column. Both layers are
   left out by the user, and is not.
 - No sample or no genome left, more than `_plot.MAX_GROUPS` groups, an
   aligned read starting beyond its genome's `length`, or (with ORFs) no ORF
-  on a used genome or an ORF outside its genome: `ValueError`. Only a
+  on any used genome or an ORF outside its genome: `ValueError`. Only a
   circular genome's ORF may run past its end. All of this is checked before
   any genome is computed.
 - It creates `depth_roster` (`sample_id`, a dense `sample_idx` in `sample_id`
@@ -35,7 +36,9 @@ samples, not the genome's length.
 
 - **`stage_depth`** copies one genome's aligned reads of the used samples into
   the temp table `depth_alignments`: `sample_idx`, UINTEGER `position` and
-  `stop_position`, `cigar`, sorted by position.
+  `stop_position`, `cigar`, sorted by position. The command reads them from
+  `depth_reads` (`stage_depth_reads`), never from the layer itself; see
+  [the run](#the-run-_depth_plotdepth_plots).
 - **`window_depth(con, n, w0, w1)`** calls miint's `compute_coverage_depth`
   per sample, with positions shifted by `w0 - 1` and the window's width as the
   reference length. miint clips reads that start before `w0` or run past
@@ -94,9 +97,11 @@ by `_add_span_sums`, which touches only the spans a window overlaps.
 
 ## Per-ORF statistics
 
-`genome_orfs(con, genome_id)` gives a genome's ORFs by position. With
-`orfs`, `genome_statistics` also returns the per-ORF table that
-`_io.write_orf_table` writes ([data-formats.md](data-formats.md)).
+`genome_orfs(con, genome_id)` gives a genome's ORFs by position, each with
+its GFF `attributes` as a dict. With `orfs`, `genome_statistics` also returns
+the per-ORF table, which `_io.add_orf_table` copies into DuckDB as each
+genome is done and `_io.write_orf_table` writes once
+([data-formats.md](data-formats.md)).
 
 - **Segments.** `orf_segments` splits an ORF running past the genome's end,
   which only a circular genome's may, into `[start, L + 1)` and
@@ -216,6 +221,49 @@ plot's anatomy bent round, the mirror layout approved from the mockups.
 `median:{group}`, `orfs:+`, `past-end`, `region:{i}` and so on) with
 `Figure.savefig` patched.
 
+## The run: `_depth_plot.depth_plots`
+
+`cli.depth_plot` loads the inputs through the `_io` readers and hands the
+connection to `depth_plots`, which:
+
+1. **Refuses what it can, first:** `intersect_layers`, then `check_orf_mode`
+   on the number of groups. Nothing is computed or written before both pass.
+2. **Warns once:** no rings with four or more groups (naming the circular
+   genomes); plotted genomes with no ORF, a bare track, most likely a
+   seqid that is not the genome_id.
+3. **Stages once:** `stage_breadth`, and `stage_depth_reads`, which copies the
+   plotted samples' aligned reads on the plotted genomes into `depth_reads`,
+   ordered by genome and position. `_io.load_orfs` likewise stores the ORFs
+   by genome.
+4. **Per genome**, in `genome_id` order: bins for the overview
+   (`overview_bin_bp`) and each region (`detail_bin_bp`), one
+   `genome_statistics` pass over `depth_reads`, the ORF track
+   (`highlight_mask`, `orf_track`, the per-ORF contrast `[::groups]`), then
+   `linear_plot`, `circular_plot` if circular and at most three groups, and
+   a `detail_plot` per region. Titles are `{name} ({genome}) · {length} bp ·
+   {topology} · {variable}`, names from `_io.target_names_query`.
+5. **Afterwards:** warns of a `--highlight` that matched no ORF and an
+   `--orf-color-by` attribute no ORF has, and writes the per-ORF table.
+
+**Why stage by genome.** Each genome's queries filter on `genome_id`. On
+the layer itself, or an unordered ORF table, every genome scans the whole
+input, so each one costs more the larger the input is; on a table ordered by
+genome, DuckDB's row-group min/max skip the others. With 500 genomes
+(`localdocs/depth-plot/many/bench.py`, not committed):
+
+| Reads in the layer | Per genome, from the layer | Per genome, from `depth_reads` |
+|---|---|---|
+| 0.5M | 3.5 ms | 2.5 ms |
+| 5M | 12.0 ms | 3.1 ms |
+| 20M | 41.9 ms | 4.0 ms |
+
+Staging 20M reads takes 0.6 s once. For the same reason each genome's
+per-ORF table goes into DuckDB as it is computed, which can spill to disk,
+rather than into a list held until the end.
+`test_depth_plot.ManyGenomesTests` runs 300 genomes and checks that each
+plot gets its own genome's bins; `DepthPlotsTests` checks each plot's bins
+and ORFs on the fixture.
+
 ## Cost
 
 Measured 2026-10-05 on an Apple-silicon laptop, `--threads 4`
@@ -225,6 +273,10 @@ Measured 2026-10-05 on an Apple-silicon laptop, `--threads 4`
 |---|---|---|---|
 | Synthetic: 10 Mb, 300 samples, 1M reads | 23 s | 0.64 GiB | 31 s, 0.78 GiB |
 | Specimen: 2 genomes (4.7 and 5.3 Mb), 49 samples, 430k reads | 5.8 s | 0.53 GiB | 7.3 s, 0.53 GiB |
+
+The command on the specimen (both genomes, 49 samples, synthetic ORFs on
+one, highlights, a ring and a detail panel) took 13 s and peaked at 0.88 GiB,
+2026-10-07.
 
 About half the time is `np.quantile`'s partition, which is inherent to
 per-base quantiles. ORFs add a per-sample prefix sum of every window. **miint's aggregation peaks at six to seven times the

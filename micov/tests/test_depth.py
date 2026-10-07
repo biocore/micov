@@ -26,6 +26,7 @@ from micov import _depth
 from micov._depth import (
     BREADTH_INTERVALS_TABLE,
     DEPTH_ALIGNMENTS_TABLE,
+    DEPTH_READS_TABLE,
     DETAIL_MAX_BINS,
     GENOMES_TABLE,
     OVERVIEW_ROW_BINS,
@@ -45,6 +46,7 @@ from micov._depth import (
     quartiles_x4,
     stage_breadth,
     stage_depth,
+    stage_depth_reads,
     window_depth,
     window_size,
 )
@@ -319,6 +321,41 @@ class StageDepthTests(DepthTestCase):
              ("stop_position", "UINTEGER", "YES", None, None, None),
              ("cigar", "VARCHAR", "YES", None, None, None)],
         )
+
+
+class StageDepthReadsTests(DepthTestCase):
+    """The depth layer, staged once for every genome."""
+
+    def test_plotted_reads_stored_by_genome_then_position(self):
+        """Each genome's `stage_depth` then reads only its own row groups.
+        Scanning the layer for every genome made each genome cost more the
+        bigger the whole input was. Only what can add depth is kept: not
+        S4's placed unmapped read, not S7 (depth only) or S9 (no metadata),
+        not GX, which is left out."""
+        self.resolve_quietly()
+        stage_depth_reads(self.con, "depth_layer")
+        rows = self.con.sql(f"""SELECT sample_id, reference, position
+                                FROM {DEPTH_READS_TABLE}
+                                ORDER BY rowid""").fetchall()
+        self.assertEqual([row[1:] for row in rows],
+                         sorted(row[1:] for row in rows))
+        self.assertEqual({row[1] for row in rows}, {"GC", "GL"})
+        self.assertEqual({row[0] for row in rows}, {"S1", "S2", "S3", "S4", "S5"})
+        self.assertNotIn(("S4", "GC", 1500), rows)
+
+    def test_the_same_bins_as_from_the_layer(self):
+        self.resolve_quietly()
+        stage_breadth(self.con, "breadth_layer")
+        stage_depth_reads(self.con, "depth_layer")
+        edges = [display_bin_edges(1, 3001, 7), display_bin_edges(1001, 1501, 1)]
+        for raw, staged in zip(
+            genome_statistics(self.con, "depth_layer", "GC", 3000, edges)[0],
+            genome_statistics(self.con, DEPTH_READS_TABLE, "GC", 3000, edges)[0],
+            strict=True,
+        ):
+            for key in raw:
+                with self.subTest(column=key):
+                    np.testing.assert_array_equal(raw[key], staged[key])
 
 
 class WindowDepthTests(SyntheticTestCase):
@@ -1042,6 +1079,17 @@ class FixtureOrfTests(DepthTestCase):
              ("gc_6", "gc_6", "CDS", 2901, 3001, "-"),
              ("gc_7", "gc_7", "CDS", 2951, 3051, "+")],
         )
+
+    def test_genome_orfs_carry_their_attributes(self):
+        """`--highlight` and `--orf-color-by` match GFF attributes."""
+        with self.assertLogs("micov", level="WARNING"):
+            self.resolve(orfs=DATA / "dp_orfs.parquet")
+        orfs = genome_orfs(self.con, "GC")
+        self.assertEqual(orfs["attributes"][1],
+                         {"ID": "gc_2", "locus_tag": "GC_0002",
+                          "product": "5' nucleotidase"})
+        self.assertEqual([a.get("gene") for a in orfs["attributes"]],
+                         ["dnaA", None, "rrsA", None, "nTest", None, None])
 
     def test_gc(self):
         """Columns: depth Q1, median, Q3, mean, prevalence, union breadth.

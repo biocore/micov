@@ -42,6 +42,8 @@ import unittest
 from pathlib import Path
 from typing import ClassVar
 
+import duckdb
+
 from micov.cli import cli
 from micov.tests._golden import (
     assert_file_set,
@@ -72,6 +74,7 @@ EXPECTED_COMMANDS = frozenset(
         "binning",
         "compress",
         "cov-to-parquet",
+        "depth-plot",
         "extract-sample-presence",
         "nonqiita-to-parquet",
         "per-sample",
@@ -199,6 +202,17 @@ class TestCliSurface(unittest.TestCase):
                    if p.name == "sort_by_metadata_value"]
         self.assertTrue(flag.is_flag)
         self.assertFalse(flag.default)
+
+    def test_depth_plot_options(self):
+        """`depth-plot`'s options are part of the frozen surface from its first
+        release (ChangeLog.md)."""
+        self.assertEqual(
+            {p.name for p in cli.commands["depth-plot"].params},
+            {"depth", "breadth", "orfs", "sample_metadata",
+             "sample_metadata_column", "features_to_keep", "target_names",
+             "output", "highlight", "orf_color_by", "orf_contrast", "memory",
+             "threads"},
+        )
 
     def test_binning_still_declares_rank(self):
         """`--rank` is a documented no-op, but removing it is a CLI change."""
@@ -695,6 +709,159 @@ class TestBinningAndPlotsFastTier(MicovCliTestCase):
             [f"plot.{genome}.position-plot.png"
              for genome in self.POSITION_PLOT_GENOMES],
         )
+
+
+def depth_plot_args(output, column="group", breadth=True, orfs=True,
+                    features="dp_regions.tsv", names=True, metadata=None):
+    """A `depth-plot` command line over the dp fixture (test_data/README.md)."""
+    args = ["depth-plot", "--depth", DATA / "dp_depth.parquet",
+            "--sample-metadata", metadata or DATA / "dp_metadata.tsv",
+            "--sample-metadata-column", column,
+            "--features-to-keep", DATA / features, "--output", output]
+    if breadth:
+        args += ["--breadth", DATA / "dp_breadth.parquet"]
+    if orfs:
+        args += ["--orfs", DATA / "dp_orfs.parquet"]
+    if names:
+        args += ["--target-names", DATA / "dp_target_names.tsv"]
+    return args
+
+
+@requires_micov
+class TestDepthPlotFastTier(MicovCliTestCase):
+    """`depth-plot` end to end on the dp fixture. Run A uses everything:
+    separate layers, regions, target names, ORFs, two highlights and the
+    contrast."""
+
+    GC = "run.s__Circulus_testii.GC.group"
+    GL = "run.s__Linearia_testii.GL.group"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._run_a = tempfile.TemporaryDirectory()
+        cls.out_a = Path(cls._run_a.name)
+        cls.proc_a = subprocess.run(
+            [MICOV, *map(str, depth_plot_args(cls.out_a / "run")),
+             "--highlight", "product~phage", "--highlight", "type=rRNA",
+             "--orf-contrast"],
+            capture_output=True, check=False,
+        )
+        cls.stderr_a = cls.proc_a.stderr.decode(errors="replace")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._run_a.cleanup()
+
+    def orf_rows(self, where):
+        return duckdb.execute(
+            f"""SELECT depth_q1, depth_median, depth_q3, depth_mean, prevalence,
+                       union_breadth
+                FROM read_parquet(?) WHERE {where}""",
+            [str(self.out_a / "run.group.depth-plot-orfs.parquet")],
+        ).fetchall()
+
+    def test_run_a_succeeds(self):
+        self.assertEqual(self.proc_a.returncode, 0, self.stderr_a)
+
+    def test_run_a_writes_every_plot_and_one_orf_table(self):
+        assert_file_set(self.out_a, {
+            f"{self.GC}.depth-plot.png", f"{self.GC}.depth-plot-circular.png",
+            f"{self.GC}.depth-plot-detail-1001-1501.png",
+            f"{self.GC}.depth-plot-detail-2501-2901.png",
+            f"{self.GL}.depth-plot.png", "run.group.depth-plot-orfs.parquet",
+        })
+        for png in self.out_a.glob("*.png"):
+            with self.subTest(png=png.name):
+                assert_png_plausible(png)
+
+    def test_run_a_orf_table_matches_the_golden(self):
+        assert_parquet_equal(self.out_a / "run.group.depth-plot-orfs.parquet",
+                             GOLDEN / "dp.orfs.parquet")
+
+    def test_run_a_orf_table_holds_the_hand_computed_values(self):
+        """Read independently of the golden: test_depth works these out."""
+        self.assertEqual(self.orf_rows("orf_id = 'gc_3' AND \"group\" = 'case'"),
+                         [(0.5, 0.5, 0.5, 0.5, 0.5, 0.75)])
+        self.assertEqual(self.orf_rows("orf_id = 'gc_4' AND \"group\" = 'control'"),
+                         [(0.25, 0.5, 0.75, 0.5, 0.5, 1.0)])
+        self.assertEqual(self.orf_rows("orf_id = 'gl_2' AND \"group\" = 'control'"),
+                         [(1.0, 1.0, 1.0, 1.0, 1.0, 1.0)])
+
+    def test_run_a_reports_what_it_left_out_and_why_contrast_is_empty(self):
+        for name in ("S6", "S7", "S8", "GX", "GB", "No ORF contrast for GC"):
+            with self.subTest(name=name):
+                self.assertIn(name, self.stderr_a)
+        self.assertNotIn("S9", self.stderr_a)
+        genomes = [line for line in self.stderr_a.splitlines() if "genome(s)" in line]
+        self.assertFalse([line for line in genomes if "*" in line])
+
+    def test_breadth_defaults_to_depth_and_no_orfs_no_table(self):
+        """With one layer, S7 and GX (depth only before) are in both."""
+        self.micov(*depth_plot_args(self.tmp / "run", breadth=False, orfs=False,
+                                    features="dp_features.tsv", names=False))
+        assert_file_set(self.tmp, {
+            "run.GC.GC.group.depth-plot.png",
+            "run.GC.GC.group.depth-plot-circular.png",
+            "run.GL.GL.group.depth-plot.png", "run.GX.GX.group.depth-plot.png",
+        })
+
+    def test_four_groups_get_lanes_and_no_ring(self):
+        proc = self.micov(*depth_plot_args(self.tmp / "run", column="quad",
+                                           orfs=False, names=False))
+        assert_file_set(self.tmp, {
+            "run.GC.GC.quad.depth-plot.png",
+            "run.GC.GC.quad.depth-plot-detail-1001-1501.png",
+            "run.GC.GC.quad.depth-plot-detail-2501-2901.png",
+            "run.GL.GL.quad.depth-plot.png",
+        })
+        self.assertIn("No circular plots", proc.stderr.decode())
+
+    def refused(self, args, code, message):
+        out = self.tmp / "out"
+        out.mkdir()
+        proc = self.micov(*args, expect_success=False)
+        stderr = proc.stderr.decode(errors="replace")
+        self.assertEqual(proc.returncode, code, stderr)
+        self.assertIn(message, stderr)
+        self.assertEqual(list(out.iterdir()), [])
+
+    def test_refusals_leave_nothing_behind(self):
+        """Mistakes on the command line are usage errors (2); mistakes in the
+        files are found before any genome is computed (1)."""
+        out = self.tmp / "out" / "run"
+        nobody = self.tmp / "nobody.tsv"
+        nobody.write_text("sample_id\tgroup\nZ1\tcase\n")
+        no_sample = self.tmp / "no_sample.parquet"
+        duckdb.execute(f"""COPY (SELECT * EXCLUDE (sample_id)
+                                 FROM read_parquet('{DATA}/dp_depth.parquet'))
+                           TO '{no_sample}' (FORMAT PARQUET)""")
+        for why, args, code, message in (
+            ("highlight without ORFs",
+             [*depth_plot_args(out, orfs=False), "--highlight", "type=CDS"], 2,
+             "--orfs"),
+            ("a highlight that is not KEY=VALUE",
+             [*depth_plot_args(out), "--highlight", "phage"], 2, "KEY=VALUE"),
+            ("both colourings",
+             [*depth_plot_args(out), "--orf-color-by", "product",
+              "--orf-contrast"], 2, "choose one"),
+            ("an output directory that does not exist",
+             depth_plot_args(self.tmp / "out" / "missing" / "run"), 2,
+             "does not exist"),
+            ("no sample in common",
+             depth_plot_args(out, metadata=nobody), 1, "No sample"),
+            ("colour-by with three groups",
+             [*depth_plot_args(out, column="trio"), "--orf-color-by", "product"],
+             1, "at most two groups"),
+            ("contrast with three groups",
+             [*depth_plot_args(out, column="trio"), "--orf-contrast"], 1,
+             "exactly two groups"),
+            ("a layer without sample_id",
+             [*depth_plot_args(out)[:2], no_sample, *depth_plot_args(out)[3:]], 1,
+             "sample column"),
+        ):
+            with self.subTest(why):
+                self.refused(args, code, message)
+                (self.tmp / "out").rmdir()
 
 
 @requires_micov

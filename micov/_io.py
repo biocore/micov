@@ -6,12 +6,11 @@ import sys
 import tempfile
 from contextlib import contextmanager
 
-import numpy as np
-
 from ._constants import (
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
+    COLUMN_NAME,
     COLUMN_PERCENT_COVERED,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
@@ -63,6 +62,26 @@ def read_tsv_with_header(con, path, rename, first_column, all_varchar=False):
     ]
     selected += [f'"{column}"' for column in columns[len(rename) :]]
     return f"SELECT {', '.join(selected)} FROM {source}"
+
+
+def target_names_query(con, path):
+    """Build a SELECT of `genome_id` and the name to give its plot files.
+
+    A name that looks like a lineage keeps only its last element, and
+    spaces and square brackets become underscores, since the name goes into
+    file names.
+    """
+    names = read_tsv_with_header(
+        con, path, [COLUMN_GENOME_ID, COLUMN_NAME], FEATURE_ID_COLUMNS
+    )
+    # '^.*; ' is greedy, so it consumes through the *final* delimiter and
+    # leaves a plain name untouched -- both cases in one pass.
+    return (
+        f"SELECT {COLUMN_GENOME_ID}, "
+        f"regexp_replace(regexp_replace({COLUMN_NAME}, '^.*; ', ''), "
+        r"'[ \[\]]', '_', 'g')"
+        f" AS {COLUMN_NAME} FROM ({names})"
+    )
 
 
 #: `load_bed_cov` leaves the BED3 intervals here.
@@ -604,7 +623,7 @@ def load_sample_groups(con, path, column):
 
 
 def load_orfs(con, path):
-    """Load ORFs from a `read_gff` Parquet into `ORFS_TABLE`.
+    """Load ORFs from a `read_gff` Parquet into `ORFS_TABLE`, by genome.
 
     Only `ORF_TYPES` are kept. Coordinates stay as `read_gff` wrote them,
     already half-open (GFF end + 1). Each ORF needs an `ID`, which keys the
@@ -632,7 +651,10 @@ def load_orfs(con, path):
                        coalesce(strand, '.') AS strand,
                        attributes
                 FROM {source}
-                WHERE type IN ({types})""")
+                WHERE type IN ({types})
+                -- read one genome at a time: in order, each read touches
+                -- only that genome's row groups
+                ORDER BY {COLUMN_GENOME_ID}, {COLUMN_START}""")
     rows = con.sql(f"""SELECT type || ' at ' || {COLUMN_GENOME_ID} || ':'
                               || {COLUMN_START}
                        FROM {ORFS_TABLE} WHERE orf_id IS NULL
@@ -645,57 +667,62 @@ def load_orfs(con, path):
 
 
 
-#: `write_orf_table` registers the per-ORF statistics under this name.
-ORF_STATISTICS_RELATION = "depth_orf_statistics"
+#: `depth-plot`'s per-ORF table: its columns and their types, in order.
+ORF_STATISTICS_COLUMNS = (
+    (COLUMN_GENOME_ID, "VARCHAR"), ("orf_id", "VARCHAR"), ("label", "VARCHAR"),
+    ("type", "VARCHAR"), (COLUMN_START, "BIGINT"), (COLUMN_STOP, "BIGINT"),
+    ("strand", "VARCHAR"), ("group", "VARCHAR"), ("n_samples", "BIGINT"),
+    ("depth_q1", "DOUBLE"), ("depth_median", "DOUBLE"), ("depth_q3", "DOUBLE"),
+    ("depth_mean", "DOUBLE"), ("prevalence", "DOUBLE"),
+    ("union_breadth", "DOUBLE"), ("contrast", "DOUBLE"),
+)
+
+#: `add_orf_table` collects every genome's per-ORF statistics here.
+ORF_STATISTICS_TABLE = "depth_orf_statistics"
+
+#: `add_orf_table` registers one genome's under this name while it copies them.
+_ORF_GENOME_RELATION = "depth_orf_genome"
 
 
-def write_orf_table(con, tables, output, variable):
-    """Write `depth-plot`'s per-ORF statistics, every genome's, to one Parquet.
+def add_orf_table(con, table):
+    """Add one genome's per-ORF statistics to `ORF_STATISTICS_TABLE`.
 
-    The columns, in order: `genome_id`, `orf_id`, `label`, `type`, `start`,
-    `stop` (half-open, as `read_gff` gives them), `strand`, `group`,
-    `n_samples`, then the group's `depth_q1`, `depth_median`, `depth_q3`,
-    `depth_mean`, `prevalence`, `union_breadth`, and the ORF's `contrast`.
-    A missing contrast is NaN in the tables and NULL in the file: DuckDB reads
+    Copied in as each genome is computed, so a run over thousands of genomes
+    holds them in DuckDB, which can spill to disk, rather than in memory.
+    A missing contrast is NaN in the table and NULL in the file: DuckDB reads
     a numpy NaN as NULL.
 
     Parameters
     ----------
-    tables : list of dict
-        `_depth.genome_statistics`' ORF tables, one per genome.
-    output, variable : str
-        The file is ``{output}.{variable}.depth-plot-orfs.parquet``.
+    table : dict of np.ndarray
+        `_depth.genome_statistics`' ORF table: the `ORF_STATISTICS_COLUMNS`.
+    """
+    schema = ", ".join(f'"{name}" {kind}' for name, kind in ORF_STATISTICS_COLUMNS)
+    casts = ", ".join(f'"{name}"::{kind}' for name, kind in ORF_STATISTICS_COLUMNS)
+    con.sql(f"CREATE TEMP TABLE IF NOT EXISTS {ORF_STATISTICS_TABLE} ({schema})")
+    con.register(_ORF_GENOME_RELATION, table)
+    try:
+        con.sql(f"""INSERT INTO {ORF_STATISTICS_TABLE}
+                    SELECT {casts} FROM {_ORF_GENOME_RELATION}""")
+    finally:
+        con.unregister(_ORF_GENOME_RELATION)
+
+
+def write_orf_table(con, output, variable):
+    """Write every genome's per-ORF statistics, as added, to one Parquet.
+
+    The columns, in order (`ORF_STATISTICS_COLUMNS`): `genome_id`, `orf_id`,
+    `label`, `type`, `start`, `stop` (half-open, as `read_gff` gives them),
+    `strand`, `group`, `n_samples`, then the group's `depth_q1`,
+    `depth_median`, `depth_q3`, `depth_mean`, `prevalence`, `union_breadth`,
+    and the ORF's `contrast`. Requires `ORF_STATISTICS_TABLE`.
 
     Returns
     -------
     str
-        The path written.
+        The path written, ``{output}.{variable}.depth-plot-orfs.parquet``.
     """
     path = f"{output}.{variable}.depth-plot-orfs.parquet"
-    con.register(
-        ORF_STATISTICS_RELATION,
-        {key: np.concatenate([table[key] for table in tables]) for key in tables[0]},
-    )
-    try:
-        con.sql(f"""COPY (SELECT {COLUMN_GENOME_ID}::VARCHAR AS {COLUMN_GENOME_ID},
-                                 orf_id::VARCHAR AS orf_id,
-                                 label::VARCHAR AS label,
-                                 type::VARCHAR AS type,
-                                 {COLUMN_START}::BIGINT AS {COLUMN_START},
-                                 {COLUMN_STOP}::BIGINT AS {COLUMN_STOP},
-                                 strand::VARCHAR AS strand,
-                                 "group"::VARCHAR AS "group",
-                                 n_samples::BIGINT AS n_samples,
-                                 depth_q1::DOUBLE AS depth_q1,
-                                 depth_median::DOUBLE AS depth_median,
-                                 depth_q3::DOUBLE AS depth_q3,
-                                 depth_mean::DOUBLE AS depth_mean,
-                                 prevalence::DOUBLE AS prevalence,
-                                 union_breadth::DOUBLE AS union_breadth,
-                                 contrast::DOUBLE AS contrast
-                          FROM {ORF_STATISTICS_RELATION})
-                    TO {sql_string(path)}
-                        (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
-    finally:
-        con.unregister(ORF_STATISTICS_RELATION)
+    con.sql(f"""COPY {ORF_STATISTICS_TABLE} TO {sql_string(path)}
+                    (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
     return path

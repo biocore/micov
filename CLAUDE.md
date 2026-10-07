@@ -24,7 +24,7 @@ The compute runs on DuckDB plus the **miint** DuckDB extension. Runtime dependen
 | `commands.md` | Each CLI command, from click down to SQL |
 | `view.md` | `View`'s three filter modes, regions, presence, the header rule |
 | `curves-and-ks.md` | Ranking, the tie-break, accumulation, Monte Carlo, position plots, KS and Bonferroni |
-| `depth-plot.md` | `depth-plot`'s layers, windowed per-base depth, breadth, and bins |
+| `depth-plot.md` | `depth-plot`'s layers, windowed per-base depth, breadth, bins, per-ORF statistics, the plots, and the per-genome run |
 | `miint.md` | Loading the extension, the functions called, the stale-cache trap |
 | `testing.md` | Tiers, goldens, comparators, tolerances |
 | `traps.md` | **Read before any non-trivial change.** Each entry is a mistake already made once |
@@ -106,8 +106,8 @@ If a test produces an **incorrect expected value**: DO NOT change the expected v
 
 Unless a task explicitly overrides this:
 
-- **The CLI surface is frozen.** The commands are `binning`, `compress`, `cov-to-parquet`, `extract-sample-presence`, `per-sample` and `position-plot`, plus the hidden alias `nonqiita-to-parquet`. `test_equivalence.TestCliSurface` pins the set.
-- **Output formats are frozen**: the `{base}.coverage.parquet` / `{base}.covered_positions.parquet` column names, order and types; `.ks.csv`; the position `.tsv.gz`; the binning and presence TSVs. Released micov must still read them. `.cov` is read-only input now, and `cov-to-parquet` is its reader.
+- **The CLI surface is frozen.** The commands are `binning`, `compress`, `cov-to-parquet`, `depth-plot`, `extract-sample-presence`, `per-sample` and `position-plot`, plus the hidden alias `nonqiita-to-parquet`. `test_equivalence.TestCliSurface` pins the set, and `depth-plot`'s options.
+- **Output formats are frozen**: the `{base}.coverage.parquet` / `{base}.covered_positions.parquet` column names, order and types; `.ks.csv`; the position `.tsv.gz`; the binning and presence TSVs; `depth-plot`'s per-ORF Parquet (`_io.ORF_STATISTICS_COLUMNS`). Released micov must still read them. `.cov` is read-only input now, and `cov-to-parquet` is its reader.
 - **Published numbers must reproduce.** A change that moves coverage values, KS statistics or p-values is a regression, not an improvement.
 - **Every approved break is recorded in `ChangeLog.md`.** These include the `per-sample` rename, SAM/BAM-only `compress`, Qiita removal, `.ks.csv` with its Bonferroni column, the header requirement and the `sample_id` tie-break. Record any new one there, with the maintainer's approval.
 - **Supported platforms** are Linux (x86_64, aarch64) and macOS on Apple silicon; miint has no other builds. The first run needs network access to fetch the extension (`docs/internals/miint.md` covers offline use).

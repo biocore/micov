@@ -148,6 +148,34 @@ class ApostropheCliTests(MicovCliTestCase):
         (count,) = view.con.sql("SELECT COUNT(*) FROM coverage").fetchone()
         self.assertGreater(count, 0)
 
+    def test_depth_plot_under_an_awkward_directory(self):
+        """Every `depth-plot` path literal -- the three Parquet readers, the
+        three TSV readers and the per-ORF table's COPY -- and a quote in
+        the data too: a group named o'hare, and a highlight matching one."""
+        self.stage("dp_depth.parquet", "dp_breadth.parquet", "dp_orfs.parquet",
+                   "dp_metadata.tsv", "dp_regions.tsv", "dp_target_names.tsv")
+        out = self.awkward / "run"
+        self.micov(
+            "depth-plot",
+            "--depth", self.awkward / "dp_depth.parquet",
+            "--breadth", self.awkward / "dp_breadth.parquet",
+            "--orfs", self.awkward / "dp_orfs.parquet",
+            "--sample-metadata", self.awkward / "dp_metadata.tsv",
+            "--sample-metadata-column", "site",
+            "--features-to-keep", self.awkward / "dp_regions.tsv",
+            "--target-names", self.awkward / "dp_target_names.tsv",
+            "--highlight", "product~5' nuc",
+            "--output", out,
+        )
+        groups = duckdb.execute(
+            """SELECT DISTINCT "group" FROM read_parquet(?) ORDER BY 1""",
+            [f"{out}.site.depth-plot-orfs.parquet"],
+        ).fetchall()
+        self.assertEqual(groups, [("midway",), ("o'hare",)])
+        self.assertTrue(
+            (self.awkward / "run.s__Circulus_testii.GC.site.depth-plot.png").exists()
+        )
+
 
 @requires_miint_build
 class ApostropheExtensionPathTests(unittest.TestCase):

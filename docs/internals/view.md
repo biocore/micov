@@ -96,9 +96,9 @@ Region mode is the only mode that computes anything new:
 - **`feature_metadata()`** returns `genome_id, start, stop, length,
   region_id`, plus any extra feature columns in region mode.
 - **`feature_names()`** returns `genome_id, name`. Without `--target-names`,
-  the name is the genome id. With it, the names are cleaned as described in
-  [data-formats.md](data-formats.md) and left-joined, falling back to the
-  genome id.
+  the name is the genome id. With it, the names are cleaned by
+  `_io.target_names_query`, as described in [data-formats.md](data-formats.md),
+  and left-joined, falling back to the genome id.
 - **`sample_presence_absence()`** works in region mode only.
   1. It creates `presence_regions` from `feature_metadata`.
   2. It runs `region_presence(selected_positions, presence_regions,

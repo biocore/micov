@@ -183,6 +183,21 @@ micov extract-sample-presence --parquet-coverage example/parquet/example \
     --output $G/example_presence.tsv
 ```
 
+`dp.orfs.parquet` is `depth-plot`'s per-ORF table for run A of
+`test_equivalence.TestDepthPlotFastTier`. Every value was checked by hand
+against `dp.sam` when it was made (2026-10-07); most are pinned in
+`test_depth.FixtureOrfTests`.
+
+```bash
+out=$(mktemp -d)
+micov depth-plot --depth $D/dp_depth.parquet --breadth $D/dp_breadth.parquet \
+    --orfs $D/dp_orfs.parquet --sample-metadata $D/dp_metadata.tsv \
+    --sample-metadata-column group --features-to-keep $D/dp_regions.tsv \
+    --target-names $D/dp_target_names.tsv --highlight 'product~phage' \
+    --highlight type=rRNA --orf-contrast --output $out/dp
+cp $out/dp.group.depth-plot-orfs.parquet $G/dp.orfs.parquet
+```
+
 `example_presence.tsv` needs `example/`, which `MANIFEST.in` prunes from
 sdists, so it can only be regenerated from a git checkout.
 

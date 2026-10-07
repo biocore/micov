@@ -7,9 +7,12 @@ asserts what was drawn rather than how a PNG looks.
 """
 
 import itertools
+import logging
+import os
 import random
 import shutil
 import unittest
+from pathlib import Path
 from tempfile import mkdtemp
 from typing import ClassVar
 from unittest import mock
@@ -19,7 +22,16 @@ import numpy as np
 from matplotlib.colors import to_hex
 from matplotlib.figure import Figure
 
-from micov._depth import ROW_BP, display_bin_edges, overview_bin_bp
+from micov import _depth_plot
+from micov._depth import (
+    DEPTH_READS_TABLE,
+    ROW_BP,
+    detail_bin_bp,
+    display_bin_edges,
+    genome_orfs,
+    genome_statistics,
+    overview_bin_bp,
+)
 from micov._depth_plot import (
     CONTRAST_MID,
     DEPTH_LINTHRESH,
@@ -39,6 +51,7 @@ from micov._depth_plot import (
     clip_spans,
     contrast_colors,
     densify,
+    depth_plots,
     depth_ymax,
     detail_plot,
     highlight_mask,
@@ -61,6 +74,13 @@ from micov._depth_plot import (
     theta,
     true_runs,
 )
+from micov._io import (
+    load_alignment_layer,
+    load_depth_features,
+    load_orfs,
+    load_sample_groups,
+)
+from micov._miint import connection
 from micov._plot import GROUP_COLORS, group_style
 from micov.tests.test_plot import (
     CVD_MIN_DELTA_E,
@@ -1250,6 +1270,270 @@ class RingOrfTests(RingTestCase):
         with open(path, "rb") as fp:
             self.assertEqual(fp.read(8), b"\x89PNG\r\n\x1a\n")
         self.assertEqual(plt.get_fignums(), [])
+
+
+DATA = Path(__file__).parent / "test_data"
+GC = "s__Circulus_testii"
+GL = "s__Linearia_testii"
+
+
+class Collect(logging.Handler):
+    """Keep the warnings logged, without requiring any (unlike assertLogs)."""
+
+    def __init__(self):
+        super().__init__(level=logging.WARNING)
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
+class DepthPlotsTestCase(unittest.TestCase):
+    """The whole run on the dp fixture, with its drawing recorded rather than
+    rendered: each call's path and arguments."""
+
+    def setUp(self):
+        self.d = mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d)
+        self.con = connection()
+        self.addCleanup(self.con.close)
+        self.out = f"{self.d}/run"
+
+    def load(self, column="group", orfs=True, depth=DATA / "dp_depth.parquet",
+             breadth=DATA / "dp_breadth.parquet",
+             metadata=DATA / "dp_metadata.tsv", features=DATA / "dp_regions.tsv"):
+        load_alignment_layer(self.con, str(depth), "depth_layer")
+        load_alignment_layer(self.con, str(breadth), "breadth_layer")
+        load_sample_groups(self.con, str(metadata), column)
+        load_depth_features(self.con, str(features))
+        if orfs:
+            load_orfs(self.con, str(DATA / "dp_orfs.parquet"))
+
+    def run_plots(self, column="group", orfs=True, names=True, load=True,
+                  **kwargs):
+        """Run, returning the drawing calls and the warnings logged."""
+        if load:
+            self.load(column, orfs)
+        calls = []
+
+        def recorder(kind):
+            def record(path, **arguments):
+                calls.append((kind, path, arguments))
+            return record
+
+        logged = Collect()
+        micov_logger = logging.getLogger("micov")
+        micov_logger.addHandler(logged)
+        self.addCleanup(micov_logger.removeHandler, logged)
+        with mock.patch.multiple(_depth_plot, linear_plot=recorder("linear"),
+                                 circular_plot=recorder("circular"),
+                                 detail_plot=recorder("detail")):
+            depth_plots(
+                self.con, self.out, column, depth_view="depth_layer",
+                breadth_view="breadth_layer", orfs=orfs,
+                target_names=str(DATA / "dp_target_names.tsv") if names else None,
+                **kwargs,
+            )
+        micov_logger.removeHandler(logged)
+        return calls, logged.lines
+
+    def warned(self, logged, text):
+        return [line for line in logged if text in line]
+
+
+class DepthPlotsTests(DepthPlotsTestCase):
+    def test_every_plot_of_every_genome(self):
+        """The overview of each genome, the ring of the circular one, a
+        detail panel per region, and one per-ORF table for the run; named
+        by the target name and the genome, like micov's other plots."""
+        calls, _ = self.run_plots()
+        self.assertEqual(
+            [(kind, os.path.basename(path)) for kind, path, _ in calls],
+            [("linear", f"run.{GC}.GC.group.depth-plot.png"),
+             ("circular", f"run.{GC}.GC.group.depth-plot-circular.png"),
+             ("detail", f"run.{GC}.GC.group.depth-plot-detail-1001-1501.png"),
+             ("detail", f"run.{GC}.GC.group.depth-plot-detail-2501-2901.png"),
+             ("linear", f"run.{GL}.GL.group.depth-plot.png")],
+        )
+        self.assertEqual(
+            self.con.execute("SELECT DISTINCT genome_id FROM read_parquet(?) "
+                             "ORDER BY 1",
+                             [f"{self.out}.group.depth-plot-orfs.parquet"]
+                             ).fetchall(),
+            [("GC",), ("GL",)],
+        )
+
+    def test_each_plot_is_drawn_from_its_own_genome(self):
+        """Never another genome's bins or ORFs (traps.md)."""
+        calls, _ = self.run_plots()
+        lengths = {"GC": 3000, "GL": 2000}
+        for kind, path, arguments in calls:
+            genome = os.path.basename(path).split(".")[2]
+            with self.subTest(plot=os.path.basename(path)):
+                self.assertEqual(arguments["length"], lengths[genome])
+                bins = arguments.get("overview", arguments.get("table"))
+                if kind == "detail":
+                    region = os.path.basename(path).split("-")[-2:]
+                    a, b = int(region[0]), int(region[1].split(".")[0])
+                    self.assertEqual((bins["bin_start"][0], bins["bin_stop"][-1]),
+                                     (a, b))
+                    width = detail_bin_bp(a, b)
+                else:
+                    self.assertEqual((bins["bin_start"][0], bins["bin_stop"][-1]),
+                                     (1, lengths[genome] + 1))
+                    width = overview_bin_bp(lengths[genome])
+                self.assertEqual(
+                    (bins["bin_stop"] - bins["bin_start"]).max(), width)
+                np.testing.assert_array_equal(
+                    arguments["track"]["start"],
+                    genome_orfs(self.con, genome)["start"],
+                )
+                self.assertEqual(arguments["sizes"], {"case": 3, "control": 2})
+
+    def test_titles_name_the_genome_its_length_and_the_variable(self):
+        calls, _ = self.run_plots()
+        titles = [arguments["title"] for _, _, arguments in calls]
+        self.assertEqual(titles[0],
+                         f"{GC} (GC)  \u00b7  3,000 bp  \u00b7  circular  "
+                         "\u00b7  group")
+        self.assertEqual(titles[2], f"{titles[0]}  \u00b7  1,001\u20131,500")
+        calls, _ = self.run_plots(names=False, load=False)
+        self.assertEqual(calls[-1][2]["title"],
+                         "GL  \u00b7  2,000 bp  \u00b7  linear  \u00b7  group")
+
+    def test_three_groups_still_get_a_ring(self):
+        calls, logged = self.run_plots(column="trio", orfs=False)
+        self.assertIn("circular", [kind for kind, _, _ in calls])
+        self.assertFalse(self.warned(logged, "ring"))
+
+    def test_no_ring_warning_without_a_circular_genome(self):
+        features = f"{self.d}/gl.tsv"
+        with open(features, "w") as fp:
+            fp.write("genome_id\tlength\nGL\t2000\n")
+        self.load("quad", orfs=False, features=features)
+        _, logged = self.run_plots(column="quad", orfs=False, load=False)
+        self.assertFalse(self.warned(logged, "ring"))
+
+    def test_every_genome_reads_the_staged_reads(self):
+        """Never the layer, which each genome would scan whole (traps.md)."""
+        with mock.patch.object(_depth_plot, "genome_statistics",
+                               wraps=genome_statistics) as compute:
+            self.run_plots()
+        self.assertEqual({call.args[1] for call in compute.call_args_list},
+                         {DEPTH_READS_TABLE})
+
+    def test_four_groups_get_no_rings_and_are_told_once(self):
+        """A ring can only overlay three groups; the linear plots carry four
+        in lanes."""
+        calls, logged = self.run_plots(column="quad")
+        self.assertEqual([kind for kind, _, _ in calls],
+                         ["linear", "detail", "detail", "linear"])
+        (warning,) = self.warned(logged, "ring")
+        self.assertIn("quad", warning)
+        self.assertIn("GC", warning)
+
+    def test_highlights_reach_the_track(self):
+        calls, logged = self.run_plots(
+            highlights=("product~phage", "type=rRNA", "gene=noSuch"))
+        highlighted = {
+            os.path.basename(path).split(".")[2]:
+                arguments["track"]["label"][arguments["track"]["highlight"]].tolist()
+            for kind, path, arguments in calls if kind == "linear"
+        }
+        self.assertEqual(highlighted, {"GC": ["rrsA", "nTest"],
+                                       "GL": ["gl_1", "gl_3"]})
+        (warning,) = self.warned(logged, "--highlight")
+        self.assertIn("gene=noSuch", warning)
+
+    def test_colour_by_an_attribute_no_orf_has_is_told(self):
+        """Every ORF would be Other, which reads as a result."""
+        _, logged = self.run_plots(color_by="COG")
+        (warning,) = self.warned(logged, "--orf-color-by")
+        self.assertIn("COG", warning)
+        calls, logged = self.run_plots(color_by="product", load=False)
+        self.assertFalse(self.warned(logged, "--orf-color-by"))
+        self.assertEqual(calls[0][2]["track"]["legend"][0], "categories")
+
+    def test_contrast_reaches_the_track_and_says_why_it_is_empty(self):
+        calls, logged = self.run_plots(contrast=True)
+        self.assertEqual({arguments["track"]["legend"] for _, _, arguments in calls},
+                         {("contrast",)})
+        for _, _, arguments in calls:
+            # one colour per ORF, not per ORF and group
+            self.assertEqual(len(arguments["track"]["fill"]),
+                             len(arguments["track"]["start"]))
+        self.assertTrue(self.warned(logged, "No ORF contrast for GC"))
+        self.assertTrue(self.warned(logged, "No ORF contrast for GL"))
+
+    def test_an_orf_colouring_the_groups_cannot_support_is_refused_first(self):
+        """Before any genome is computed, so nothing is drawn or written."""
+        for column, kwargs in (("trio", {"color_by": "product"}),
+                               ("trio", {"contrast": True})):
+            with self.subTest(**kwargs), \
+                    mock.patch.object(_depth_plot, "genome_statistics") as compute, \
+                    self.assertRaises(ValueError), \
+                    self.assertLogs("micov", level="WARNING"):
+                self.load(column)
+                depth_plots(self.con, self.out, column, depth_view="depth_layer",
+                            breadth_view="breadth_layer", orfs=True, **kwargs)
+            compute.assert_not_called()
+            self.assertEqual(os.listdir(self.d), [])
+
+    def test_a_plotted_genome_without_orfs_is_told(self):
+        """Its track would be a bare line; a seqid that does not match its
+        genome_id is the likely cause."""
+        self.load()
+        self.con.sql("DELETE FROM orfs WHERE genome_id = 'GL'")
+        calls, logged = self.run_plots(load=False)
+        (warning,) = self.warned(logged, "no ORF")
+        self.assertIn("GL", warning)
+        self.assertNotIn("GC", warning)
+        self.assertEqual(len(calls[-1][2]["track"]["start"]), 0)
+
+    def test_without_orfs_there_is_no_track_and_no_table(self):
+        calls, _ = self.run_plots(orfs=False)
+        self.assertEqual({arguments["track"] is None for _, _, arguments in calls},
+                         {True})
+        self.assertEqual(os.listdir(self.d), [])
+
+
+class ManyGenomesTests(DepthPlotsTestCase):
+    """`example/` has two genomes, which cannot show a per-genome cost or a
+    genome's rows reaching another's plot (traps.md); three hundred can."""
+
+    N = 300
+
+    def setUp(self):
+        super().setUp()
+        rng = np.random.default_rng(7)
+        reads = 20 * self.N
+        genome = np.repeat(np.arange(self.N), 20)
+        position = rng.integers(1, 900, reads)
+        self.con.register("reads", {
+            "sample_id": np.array([f"S{i % 4}" for i in range(reads)], dtype=object),
+            "reference": np.array([f"G{g:03d}" for g in genome], dtype=object),
+            "position": position, "stop_position": position + 100,
+            "cigar": np.full(reads, "100M", dtype=object),
+        })
+        self.layer = f"{self.d}/reads.parquet"
+        self.con.sql(f"COPY reads TO '{self.layer}' (FORMAT PARQUET)")
+        self.con.unregister("reads")
+        with open(f"{self.d}/md.tsv", "w") as fp:
+            fp.write("sample_id\tg\nS0\ta\nS1\ta\nS2\tb\nS3\tb\n")
+        with open(f"{self.d}/features.tsv", "w") as fp:
+            fp.write("genome_id\tlength\n" + "".join(
+                f"G{g:03d}\t{1000 + g}\n" for g in range(self.N)))
+
+    def test_each_genome_is_drawn_from_its_own_rows(self):
+        self.load("g", orfs=False, depth=self.layer, breadth=self.layer,
+                  metadata=f"{self.d}/md.tsv", features=f"{self.d}/features.tsv")
+        calls, _ = self.run_plots("g", orfs=False, names=False, load=False,
+                                  highlights=())
+        self.assertEqual(len(calls), self.N)
+        for g, (_, path, arguments) in enumerate(calls):
+            overview = arguments["overview"]
+            self.assertIn(f".G{g:03d}.", path)
+            self.assertEqual(overview["bin_stop"][-1], 1000 + g + 1)
 
 
 if __name__ == "__main__":

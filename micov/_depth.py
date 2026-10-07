@@ -30,6 +30,10 @@ GENOMES_TABLE = "depth_genomes"
 #: `sample_idx`, `position`, `stop_position`, `cigar`.
 DEPTH_ALIGNMENTS_TABLE = "depth_alignments"
 
+#: `stage_depth_reads` leaves every plotted genome's depth-layer reads here,
+#: by genome and position: the layer's columns, coordinates as UINTEGER.
+DEPTH_READS_TABLE = "depth_reads"
+
 #: `stage_breadth` leaves each sample's merged breadth-layer intervals here:
 #: `genome_id`, `sample_idx`, `start`, `stop`.
 BREADTH_INTERVALS_TABLE = "breadth_intervals"
@@ -222,6 +226,30 @@ def stage_depth(con, depth_view, genome_id):
             ORDER BY a.position""",
         [genome_id],
     )
+
+
+def stage_depth_reads(con, depth_view):
+    """Copy the plotted samples' aligned reads on the plotted genomes, once.
+
+    Stored by genome and position, so each genome's `stage_depth` from this
+    table reads only that genome's row groups. Read from the layer itself,
+    every genome scans the whole input: at 20M reads that was 42 ms a genome
+    against 4 ms from here, and grew with the input.
+
+    Requires `ROSTER_TABLE` and `GENOMES_TABLE`. Creates `DEPTH_READS_TABLE`,
+    which stands in for the layer as `genome_statistics`' `depth_view`.
+    """
+    con.sql(f"""CREATE OR REPLACE TEMP TABLE {DEPTH_READS_TABLE} AS
+                SELECT a.{COLUMN_SAMPLE_ID}, a.reference,
+                       a.position::UINTEGER AS position,
+                       a.stop_position::UINTEGER AS stop_position,
+                       a.cigar
+                FROM {depth_view} a
+                    SEMI JOIN {ROSTER_TABLE} r USING ({COLUMN_SAMPLE_ID})
+                    SEMI JOIN {GENOMES_TABLE} g
+                        ON a.reference = g.{COLUMN_GENOME_ID}
+                WHERE {ALIGNED_ROWS}
+                ORDER BY a.reference, a.position""")
 
 
 def window_depth(con, n, w0, w1):
@@ -488,11 +516,13 @@ def _add_span_sums(total, per_base, starts, stops, w0, w1):
 def genome_orfs(con, genome_id):
     """Return one genome's ORFs, by position, as numpy arrays.
 
-    The columns are `orf_id`, `label`, `type`, `start`, `stop` and `strand`.
+    The columns are `orf_id`, `label`, `type`, `start`, `stop`, `strand`, and
+    `attributes`, a dict per ORF, which highlights and colours match.
     Requires `ORFS_TABLE`.
     """
     return con.execute(
-        f"""SELECT orf_id, label, type, {COLUMN_START}, {COLUMN_STOP}, strand
+        f"""SELECT orf_id, label, type, {COLUMN_START}, {COLUMN_STOP}, strand,
+                   attributes
             FROM {ORFS_TABLE} WHERE {COLUMN_GENOME_ID} = ?
             ORDER BY {COLUMN_START}, {COLUMN_STOP}, orf_id, type""",
         [genome_id],

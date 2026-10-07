@@ -11,7 +11,12 @@ from micov._constants import (
     COLUMN_START,
     COLUMN_STOP,
 )
-from micov._io import FEATURE_ID_COLUMNS, SAMPLE_ID_COLUMNS, read_tsv_with_header
+from micov._io import (
+    FEATURE_ID_COLUMNS,
+    SAMPLE_ID_COLUMNS,
+    read_tsv_with_header,
+    target_names_query,
+)
 from micov._miint import connection
 from micov._utils import sql_string
 
@@ -395,21 +400,7 @@ class View:
                 FROM feature_metadata
             """)
         else:
-            names = read_tsv_with_header(
-                self.con,
-                self.feature_names_source,
-                [COLUMN_GENOME_ID, COLUMN_NAME],
-                FEATURE_ID_COLUMNS,
-            )
-            # A name that looks like a lineage keeps only its last element.
-            # '^.*; ' is greedy, so it consumes through the *final* delimiter
-            # and leaves a plain name untouched -- both cases in one pass.
-            names = (
-                f"SELECT {COLUMN_GENOME_ID}, "
-                f"regexp_replace(regexp_replace({COLUMN_NAME}, '^.*; ', ''), "
-                r"'[ \[\]]', '_', 'g')"
-                f" AS {COLUMN_NAME} FROM ({names})"
-            )
+            names = target_names_query(self.con, self.feature_names_source)
             return self.con.sql(f"""
                 SELECT DISTINCT
                     fm.{COLUMN_GENOME_ID},

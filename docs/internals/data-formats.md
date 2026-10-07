@@ -118,11 +118,13 @@ headerless file is rejected instead of losing its first row.
 - **`--target-names`:** the columns are `genome_id`, then a name. A
   lineage-style name keeps only the text after its last `"; "`. Spaces and
   square brackets become `_`. Genomes without a name fall back to their id.
+  `_io.target_names_query` does this for `per-sample` and `depth-plot` alike;
+  `test_io.TargetNamesTests` pins it.
 
 ### `depth-plot` inputs
 
-`depth-plot` is being built; these are its readers in `_io`, which
-`_depth.intersect_layers` then reconciles.
+These are `depth-plot`'s readers in `_io`, which `_depth.intersect_layers`
+then reconciles.
 
 - **Alignments (`--depth`, and `--breadth`, which defaults to it):** Parquet
   holding `read_alignments`' columns plus a `sample_id` column, which
@@ -277,9 +279,11 @@ file, so `test_plot.PositionPlotSegmentTests` asserts the values instead.
 ### `depth-plot` per-ORF table
 
 With `--orfs`, one Parquet per run, `{output}.{variable}.depth-plot-orfs.parquet`
-(`variable` is the metadata column), written by `_io.write_orf_table` with
-the same `PARQUET_VERSION V2, COMPRESSION zstd` as the pair. The command is
-not released yet; once it is, this table is frozen like the others.
+(`variable` is the metadata column), collected a genome at a time by
+`_io.add_orf_table` and written by `_io.write_orf_table` with the same
+`PARQUET_VERSION V2, COMPRESSION zstd` as the pair. Its columns are
+`_io.ORF_STATISTICS_COLUMNS`, frozen from the release that adds the
+command. `golden/dp.orfs.parquet` is the fixture's.
 
 | Column | Type | Meaning |
 |---|---|---|

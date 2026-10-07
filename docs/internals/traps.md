@@ -83,6 +83,14 @@ test that guards it.
   `test_a_genome_with_no_large_group_leaves_no_figure_open` pins this.
 - **Unfocused Monte Carlo needs `sample_universe`.** It is computed once,
   before the loop, because one genome's rows cannot tell it.
+- **A per-genome query needs a table stored by genome.** `depth-plot` filters
+  on one genome at a time. Run against the alignment layer, each genome
+  scanned the whole input, so each one cost more the bigger the input: 42 ms
+  a genome at 20M reads, against 4 ms from `_depth.stage_depth_reads`' table,
+  which is ordered by genome so DuckDB's row-group min/max skip the rest.
+  `_io.load_orfs` orders the ORFs the same way, and per-genome results go
+  into DuckDB (`_io.add_orf_table`), never a growing Python list.
+  `test_depth_plot.ManyGenomesTests` runs 300 genomes.
 - **A `depth-plot` window costs six to seven times its depth array.** miint's
   `compute_coverage_depth` aggregation peaks there whatever the thread count
   or fetch route. Sized at 2**26 cells (256 MiB) as first designed, 10 Mb x

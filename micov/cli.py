@@ -12,11 +12,16 @@ from ._constants import (
     COLUMN_START,
     COLUMN_STOP,
 )
+from ._depth_plot import depth_plots, parse_highlight
 from ._io import (
     ALIGNMENT_POSITIONS_TABLE,
     compress_alignments,
+    load_alignment_layer,
     load_bed_cov,
+    load_depth_features,
     load_genome_lengths,
+    load_orfs,
+    load_sample_groups,
     positions_path,
     write_coverage_parquet,
 )
@@ -476,3 +481,148 @@ def extract_sample_presence(
 
 if __name__ == "__main__":
     cli()
+
+
+def _check_highlights(ctx, param, values):
+    """Refuse a malformed --highlight as a usage error, before any file is read."""
+    for value in values:
+        try:
+            parse_highlight(value)
+        except ValueError as error:
+            raise click.BadParameter(str(error)) from None
+    return values
+
+
+@cli.command()
+@click.option(
+    "--depth",
+    type=click.Path(exists=True),
+    required=True,
+    help=(
+        "Alignments whose depth is drawn: read_alignments output as Parquet, "
+        "with a sample_id column added"
+    ),
+)
+@click.option(
+    "--breadth",
+    type=click.Path(exists=True),
+    required=False,
+    help="Alignments whose breadth is drawn, likewise; defaults to --depth",
+)
+@click.option(
+    "--orfs",
+    type=click.Path(exists=True),
+    required=False,
+    help="ORFs to draw, read_gff output as Parquet; also writes the per-ORF table",
+)
+@click.option(
+    "--sample-metadata",
+    type=click.Path(exists=True),
+    required=True,
+    help=(
+        "Sample metadata, with a header; the first column is "
+        "`sample_id` or `sample_name`"
+    ),
+)
+@click.option(
+    "--sample-metadata-column",
+    type=str,
+    required=True,
+    help="The column grouping the samples",
+)
+@click.option(
+    "--features-to-keep",
+    type=click.Path(exists=True),
+    required=True,
+    help=(
+        "Genomes to plot, with a header: `genome_id`, `length`, optionally "
+        "`is_circular`, and `start`/`stop` for a detail panel per row"
+    ),
+)
+@click.option(
+    "--target-names",
+    type=click.Path(exists=True),
+    required=False,
+    help="Genome names, with a header; columns `genome_id` then the name",
+)
+@click.option(
+    "--output",
+    type=click.Path(exists=False),
+    required=True,
+    help="The prefix of every file written",
+)
+@click.option(
+    "--highlight",
+    multiple=True,
+    callback=_check_highlights,
+    help=(
+        "Highlight and label ORFs: KEY=VALUE matches exactly, KEY~REGEX "
+        "searches; KEY is type, strand or a GFF attribute. Repeatable: an ORF "
+        "matching any is highlighted"
+    ),
+)
+@click.option(
+    "--orf-color-by",
+    type=str,
+    required=False,
+    help="Colour ORFs by a GFF attribute's three commonest values; two groups at most",
+)
+@click.option(
+    "--orf-contrast",
+    is_flag=True,
+    default=False,
+    help="Colour ORFs by the second group's depth against the first's; two groups",
+)
+@click.option("--memory", type=str, default="16gb", required=False)
+@click.option("--threads", type=int, default=4, required=False)
+def depth_plot(
+    depth,
+    breadth,
+    orfs,
+    sample_metadata,
+    sample_metadata_column,
+    features_to_keep,
+    target_names,
+    output,
+    highlight,
+    orf_color_by,
+    orf_contrast,
+    memory,
+    threads,
+):
+    """Plot per-base depth and breadth along each genome, by sample group."""
+    if orfs is None:
+        for name, given in (("--highlight", highlight),
+                            ("--orf-color-by", orf_color_by),
+                            ("--orf-contrast", orf_contrast)):
+            if given:
+                raise click.UsageError(f"{name} needs --orfs, the ORFs it marks.")
+    if orf_color_by is not None and orf_contrast:
+        raise click.UsageError(
+            "--orf-color-by and --orf-contrast both colour the ORFs; choose one."
+        )
+    directory = os.path.dirname(os.path.abspath(output))
+    if not os.path.isdir(directory):
+        raise click.UsageError(
+            f"--output {output!r}: the directory {directory!r} does not exist."
+        )
+
+    con = connection(memory=memory, threads=threads)
+    load_alignment_layer(con, depth, "depth_layer")
+    load_alignment_layer(con, breadth or depth, "breadth_layer")
+    load_sample_groups(con, sample_metadata, sample_metadata_column)
+    load_depth_features(con, features_to_keep)
+    if orfs is not None:
+        load_orfs(con, orfs)
+    depth_plots(
+        con,
+        output,
+        sample_metadata_column,
+        depth_view="depth_layer",
+        breadth_view="breadth_layer",
+        orfs=orfs is not None,
+        target_names=target_names,
+        highlights=highlight,
+        color_by=orf_color_by,
+        contrast=orf_contrast,
+    )

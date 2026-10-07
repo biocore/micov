@@ -31,6 +31,7 @@ from micov._constants import (
 from micov._io import (
     FEATURE_ID_COLUMNS,
     SAMPLE_ID_COLUMNS,
+    add_orf_table,
     load_alignment_layer,
     load_bed_cov,
     load_depth_features,
@@ -38,6 +39,7 @@ from micov._io import (
     load_orfs,
     load_sample_groups,
     read_tsv_with_header,
+    target_names_query,
     write_orf_table,
 )
 from micov._miint import connection
@@ -256,6 +258,43 @@ class ReadTsvWithHeaderTests(unittest.TestCase):
         _, rows = self.rows("sample_id\tdog\nS1\tYes\nS2\tNo\n", ["sample_id"],
                             SAMPLE_ID_COLUMNS, all_varchar=True)
         self.assertEqual(rows, [("S1", "Yes"), ("S2", "No")])
+
+
+class TargetNamesTests(unittest.TestCase):
+    """`--target-names`, which name the plot files of `per-sample` and
+    `depth-plot` alike."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.con = connection()
+        self.addCleanup(self.con.close)
+
+    def names(self, text):
+        path = f"{self.temp_dir.name}/names.tsv"
+        with open(path, "w") as fp:
+            fp.write(text)
+        return self.con.sql(target_names_query(self.con, path)).fetchall()
+
+    def test_a_lineage_keeps_its_last_rank(self):
+        """Names usually come from a taxonomy; the species is the name."""
+        self.assertEqual(
+            self.names("genome_id\tname\nG1\td__Bacteria; p__Firmicutes; "
+                       "s__Bacillus subtilis\n"),
+            [("G1", "s__Bacillus_subtilis")],
+        )
+
+    def test_spaces_and_brackets_cannot_reach_a_file_name(self):
+        self.assertEqual(self.names("genome_id\tname\nG1\t[Clostridium] sp. 1\n"),
+                         [("G1", "_Clostridium__sp._1")])
+
+    def test_a_plain_name_is_kept(self):
+        self.assertEqual(self.names("genome_id\tname\nG1\tE_coli\n"),
+                         [("G1", "E_coli")])
+
+    def test_the_header_rule_applies(self):
+        with self.assertRaisesRegex(ValueError, "genome_id"):
+            self.names("G1\tE_coli\n")
 
 
 DATA = Path(__file__).parent / "test_data"
@@ -498,6 +537,20 @@ class OrfTests(DepthInputTestCase):
         with self.assertRaisesRegex(ValueError, "ID"):
             self.load(path)
 
+    def test_orfs_are_stored_by_genome_then_start(self):
+        """`depth-plot` reads one genome's ORFs at a time; stored in order,
+        each read touches only that genome's row groups, however the GFF
+        was ordered."""
+        path = self.gff("G2\tt\tCDS\t50\t80\t.\t+\t0\tID=b2\n",
+                        "G1\tt\tCDS\t40\t60\t.\t+\t0\tID=a2\n",
+                        "G2\tt\tCDS\t1\t30\t.\t+\t0\tID=b1\n",
+                        "G1\tt\tCDS\t1\t30\t.\t+\t0\tID=a1\n")
+        load_orfs(self.con, path)
+        self.assertEqual(
+            self.con.sql("SELECT orf_id FROM orfs ORDER BY rowid").fetchall(),
+            [("a1",), ("a2",), ("b1",), ("b2",)],
+        )
+
     def test_a_missing_column_is_named(self):
         path = f"{self.temp_dir.name}/orfs.parquet"
         self.con.sql(f"""COPY (SELECT * EXCLUDE (attributes)
@@ -546,7 +599,9 @@ class WriteOrfTableTests(DepthInputTestCase):
     def write_tables(self, *tables):
         directory = f"{self.temp_dir.name}/o'brien data"
         os.mkdir(directory)
-        return write_orf_table(self.con, list(tables), f"{directory}/run", "group")
+        for table in tables:
+            add_orf_table(self.con, table)
+        return write_orf_table(self.con, f"{directory}/run", "group")
 
     def read(self, path, what="*"):
         return self.con.execute(
@@ -563,6 +618,17 @@ class WriteOrfTableTests(DepthInputTestCase):
             self.read(path, 'genome_id, "group"'),
             [("GC", "case"), ("GC", "o'hare"), ("GL", "case"), ("GL", "o'hare")],
         )
+
+    def test_each_genome_is_taken_in_when_added(self):
+        """A run over thousands of genomes keeps none of their tables: each
+        is copied into DuckDB, which can spill to disk, as it is added."""
+        table = self.table("GC", 0.5)
+        directory = f"{self.temp_dir.name}/o'brien data"
+        os.mkdir(directory)
+        add_orf_table(self.con, table)
+        table["depth_mean"][:] = 99.0
+        path = write_orf_table(self.con, f"{directory}/run", "group")
+        self.assertEqual(self.read(path, "depth_mean"), [(0.5,), (0.0,)])
 
     def test_columns(self):
         path = self.write_tables(self.table("GC", 0.5))

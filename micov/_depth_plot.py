@@ -1,8 +1,9 @@
-"""Drawing for `micov depth-plot`: layout helpers and the linear plot.
+"""Drawing for `micov depth-plot`: the plots, their helpers, and the run.
 
-Everything here takes one genome's tables from `_depth.genome_statistics`.
-x is ``position - 1``, so base p occupies [p - 1, p) and a bin's edges are
-its half-open coordinates less one.
+`depth_plots` computes each genome once and hands every plot that genome's
+tables from `_depth.genome_statistics`, and only those. x is
+``position - 1``, so base p occupies [p - 1, p) and a bin's edges are its
+half-open coordinates less one.
 """
 
 import re
@@ -16,8 +17,31 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.scale import SymmetricalLogTransform
 
-from ._depth import orf_segments, overview_row_bp
+from ._depth import (
+    DEPTH_READS_TABLE,
+    GENOMES_TABLE,
+    ROSTER_TABLE,
+    detail_bin_bp,
+    display_bin_edges,
+    genome_orfs,
+    genome_statistics,
+    intersect_layers,
+    orf_segments,
+    overview_bin_bp,
+    overview_row_bp,
+    stage_breadth,
+    stage_depth_reads,
+)
+from ._io import (
+    DEPTH_FEATURES_TABLE,
+    ORFS_TABLE,
+    _examples,
+    add_orf_table,
+    target_names_query,
+    write_orf_table,
+)
 from ._plot import GROUP_COLORS, group_style
+from ._utils import logger
 
 #: Up to this many groups share one set of axes; more get a lane each.
 OVERLAY_MAX_GROUPS = 3
@@ -73,6 +97,7 @@ FIGURE_WIDTH = 12
 LABEL_FONTSIZE = 6.5
 BAND_ALPHA = 0.18
 DEPTH_LABEL = "depth, alignments\n(median, IQR, mean)"
+TITLE_SEP = "  \u00b7  "
 PREVALENCE_LABEL = "prevalence\n(fraction of samples)"
 
 TAU = 2 * np.pi
@@ -1051,3 +1076,116 @@ def _draw_ring_labels(ax, track, length, radii, pt_per_r):
         ax.text(1.0, 1.0, f"+{dropped} unlabelled", transform=ax.transAxes,
                 ha="right", va="top", fontsize=LABEL_FONTSIZE, color=MUTED,
                 gid="unlabelled")
+
+
+def depth_plots(con, output, variable, *, depth_view, breadth_view, orfs=False,
+                target_names=None, highlights=(), color_by=None, contrast=False):
+    """Draw every genome `depth-plot` settles on, and write the per-ORF table.
+
+    Everything that can be refused is refused before the first genome is
+    computed: the inputs (`_depth.intersect_layers`) and the ORF colouring
+    (`check_orf_mode`). Each genome is then computed once, and drawn from its
+    own tables only: its overview, a ring if it is circular and there are at
+    most `OVERLAY_MAX_GROUPS` groups, and a detail panel per region.
+
+    Requires the readers' tables (`_io.load_alignment_layer` for both views,
+    `load_sample_groups`, `load_depth_features`, and `load_orfs` if `orfs`).
+
+    Parameters
+    ----------
+    output : str
+        The prefix of every file written (`plot_path`).
+    variable : str
+        The metadata column grouping the samples.
+    target_names : str, optional
+        A `--target-names` file; a genome without a name is named by its id.
+    highlights : sequence of str
+        `--highlight` expressions (`parse_highlight`).
+    color_by : str, optional
+        `--orf-color-by`'s attribute.
+    contrast : bool
+        `--orf-contrast`.
+    """
+    intersect_layers(con, depth_view, breadth_view, orfs=orfs)
+    sizes = dict(con.sql(f"""SELECT group_name, count(*)::INTEGER
+                             FROM {ROSTER_TABLE} GROUP BY 1""").fetchall())
+    check_orf_mode(len(sizes), color_by, contrast)
+    parsed = [parse_highlight(text) for text in highlights]
+    names = ({} if target_names is None
+             else dict(con.sql(target_names_query(con, target_names)).fetchall()))
+    genomes = con.sql(f"""SELECT genome_id, length, is_circular
+                          FROM {GENOMES_TABLE} ORDER BY 1""").fetchall()
+    rings = len(sizes) <= OVERLAY_MAX_GROUPS
+    circular = [(genome,) for genome, _, is_circular in genomes if is_circular]
+    if circular and not rings:
+        logger.warning(
+            f"No circular plots: a ring overlays at most {OVERLAY_MAX_GROUPS} "
+            f"groups, and {variable!r} has {len(sizes)}. The linear plots of "
+            f"{len(circular)} circular genome(s) give each group a lane: "
+            f"{_examples(circular)}"
+        )
+
+    if orfs:
+        bare = con.sql(f"""SELECT genome_id FROM {GENOMES_TABLE}
+                           ANTI JOIN {ORFS_TABLE} USING (genome_id)
+                           ORDER BY 1""").fetchall()
+        if bare:
+            logger.warning(
+                f"{len(bare)} genome(s) plotted have no ORF, so a bare track; "
+                f"is the ORFs' seqid their genome_id? {_examples(bare)}"
+            )
+
+    stage_breadth(con, breadth_view)
+    stage_depth_reads(con, depth_view)
+    matched = np.zeros(len(parsed), bool)
+    coloured = False
+    for genome, length, is_circular in genomes:
+        regions = con.execute(
+            f"""SELECT start, stop FROM {DEPTH_FEATURES_TABLE}
+                WHERE genome_id = ? AND start IS NOT NULL ORDER BY start, stop""",
+            [genome],
+        ).fetchall()
+        edge_sets = [display_bin_edges(1, length + 1, overview_bin_bp(length))]
+        edge_sets += [display_bin_edges(a, b, detail_bin_bp(a, b))
+                      for a, b in regions]
+        own_orfs = genome_orfs(con, genome) if orfs else None
+        bins, orf_table = genome_statistics(con, DEPTH_READS_TABLE, genome, length,
+                                            edge_sets, own_orfs,
+                                            warn_contrast=contrast)
+        track = None
+        if orfs:
+            masks = [highlight_mask(own_orfs, [h]) for h in parsed]
+            matched |= np.array([mask.any() for mask in masks], bool)
+            highlight = np.logical_or.reduce(
+                [np.zeros(len(own_orfs["start"]), bool), *masks])
+            track = orf_track(
+                own_orfs, highlight, color_by=color_by,
+                contrast=orf_table["contrast"][::len(sizes)] if contrast else None,
+            )
+            coloured |= color_by is not None and bool(track["legend"][1])
+            add_orf_table(con, orf_table)
+
+        name = names.get(genome, genome)
+        shown = genome if name == genome else f"{name} ({genome})"
+        topology = "circular" if is_circular else "linear"
+        title = TITLE_SEP.join([shown, f"{length:,} bp", topology, variable])
+        common = {"length": length, "sizes": sizes, "track": track}
+        linear_plot(plot_path(output, name, genome, variable), title=title,
+                    overview=bins[0], regions=regions, **common)
+        if is_circular and rings:
+            circular_plot(plot_path(output, name, genome, variable, "circular"),
+                          title=title, overview=bins[0], **common)
+        for (a, b), table in zip(regions, bins[1:], strict=True):
+            detail_plot(plot_path(output, name, genome, variable, f"detail-{a}-{b}"),
+                        title=f"{title}{TITLE_SEP}{a:,}\u2013{b - 1:,}",
+                        table=table, **common)
+
+    for text, hit in zip(highlights, matched, strict=True):
+        if not hit:
+            logger.warning(f"--highlight {text!r} matches no ORF of the genomes "
+                           "plotted.")
+    if orfs and color_by is not None and not coloured:
+        logger.warning(f"--orf-color-by {color_by!r}: no ORF of the genomes plotted "
+                       "has that attribute, so every ORF is Other.")
+    if orfs:
+        write_orf_table(con, output, variable)

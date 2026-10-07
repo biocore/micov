@@ -70,7 +70,10 @@ Compared exactly
 
 - ``.ks.csv`` deterministic rows: labels and statistic.
 - ``.tsv.gz`` position-plot content, once decompressed.
-- Parquet row sets and ordered schemas.
+- Parquet row sets and ordered schemas. That includes ``depth-plot``'s
+  per-ORF table: its statistics are exact quantiles and integer sums divided
+  once, and the fixture's contrast is NULL, so ``log2``'s last-ULP
+  differences between platforms cannot reach it.
 - Output filename sets. The
   ``{output}.{target_name}.{target}.{variable}.{tag}.png`` scheme is
   contractual, and ``--monte`` changes the tag.
