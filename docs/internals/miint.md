@@ -55,7 +55,8 @@ fails deep inside a query.
 | Function | Kind | Signature (build `96630a5`) | Used by |
 |---|---|---|---|
 | `read_alignments` | table function | `(path, reference_lengths := <table>, include_filepath, include_seq_qual)`; micov reads `reference`, `position`, `stop_position` | `_io.compress_alignments` |
-| `compress_intervals` | aggregate | `(BIGINT start, BIGINT stop) → STRUCT(start, stop)[]`; touching intervals merge | `_io.compress_alignments`, `View` region mode |
+| `compress_intervals` | aggregate | `(BIGINT start, BIGINT stop) → STRUCT(start, stop)[]`; touching intervals merge | `_io.compress_alignments`, `View` region mode, `_depth.stage_breadth` |
+| `compute_coverage_depth` | aggregate | `(BIGINT position, BIGINT stop_position, VARCHAR cigar, BIGINT ref_len, VARCHAR mode) → UINTEGER[]`; element i is base i + 1; `'include_deletions'` counts D, never N | `_depth.window_depth` |
 | `cumulative_coverage` | aggregate | `(INTEGER rank, BIGINT start, BIGINT stop) → STRUCT(rank, covered)[]`; ranks must be contiguous `0..N-1` | `_cov.cumulative_covered` |
 | `region_coverage` | table macro | `(positions, regions)`; emits `covered`, `region_length`, `proportion_covered` (0..1) per sample × region | `View` region mode |
 | `region_presence` | table macro | `(positions, regions, samples)`; emits `sample_id`, `region_id`, `state` | `View.sample_presence_absence` |
@@ -67,6 +68,15 @@ How to call them:
   view names, never subqueries.
 - **The `regions` relation** must have the columns `genome_id`,
   `region_start`, `region_stop` and `region_id`.
+- **`compute_coverage_depth` returns NULL, not zeros, for a group whose rows
+  it all skips** (a NULL, `*` or empty CIGAR, or a NULL position). Filter `IS
+  NOT NULL` and back-fill with zeros, as `_depth.window_depth` does.
+- **It windows exactly without padding.** A position below 1 still walks the
+  CIGAR and drops the bases before 1, and bases past `ref_len` are dropped,
+  so shifting positions by `w0 - 1` and passing the window's width gives that
+  window of the genome's depth. For a CIGAR without N, `'include_deletions'`
+  fills `[position, stop_position)` without walking the CIGAR, so the stop
+  must be htslib's, as `read_alignments` reports it.
 
 miint also offers `cumulative_coverage_curve`, a macro that ranks samples
 itself. micov does not use it: it ranks in `_cov.ordered_coverage`. Both

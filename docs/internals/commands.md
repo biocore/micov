@@ -10,6 +10,7 @@ The registered command set is exactly:
 - `binning`
 - `compress`
 - `cov-to-parquet`
+- `depth-plot`
 - `extract-sample-presence`
 - `per-sample`
 - `position-plot`
@@ -17,8 +18,8 @@ The registered command set is exactly:
 
 `test_equivalence.TestCliSurface` pins this set, and it also pins that
 `per-sample-group`, `qiita-coverage`, `qiita-to-parquet` and `consolidate` do
-**not** resolve. Changing options or names needs explicit approval, and the
-change goes in `ChangeLog.md`.
+**not** resolve, and pins `depth-plot`'s option set. Changing options or names
+needs explicit approval, and the change goes in `ChangeLog.md`.
 
 - **`per-sample`** comes from the callback `per_sample_group`: click ≥ 8.2
   strips the `_group` suffix (pallets/click#2604).
@@ -133,6 +134,38 @@ region: plotting multiple regions per genome is not supported.
 - **The SQL** is miint's `region_presence(selected_positions,
   presence_regions, metadata)` followed by `PIVOT ... ON region_id USING
   FIRST(state)`. See [view.md](view.md).
+
+## `depth-plot`
+
+`cli.depth_plot` → `_io` readers → `_depth_plot.depth_plots`, which calls
+`_depth` per genome and the plots. [depth-plot.md](depth-plot.md) has the
+computation and the drawing.
+
+- **Usage errors (exit 2), before any file is read:** `--highlight`,
+  `--orf-color-by` or `--orf-contrast` without `--orfs`, and both
+  colourings (`_depth_plot.check_orf_options`, which `depth_plots` also
+  calls, for library callers); a `--highlight` that is not `KEY=VALUE` or
+  `KEY~REGEX` (click's `BadParameter`, via `_check_highlights`); an
+  `--output` whose directory does not exist.
+- **File errors (`ValueError`, exit 1), before any genome is computed:** the
+  readers' checks (`load_alignment_layer`, `load_depth_features`,
+  `load_sample_groups`, `load_orfs`), `intersect_layers`' (no sample or
+  genome in common, more than ten groups, a read beyond its genome, an ORF
+  on a plotted genome without an `ID` or not spanning a base of it), and
+  `check_orf_mode`'s (colour-by with three or more groups, contrast
+  without exactly two). So a refused run writes nothing.
+- **`--breadth` defaults to `--depth`.** `--target-names` names the files and
+  titles, through `_io.target_names_query`, the transform `per-sample` uses.
+- **Warnings**, once each: what the layers leave out (`intersect_layers`);
+  no rings, with four or more groups; plotted genomes with no ORF; a
+  `--highlight` that matches nothing; an `--orf-color-by` attribute no ORF
+  has; and, with `--orf-contrast` only, a genome with no contrast.
+- **Outputs:** per genome, `{output}.{target_name}.{genome}.{variable}.depth-plot.png`,
+  `...-circular.png` for a circular genome with at most three groups, and
+  `...-detail-{start}-{stop}.png` per region; with `--orfs`, one
+  `{output}.{variable}.depth-plot-orfs.parquet`.
+- `test_equivalence.TestDepthPlotFastTier` runs it end to end on the `dp_*`
+  fixture, and `test_quoting` from a directory with a `'` in its name.
 
 ## `position-plot`
 

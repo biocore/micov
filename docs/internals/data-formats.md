@@ -101,14 +101,14 @@ pre-miint implementation produced.
 ### Sample metadata (`--sample-metadata`)
 
 A tab-separated file with a **required header**. The first column must be
-named `sample_id` or `sample_name` (`_view.SAMPLE_ID_COLUMNS`), and is renamed
+named `sample_id` or `sample_name` (`_io.SAMPLE_ID_COLUMNS`), and is renamed
 to `sample_id`. Every column is read as VARCHAR. Rows whose sample has no
 coverage at all are dropped (`SEMI JOIN` against `coverage.parquet`).
 
 ### Features (`--features-to-keep`, `--target-names`)
 
 Both files need a header. **The first column must be named `genome_id`**
-(`_view.FEATURE_ID_COLUMNS`). `View._read_tsv` enforces this, so that a
+(`_io.FEATURE_ID_COLUMNS`). `_io.read_tsv_with_header` enforces this, so that a
 headerless file is rejected instead of losing its first row.
 
 - **Genome mode:** `genome_id` alone, with any extra columns ignored.
@@ -118,13 +118,59 @@ headerless file is rejected instead of losing its first row.
 - **`--target-names`:** the columns are `genome_id`, then a name. A
   lineage-style name keeps only the text after its last `"; "`. Spaces and
   square brackets become `_`. Genomes without a name fall back to their id.
+  `_io.target_names_query` does this for `per-sample` and `depth-plot` alike;
+  `test_io.TargetNamesTests` pins it.
+
+### `depth-plot` inputs
+
+These are `depth-plot`'s readers in `_io`, which `_depth.intersect_layers`
+then reconciles.
+
+- **Alignments (`--depth`, and `--breadth`, which defaults to it):** Parquet
+  holding `read_alignments`' columns plus a `sample_id` column, which
+  `read_alignments` does not produce. `load_alignment_layer` checks for
+  `sample_id`, `reference`, `position`, `stop_position` and `cigar`, and says
+  how to add `sample_id` if it is missing.
+- **Features (`--features-to-keep`):** the header rule as above, then a
+  **required `length`** (the alignments carry no lengths), an optional
+  `is_circular` (missing or empty is linear), and optional `start`/`stop`.
+  A row with a region is a detail panel, and one without only names the
+  genome. `load_depth_features` reads every column as text and converts it
+  explicitly. It rejects a non-positive length, an `is_circular` that is not
+  true or false, half a region, an empty region, a region outside
+  `[1, length + 1)`, a genome with two lengths, and a repeated region. A
+  genome listed more than once without a region is still one genome.
+- **Sample metadata:** as above. The stratifying column is read as text, so
+  `Yes` stays `Yes`. A sample with no value in it is left out and reported.
+  A sample listed more than once is an error naming it: its reads would
+  count twice in its group, or once in each of two.
+- **ORFs (`--orfs`):** `read_gff` output saved as Parquet. Only `CDS`,
+  `rRNA`, `tRNA`, `tmRNA` and `ncRNA` are kept (`_io.ORF_TYPES`). `gene`
+  repeats its CDS, and `region` is the whole sequence. Coordinates stay as
+  `read_gff` wrote them, already half-open. Every ORF on a plotted genome
+  needs an `ID`; its label is `gene`, else `locus_tag`, else `ID`; a missing
+  strand becomes `.`, and so does an unknown one (`?`). Each GFF line is its
+  own ORF, so a feature on several lines sharing an `ID` (NCBI's
+  frameshifted CDSs) is several. An ORF must span at least one base of its
+  genome -- from base 1, and ending after it starts -- and lie within it,
+  except that a circular genome's may run past the end: GFF3 writes an ORF
+  across the origin with an end beyond the length, and it is split there.
+- **Which samples and genomes are used:** a sample needs metadata and an
+  aligned read in both layers. A genome needs a features row and an aligned
+  read from a used sample in both layers. An aligned read is one with
+  `stop_position > position` (`_io.ALIGNED_ROWS`). Everything the metadata
+  or features name but this leaves out is reported by name. No sample or no
+  genome left, more than 10 groups, a read starting beyond its genome's
+  length, ORFs on none of the genomes, or an ORF without an `ID` or outside
+  its genome is an error. ORFs on genomes not plotted are ignored, unchecked.
 
 ## Outputs
 
 ### The Parquet pair (frozen)
 
 `_io.write_coverage_parquet` is the single writer. Both files are written
-with `FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd`.
+with `FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd`
+(`_io.PARQUET_OPTIONS`).
 
 | File | Columns, in order (type) |
 |---|---|
@@ -236,3 +282,30 @@ coverage.
 
 One PNG per genome, `{output}.{genome}.position-plot.png`. There is no data
 file, so `test_plot.PositionPlotSegmentTests` asserts the values instead.
+
+### `depth-plot` per-ORF table
+
+With `--orfs`, one Parquet per run, `{output}.{variable}.depth-plot-orfs.parquet`
+(`variable` is the metadata column), collected a genome at a time by
+`_io.add_orf_table` and written by `_io.write_orf_table` with the pair's
+options (`_io.PARQUET_OPTIONS`). Its columns are
+`_io.ORF_STATISTICS_COLUMNS`, frozen from the release that adds the
+command. `golden/dp.orfs.parquet` is the fixture's.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `genome_id` | VARCHAR | |
+| `orf_id`, `label`, `type` | VARCHAR | `ID`; `gene`, else `locus_tag`, else `ID`; the GFF type |
+| `start`, `stop` | BIGINT | half-open, as `read_gff` gives them; `stop` may pass a circular genome's length |
+| `strand` | VARCHAR | `+`, `-` or `.` |
+| `group` | VARCHAR | the metadata value |
+| `n_samples` | BIGINT | the group's samples |
+| `depth_q1`, `depth_median`, `depth_q3` | DOUBLE | quantiles, across the group's samples, of each sample's mean depth over the ORF |
+| `depth_mean` | DOUBLE | the group's mean depth over the ORF's bases |
+| `prevalence` | DOUBLE | the share of (sample, base) pairs the breadth layer covers |
+| `union_breadth` | DOUBLE | the share of the ORF's bases any of the group's samples covers |
+| `contrast` | DOUBLE | the same on both of an ORF's rows; NULL unless there are exactly two groups (see [depth-plot.md](depth-plot.md)) |
+
+A row per ORF and group, ORF by ORF in genome order, groups sorted within
+each. An ORF is a GFF line, so the key is `genome_id`, `orf_id`, `start`
+and `group`: a feature on several lines sharing an `ID` has rows for each. `test_io.WriteOrfTableTests` pins the columns and types literally.

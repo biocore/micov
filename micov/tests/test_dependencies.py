@@ -77,7 +77,8 @@ class DependencySurfaceTests(unittest.TestCase):
         """
         probe = (
             "import sys, micov.cli, micov._io, micov._plot, micov._view, "
-            "micov._quant, micov._cov, micov._constants; "
+            "micov._quant, micov._cov, micov._constants, micov._depth, "
+            "micov._depth_plot; "
             f"print(','.join(m for m in {REMOVED_DEPENDENCIES!r} "
             "if m in sys.modules))"
         )

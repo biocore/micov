@@ -61,9 +61,17 @@ the SQL.
 - **The metadata is restricted to samples with a coverage row for this
   genome.** A group is plotted only if it has **at least `min_group_size`
   (10)** such samples.
-- **Only the first 10 metadata values (sorted) are considered.** The loop is
-  `zip(np.unique(values), range(10), strict=False)`, so an 11th group is
-  silently skipped. This is long-standing behaviour.
+- **Only the first `MAX_GROUPS` (10) metadata values (sorted) are
+  considered.** The loop is over `value_order[:MAX_GROUPS]`. This cap is
+  long-standing, and lifting it would add rows to the `.ks.csv`. Groups past
+  it are named in a `micov` logger warning (stderr), but only those with at
+  least `min_group_size` samples. Smaller ones would not have been plotted
+  anyway, and naming them would add a line for most genomes when a column has
+  many rare values. `test_plot.CoverageCurveGroupStyleTests` pins this.
+- **Group style** is `group_style(index)`, where `index` is the sorted value
+  index, counting groups too small to plot. Groups 1–5 are solid in
+  `GROUP_COLORS`, and groups 6–10 reuse those colours dashed (see
+  [Group colours](#group-colours)).
 - **y values:** non-cumulative uses each sample's own `percent_covered` in
   rank order; cumulative uses `compute_cumulative`.
 - **`--percentile`** plots x as `x × 100 / (n - 1)`. It changes PNGs only.
@@ -123,10 +131,12 @@ Called twice per genome: `scale=None`, then `scale=10000`.
 **Layout:**
 
 1. Metadata is restricted to samples with positions on this genome.
-2. Groups are the sorted unique values, and a group's sorted index is its
-   colour (`C{index}`). Values are text, so `"30" < "5"`. A blank value is
-   masked, and `np.unique` sorts a mask as `"?"`: after the digits, before
-   the letters.
+2. Groups are the sorted unique values, and a group's sorted index picks
+   its colour, `group_style(index)`. Values are text, so `"30" < "5"`. A
+   blank value is masked, and `np.unique` sorts a mask as `"?"`: after the
+   digits, before the letters. There is no cap here, so colours repeat
+   every five groups. The group name under each block (the x tick labels) is
+   what tells same-coloured groups apart.
 3. Groups are laid out **smallest first**, with ties kept in value order.
    With `sort_by_value` (`--sort-by-metadata-value`) they are laid out by
    value instead: values that parse as finite numbers, numerically, then
@@ -169,3 +179,32 @@ overlaps.
 - `test_plot.ScaledPositionPlotTests` pins all of this.
 
 **Group size.** There is no minimum, so every genome gets position plots.
+
+## Group colours
+
+`_plot.GROUP_COLORS` holds the first five Okabe–Ito colours, in the order
+blue, orange, sky blue, vermillion, bluish green. Every plot takes group
+colours from it, through `group_style`. `single_sample_position_plot` uses
+colour 1.
+
+- **Why five, and why in that order.** micov overlays groups, so any two can
+  meet. These five keep every pair at OKLab ΔE ≥ 8 (×100) under simulated
+  protanopia and deuteranopia, and ≥ 15 under normal vision. Okabe–Ito's
+  sixth colour, reddish purple (`#CC79A7`), would break that: ΔE 7.6 against
+  bluish green under deuteranopia. Its seventh, yellow (`#F0E442`), keeps the
+  separation but has 1.32:1 contrast on white. Blue and orange come first
+  because most plots have two groups.
+- **What it replaced.** matplotlib's default cycle (`C{index}`), whose orange
+  and green measure ΔE 0.7 under protanopia: the same colour.
+- **Past five groups**, lines are dashed (`coverage_curve`) and position-plot
+  blocks rely on their names.
+- **Black is not a group colour.** The Monte Carlo envelope and the guide
+  lines stay black or grey.
+- `test_plot.GroupPaletteTests` recomputes the separation (Machado 2009
+  severity 1.0, then OKLab) and checks itself against the dataviz skill's
+  `validate_palette.js` numbers. Rerun it after any colour change.
+- **Thin marks wash colours out.** `position_plot` draws 0.5-wide lines at
+  alpha 0.7, so every colour renders lighter than specified. As rendered,
+  blue and sky blue measure roughly ΔE 10 in normal vision, below the 15
+  floor. The blocks are separate and named, so colour is not the only cue
+  there, but do not reuse those line settings where groups overlay.

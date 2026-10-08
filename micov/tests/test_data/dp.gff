@@ -1,0 +1,17 @@
+##gff-version 3
+GC	test	region	1	3000	.	+	.	ID=GC_region
+GC	test	gene	1	300	.	+	.	ID=gene_gc_1
+GC	test	CDS	1	300	.	+	0	ID=gc_1;gene=dnaA
+GC	test	CDS	901	1100	.	-	0	ID=gc_2;locus_tag=GC_0002;product=5' nucleotidase
+GC	test	rRNA	1201	1400	.	+	.	ID=gc_3;gene=rrsA
+GC	test	ncRNA	2001	2100	.	.	.	ID=gc_4
+GC	test	CDS	2601	2800	.	+	0	ID=gc_5;gene=nTest;product=phage spliced
+GC	test	CDS	2901	3000	.	-	0	ID=gc_6;product=end gene
+GC	test	CDS	2951	3050	.	+	0	ID=gc_7;product=origin spanning
+GL	test	CDS	101	250	.	+	0	ID=gl_1;product=phage integrase
+GL	test	CDS	501	600	.	-	0	ID=gl_2
+GL	test	CDS	1001	1100	.	+	0	ID=gl_3;product=phage tail
+GL	test	tRNA	1301	1376	.	-	.	ID=gl_4
+GL	test	CDS	1801	1900	.	+	0	ID=gl_5;gene=zeroA
+GX	test	CDS	1	300	.	+	0	ID=gx_1
+GQ	test	CDS	1	300	.	+	0	ID=gq_1

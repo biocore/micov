@@ -26,7 +26,7 @@ def sql_string(value):
     neither the path nor micov.
 
     Escaping rather than bound parameters, deliberately. Most of these
-    literals sit in SQL *fragments* -- `View._read_tsv` and the `source`
+    literals sit in SQL *fragments* -- `_io.read_tsv_with_header` and the `source`
     strings in `_io` -- that are spliced into larger statements, several of
     them ``CREATE VIEW``, where DuckDB rejects prepared parameters outright
     ("This type of statement can't be prepared"). Escaping is the one

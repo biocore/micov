@@ -10,6 +10,7 @@ from ._constants import (
     COLUMN_COVERED,
     COLUMN_GENOME_ID,
     COLUMN_LENGTH,
+    COLUMN_NAME,
     COLUMN_PERCENT_COVERED,
     COLUMN_SAMPLE_ID,
     COLUMN_START,
@@ -17,8 +18,87 @@ from ._constants import (
 )
 from ._utils import logger, sql_string
 
+#: What the first column of a feature file (`--features-to-keep`,
+#: `--target-names`) must be called. Region files already had their `start`
+#: and `stop` matched by name; this makes the id column consistent with them.
+FEATURE_ID_COLUMNS = (COLUMN_GENOME_ID,)
+
+#: What the first column of `--sample-metadata` may be called: micov's own
+#: name, and `sample_name`, which Qiita exports and `example/` use.
+SAMPLE_ID_COLUMNS = (COLUMN_SAMPLE_ID, "sample_name")
+
+
+def read_tsv_with_header(con, path, rename, first_column, all_varchar=False):
+    """Build a SELECT over a TSV, renaming its leading columns.
+
+    The leading columns are renamed to micov's canonical names -- for
+    feature names the second column too -- but the file must have a
+    header, and its first column must be one of `first_column`.
+
+    That requirement is the fix for a silent loss. A headerless file, such
+    as a taxonomy `lineages.txt`, had its first *row* read as column names,
+    so that genome or sample disappeared from every output with no error.
+    Insisting on the name is what makes a missing header detectable at
+    all: a data row's first field is not `genome_id`.
+
+    Returns
+    -------
+    query : str
+        SQL rather than a relation, so callers can compose it into a larger
+        statement.
+    columns : list of str
+        The query's columns, renamed, so callers need not read the file
+        again to learn them.
+    """
+    varchar = ", all_varchar=true" if all_varchar else ""
+    source = f"read_csv({sql_string(path)}, delim='\t', header=true{varchar})"
+    columns = [row[0] for row in con.sql(f"DESCRIBE FROM {source}").fetchall()]
+    if columns[0] not in first_column:
+        expected = " or ".join(repr(name) for name in first_column)
+        raise ValueError(
+            f"'{path}' must begin with a header line whose first column is "
+            f"named {expected}, but its first column is {columns[0]!r}. If "
+            "the file has no header, add one: micov would otherwise read "
+            "the first row as column names and silently drop it."
+        )
+    # not strict: `rename` covers only the leading columns, and the file
+    # carries however many more it likes
+    selected = [
+        f'"{old}" AS {new}' for old, new in zip(columns, rename, strict=False)
+    ]
+    selected += [f'"{column}"' for column in columns[len(rename) :]]
+    names = [*rename[: len(columns)], *columns[len(rename) :]]
+    return f"SELECT {', '.join(selected)} FROM {source}", names
+
+
+def target_names_query(con, path):
+    """Build a SELECT of `genome_id` and the name to give its plot files.
+
+    A name that looks like a lineage keeps only its last element, and
+    spaces and square brackets become underscores, since the name goes into
+    file names.
+    """
+    names, _ = read_tsv_with_header(
+        con, path, [COLUMN_GENOME_ID, COLUMN_NAME], FEATURE_ID_COLUMNS
+    )
+    # '^.*; ' is greedy, so it consumes through the *final* delimiter and
+    # leaves a plain name untouched -- both cases in one pass.
+    return (
+        f"SELECT {COLUMN_GENOME_ID}, "
+        f"regexp_replace(regexp_replace({COLUMN_NAME}, '^.*; ', ''), "
+        r"'[ \[\]]', '_', 'g')"
+        f" AS {COLUMN_NAME} FROM ({names})"
+    )
+
+
 #: `load_bed_cov` leaves the BED3 intervals here.
 BED_POSITIONS_TABLE = "bed_positions"
+
+#: The `read_alignments` rows that cover anything. An unmapped read keeps any
+#: RNAME and POS it was given -- aligners place an unmapped mate beside its
+#: partner -- and is reported with stop_position 0, a backwards interval that
+#: `compress_intervals` would widen to [0, POS).
+ALIGNED_ROWS = "stop_position > position"
 
 
 @contextmanager
@@ -218,11 +298,7 @@ def compress_alignments(con, sam, sample_id, disable_compression=False):
     else:
         intervals = "compress_intervals(position, stop_position)"
 
-    # An unmapped read keeps any RNAME and POS it was given -- aligners place
-    # an unmapped mate beside its partner -- and `read_alignments` reports it
-    # with stop_position 0. That backwards interval covers nothing, but
-    # `compress_intervals` widens [POS, 0) to [0, POS).
-    intervals += " FILTER (WHERE stop_position > position)"
+    intervals += f" FILTER (WHERE {ALIGNED_ROWS})"
 
     with _htslib_readable(sam) as readable:
         con.sql(f"""CREATE OR REPLACE TABLE alignment_groups AS
@@ -296,6 +372,11 @@ def _report_unattributed(con, sam):
     )
 
 
+#: How micov writes Parquet: every Parquet output, so any reader of one reads
+#: them all.
+PARQUET_OPTIONS = "(FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)"
+
+
 def write_coverage_parquet(con, positions, output):
     """Write the frozen two-file parquet pair from a covered-positions source.
 
@@ -318,9 +399,7 @@ def write_coverage_parquet(con, positions, output):
     covered_positions = sql_string(f"{output}.covered_positions.parquet")
     coverage = sql_string(f"{output}.coverage.parquet")
 
-    con.sql(f"""COPY ({positions})
-                TO {covered_positions}
-                    (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
+    con.sql(f"COPY ({positions}) TO {covered_positions} {PARQUET_OPTIONS}")
 
     # `(covered / length) * 100`, not `covered * 100 / length`. The two differ
     # in the last bits and the published coverage values were computed this
@@ -340,5 +419,338 @@ def write_coverage_parquet(con, positions, output):
                      ({COLUMN_COVERED} / {COLUMN_LENGTH}) * 100
                          AS {COLUMN_PERCENT_COVERED}
               FROM covered_amount JOIN genome_lengths USING ({COLUMN_GENOME_ID}))
-        TO {coverage}
-            (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
+        TO {coverage} {PARQUET_OPTIONS}""")
+
+
+#: Columns `depth-plot` reads from `read_alignments` output saved as Parquet.
+#: `sample_id` is not one of `read_alignments`' own; the user adds it.
+ALIGNMENT_LAYER_COLUMNS = (
+    COLUMN_SAMPLE_ID,
+    "reference",
+    "position",
+    "stop_position",
+    "cigar",
+)
+
+#: `depth-plot`'s genomes, lengths and detail regions; see `load_depth_features`.
+DEPTH_FEATURES_TABLE = "depth_features"
+
+#: `sample_id` and the value of the stratifying metadata column.
+SAMPLE_GROUPS_TABLE = "sample_groups"
+
+#: ORFs from a `read_gff` Parquet; see `load_orfs`.
+ORFS_TABLE = "orfs"
+
+#: Columns read from a `read_gff` Parquet.
+ORF_COLUMNS = ("seqid", "type", "position", "stop_position", "strand", "attributes")
+
+#: GFF types drawn as ORFs. `gene` repeats its CDS, and `region` is the whole
+#: sequence.
+ORF_TYPES = ("CDS", "rRNA", "tRNA", "tmRNA", "ncRNA")
+
+
+def _missing_columns(con, source, required):
+    present = {row[0] for row in con.sql(f"DESCRIBE FROM {source}").fetchall()}
+    return [column for column in required if column not in present]
+
+
+def _examples(rows, limit=5):
+    """Render offending rows for an error message, at most `limit` of them."""
+    shown = ", ".join(str(row[0]) for row in rows[:limit])
+    more = f" and {len(rows) - limit} more" if len(rows) > limit else ""
+    return shown + more
+
+
+def load_alignment_layer(con, path, view):
+    """Expose an alignment Parquet as the view `view`, checking its columns.
+
+    The file is `read_alignments` output with a `sample_id` column added.
+    `read_alignments` has no sample column of its own, so a user who saves its
+    output as is has a file that cannot be grouped; that is refused here with
+    the fix, rather than surfacing as a binder error later.
+    """
+    source = f"read_parquet({sql_string(path)})"
+    missing = _missing_columns(con, source, ALIGNMENT_LAYER_COLUMNS)
+    if missing:
+        hint = ""
+        if COLUMN_SAMPLE_ID in missing:
+            hint = (
+                " `read_alignments` has no sample column: add one when saving "
+                "its output, for example from `include_filepath := true`."
+            )
+        raise ValueError(
+            f"'{path}' has no {', '.join(repr(c) for c in missing)} column.{hint}"
+        )
+    con.sql(f"""CREATE OR REPLACE VIEW {view} AS
+                SELECT {", ".join(ALIGNMENT_LAYER_COLUMNS)} FROM {source}""")
+
+
+def load_depth_features(con, path):
+    """Load `depth-plot`'s `--features-to-keep` into `DEPTH_FEATURES_TABLE`.
+
+    Columns: `genome_id`, then a required `length`, an optional `is_circular`
+    (missing or empty is linear) and optional `start`/`stop`. A row with a
+    region is a detail panel; a row without one only names the genome. The
+    genome's own columns must agree across its rows.
+
+    The file is read as text and every column converted explicitly, so what a
+    value means does not depend on what DuckDB's sniffer guessed from it.
+
+    Raises
+    ------
+    ValueError
+        Naming the genomes concerned, for a missing or non-positive length, an
+        `is_circular` that is not true or false, half a region, an empty or
+        inverted region, a region beyond the genome, a genome given two
+        lengths or two circularities, or a region given twice.
+    """
+    query, columns = read_tsv_with_header(
+        con, path, [COLUMN_GENOME_ID], FEATURE_ID_COLUMNS, all_varchar=True
+    )
+
+    if COLUMN_LENGTH not in columns:
+        raise ValueError(
+            f"'{path}' has no '{COLUMN_LENGTH}' column. depth-plot takes each "
+            "genome's length from it, since alignments do not carry one."
+        )
+    regions = COLUMN_START in columns
+    if regions != (COLUMN_STOP in columns):
+        present, absent = (
+            (COLUMN_START, COLUMN_STOP) if regions else (COLUMN_STOP, COLUMN_START)
+        )
+        raise ValueError(f"'{path}' has a '{present}' column but no '{absent}'")
+
+    def text(column):
+        return f'"{column}"' if column in columns else "NULL"
+
+    con.sql(f"""CREATE OR REPLACE TEMP TABLE depth_features_text AS
+                SELECT {COLUMN_GENOME_ID},
+                       {text(COLUMN_LENGTH)} AS {COLUMN_LENGTH},
+                       {text("is_circular")} AS is_circular,
+                       {text(COLUMN_START)} AS {COLUMN_START},
+                       {text(COLUMN_STOP)} AS {COLUMN_STOP}
+                FROM ({query})""")
+
+    def offending(where, show):
+        return con.sql(f"""SELECT DISTINCT {show} FROM depth_features_text
+                           WHERE {where} ORDER BY 1""").fetchall()
+
+    checks = (
+        (
+            f"TRY_CAST({COLUMN_LENGTH} AS BIGINT) IS NULL "
+            f"OR TRY_CAST({COLUMN_LENGTH} AS BIGINT) <= 0",
+            f"{COLUMN_GENOME_ID} || ' (' || coalesce({COLUMN_LENGTH}, 'empty') || ')'",
+            "a length that is not a positive integer",
+        ),
+        (
+            "is_circular IS NOT NULL AND TRY_CAST(is_circular AS BOOLEAN) IS NULL",
+            f"{COLUMN_GENOME_ID} || ' (' || is_circular || ')'",
+            "an is_circular that is not true or false",
+        ),
+        (
+            f"({COLUMN_START} IS NULL) != ({COLUMN_STOP} IS NULL) "
+            f"OR ({COLUMN_START} IS NOT NULL "
+            f"AND TRY_CAST({COLUMN_START} AS BIGINT) IS NULL) "
+            f"OR ({COLUMN_STOP} IS NOT NULL "
+            f"AND TRY_CAST({COLUMN_STOP} AS BIGINT) IS NULL)",
+            f"{COLUMN_GENOME_ID}",
+            "a region whose start and stop are not both integers",
+        ),
+        (
+            f"{COLUMN_STOP}::BIGINT <= {COLUMN_START}::BIGINT",
+            f"{COLUMN_GENOME_ID} || ' [' || {COLUMN_START} || ', ' "
+            f"|| {COLUMN_STOP} || ')'",
+            "an empty region: regions are half-open, so stop must exceed start",
+        ),
+        (
+            f"{COLUMN_START}::BIGINT < 1 "
+            f"OR {COLUMN_STOP}::BIGINT > {COLUMN_LENGTH}::BIGINT + 1",
+            f"{COLUMN_GENOME_ID} || ' [' || {COLUMN_START} || ', ' "
+            f"|| {COLUMN_STOP} || ')'",
+            "a region outside the genome, which is [1, length + 1)",
+        ),
+    )
+    for where, show, problem in checks:
+        rows = offending(where, show)
+        if rows:
+            raise ValueError(f"'{path}' has {problem}: {_examples(rows)}")
+
+    con.sql(f"""CREATE OR REPLACE TABLE {DEPTH_FEATURES_TABLE} AS
+                SELECT {COLUMN_GENOME_ID},
+                       {COLUMN_LENGTH}::BIGINT AS {COLUMN_LENGTH},
+                       coalesce(is_circular::BOOLEAN, false) AS is_circular,
+                       {COLUMN_START}::BIGINT AS {COLUMN_START},
+                       {COLUMN_STOP}::BIGINT AS {COLUMN_STOP}
+                FROM depth_features_text""")
+    con.sql("DROP TABLE depth_features_text")
+
+    rows = con.sql(f"""SELECT {COLUMN_GENOME_ID} FROM {DEPTH_FEATURES_TABLE}
+                       GROUP BY {COLUMN_GENOME_ID}
+                       HAVING COUNT(DISTINCT ({COLUMN_LENGTH}, is_circular)) > 1
+                       ORDER BY 1""").fetchall()
+    if rows:
+        raise ValueError(
+            f"'{path}' gives a genome more than one length or is_circular: "
+            f"{_examples(rows)}"
+        )
+    rows = con.sql(f"""SELECT {COLUMN_GENOME_ID} FROM {DEPTH_FEATURES_TABLE}
+                       WHERE {COLUMN_START} IS NOT NULL
+                       GROUP BY {COLUMN_GENOME_ID}, {COLUMN_START}, {COLUMN_STOP}
+                       HAVING COUNT(*) > 1
+                       ORDER BY 1""").fetchall()
+    if rows:
+        raise ValueError(f"'{path}' lists a region twice: {_examples(rows)}")
+
+
+def load_sample_groups(con, path, column):
+    """Load each sample's value of `column` into `SAMPLE_GROUPS_TABLE`.
+
+    Values are read as written: as text, so `Yes` stays `Yes` rather than
+    becoming a group named `True`. A sample with no value belongs to no group;
+    it is left out and reported.
+
+    Raises
+    ------
+    ValueError
+        Naming every sample listed more than once: its reads would count twice
+        in its group, or once in each of two.
+    """
+    query, columns = read_tsv_with_header(
+        con, path, [COLUMN_SAMPLE_ID], SAMPLE_ID_COLUMNS, all_varchar=True
+    )
+    if column not in columns[1:]:
+        raise ValueError(
+            f"'{path}' has no column {column!r}; its columns are "
+            f"{', '.join(columns[1:])}"
+        )
+    con.sql(f"""CREATE OR REPLACE TABLE {SAMPLE_GROUPS_TABLE} AS
+                SELECT {COLUMN_SAMPLE_ID}, "{column}" AS group_name
+                FROM ({query})""")
+    rows = con.sql(f"""SELECT {COLUMN_SAMPLE_ID} FROM {SAMPLE_GROUPS_TABLE}
+                       GROUP BY 1 HAVING count(*) > 1 ORDER BY 1""").fetchall()
+    if rows:
+        raise ValueError(
+            f"'{path}' lists {len(rows)} sample(s) more than once: "
+            f"{_examples(rows)}"
+        )
+    rows = con.sql(f"""SELECT {COLUMN_SAMPLE_ID} FROM {SAMPLE_GROUPS_TABLE}
+                       WHERE group_name IS NULL ORDER BY 1""").fetchall()
+    if rows:
+        logger.warning(
+            f"{len(rows)} sample(s) in '{path}' have no value for {column!r} "
+            f"and are left out: {', '.join(row[0] for row in rows)}"
+        )
+        con.sql(f"DELETE FROM {SAMPLE_GROUPS_TABLE} WHERE group_name IS NULL")
+
+
+def load_orfs(con, path):
+    """Load ORFs from a `read_gff` Parquet into `ORFS_TABLE`, by genome.
+
+    Only `ORF_TYPES` are kept. Coordinates stay as `read_gff` wrote them,
+    already half-open (GFF end + 1). An ORF's label is `gene`, else
+    `locus_tag`, else `ID`. An unstranded ORF gets strand `.` rather than
+    NULL, which numpy would otherwise hand back as a masked array, and so does
+    one whose strand is unknown (`?`), which would match no strand drawn.
+
+    ORFs are checked -- an `ID` each, and within their genome -- only once
+    the genomes plotted are known (`_depth.intersect_layers`), so a
+    database-wide GFF is fine.
+    """
+    source = f"read_parquet({sql_string(path)})"
+    missing = _missing_columns(con, source, ORF_COLUMNS)
+    if missing:
+        raise ValueError(
+            f"'{path}' has no {', '.join(repr(c) for c in missing)} column; ORFs "
+            "are read_gff output saved as Parquet."
+        )
+    types = ", ".join(sql_string(orf_type) for orf_type in ORF_TYPES)
+    con.sql(f"""CREATE OR REPLACE TABLE {ORFS_TABLE} AS
+                SELECT seqid AS {COLUMN_GENOME_ID},
+                       nullif(attributes['ID'], '') AS orf_id,
+                       coalesce(nullif(attributes['gene'], ''),
+                                nullif(attributes['locus_tag'], ''),
+                                nullif(attributes['ID'], '')) AS label,
+                       type,
+                       position::BIGINT AS {COLUMN_START},
+                       stop_position::BIGINT AS {COLUMN_STOP},
+                       coalesce(nullif(strand, '?'), '.') AS strand,
+                       attributes
+                FROM {source}
+                WHERE type IN ({types})
+                -- read one genome at a time: in order, each read touches
+                -- only that genome's row groups
+                ORDER BY {COLUMN_GENOME_ID}, {COLUMN_START}""")
+
+
+#: `depth-plot`'s per-ORF table: its columns and their types, in order.
+ORF_STATISTICS_COLUMNS = (
+    (COLUMN_GENOME_ID, "VARCHAR"), ("orf_id", "VARCHAR"), ("label", "VARCHAR"),
+    ("type", "VARCHAR"), (COLUMN_START, "BIGINT"), (COLUMN_STOP, "BIGINT"),
+    ("strand", "VARCHAR"), ("group", "VARCHAR"), ("n_samples", "BIGINT"),
+    ("depth_q1", "DOUBLE"), ("depth_median", "DOUBLE"), ("depth_q3", "DOUBLE"),
+    ("depth_mean", "DOUBLE"), ("prevalence", "DOUBLE"),
+    ("union_breadth", "DOUBLE"), ("contrast", "DOUBLE"),
+)
+
+#: `start_orf_table` makes, and `add_orf_table` fills, the run's per-ORF
+#: statistics, every genome's.
+ORF_STATISTICS_TABLE = "depth_orf_statistics"
+
+#: `add_orf_table` registers one genome's under this name while it copies them.
+_ORF_GENOME_RELATION = "depth_orf_genome"
+
+
+def start_orf_table(con):
+    """Make `ORF_STATISTICS_TABLE` afresh, empty, for a run.
+
+    Afresh, so a second run on one connection -- a library caller's, or a
+    retry after a failure -- writes only its own genomes' rows.
+    """
+    schema = ", ".join(f'"{name}" {kind}' for name, kind in ORF_STATISTICS_COLUMNS)
+    con.sql(f"CREATE OR REPLACE TEMP TABLE {ORF_STATISTICS_TABLE} ({schema})")
+
+
+def add_orf_table(con, table):
+    """Add one genome's per-ORF statistics to `ORF_STATISTICS_TABLE`.
+
+    Copied in as each genome is computed, so a run over thousands of genomes
+    holds them in DuckDB, which can spill to disk, rather than in memory.
+    A missing contrast is NaN in the table and NULL in the file: DuckDB reads
+    a numpy NaN as NULL. Text goes in as numpy strings, not the objects
+    `fetchnumpy` gives: DuckDB takes 20,000 objects a column in 0.2 s, about
+    a second a genome, and strings 20 times faster. None of the text columns
+    is ever missing (`load_orfs`, `_depth.intersect_layers`).
+
+    Parameters
+    ----------
+    table : dict of np.ndarray
+        `_depth.genome_statistics`' ORF table: the `ORF_STATISTICS_COLUMNS`.
+    """
+    casts = ", ".join(f'"{name}"::{kind}' for name, kind in ORF_STATISTICS_COLUMNS)
+    con.register(_ORF_GENOME_RELATION,
+                 {key: values.astype(str) if values.dtype == object else values
+                  for key, values in table.items()})
+    try:
+        con.sql(f"""INSERT INTO {ORF_STATISTICS_TABLE}
+                    SELECT {casts} FROM {_ORF_GENOME_RELATION}""")
+    finally:
+        con.unregister(_ORF_GENOME_RELATION)
+
+
+def write_orf_table(con, output, variable):
+    """Write every genome's per-ORF statistics, as added, to one Parquet.
+
+    The columns, in order (`ORF_STATISTICS_COLUMNS`): `genome_id`, `orf_id`,
+    `label`, `type`, `start`, `stop` (half-open, as `read_gff` gives them),
+    `strand`, `group`, `n_samples`, then the group's `depth_q1`,
+    `depth_median`, `depth_q3`, `depth_mean`, `prevalence`, `union_breadth`,
+    and the ORF's `contrast`. Requires `ORF_STATISTICS_TABLE`.
+
+    Returns
+    -------
+    str
+        The path written, ``{output}.{variable}.depth-plot-orfs.parquet``.
+    """
+    path = f"{output}.{variable}.depth-plot-orfs.parquet"
+    con.sql(f"COPY {ORF_STATISTICS_TABLE} TO {sql_string(path)} {PARQUET_OPTIONS}")
+    return path

@@ -34,6 +34,34 @@ test that guards it.
   dependence on row order anywhere on the curve path. `View` relations come
   from parallel scans, and their order changes between runs.
 
+## Plots
+
+- **Take group colours from `_plot.group_style`, never `C{n}` or a
+  matplotlib default.** The default cycle's orange and green are one colour
+  to a protanope, and micov overlays groups. `test_plot.GroupPaletteTests`
+  checks the palette, and [curves-and-ks.md](curves-and-ks.md#group-colours)
+  says why it has five colours.
+- **Never set global `rcParams`.** micov is also a library, and its callers'
+  settings are theirs. `_depth_plot` draws inside
+  `matplotlib.rc_context(STYLE)` on `matplotlib.figure.Figure` objects, which
+  pyplot never tracks, so there is nothing to close.
+  `test_depth_plot.DrawingGuardTests` checks both.
+- **numpy hands NULLs back as masked arrays, which matplotlib draws as gaps
+  without complaint.** `fetchnumpy` does this for any NULL. `_depth_plot`
+  refuses masked input before opening a figure; `_io.load_orfs` coalesces
+  a missing strand to `.` for the same reason.
+- **An unfilled `StepPatch` reports C0 as its facecolor.** Read a line's
+  colour with `get_edgecolor()`, and a fill's with `get_facecolor()`.
+- **Polar axes draw a line between two points as a straight chord.** Only
+  gridlines and patches are bent into arcs. A ring given by its two ends is
+  not drawn at all, and a long arc cuts across the plot. `_depth_plot`
+  traces every arc in half-degree steps (`densify`, `polar_steps`);
+  `test_depth_plot.RingGeometryTests` checks it.
+- **A matplotlib colormap has no exact midpoint.** Its 256-entry table puts
+  0.5 between entries, so a diverging map's "no difference" came out
+  `#e6e6e5`, not the grey asked for. `_depth_plot.contrast_colors`
+  interpolates its three anchors directly.
+
 ## Performance
 
 - **Keep the scaled position plot's marks in numpy arrays.** Overlap
@@ -55,10 +83,31 @@ test that guards it.
   `test_a_genome_with_no_large_group_leaves_no_figure_open` pins this.
 - **Unfocused Monte Carlo needs `sample_universe`.** It is computed once,
   before the loop, because one genome's rows cannot tell it.
+- **A per-genome query needs a table stored by genome.** `depth-plot` filters
+  on one genome at a time. Run against the alignment layer, each genome
+  scanned the whole input, so each one cost more the bigger the input: 42 ms
+  a genome at 20M reads, against 4 ms from `_depth.stage_depth_reads`' table,
+  which is ordered by genome so DuckDB's row-group min/max skip the rest.
+  `_io.load_orfs` orders the ORFs the same way, and per-genome results go
+  into DuckDB (`_io.add_orf_table`), never a growing Python list.
+  `test_depth_plot.ManyGenomesTests` runs 300 genomes.
+- **A `depth-plot` window costs six to seven times its depth array.** miint's
+  `compute_coverage_depth` aggregation peaks there whatever the thread count
+  or fetch route. Sized at 2**26 cells (256 MiB) as first designed, 10 Mb x
+  300 samples peaked at 3.15 GiB for no gain in speed; `_depth.WINDOW_CELLS`
+  is 2**22. Measure peak RSS before raising it ([depth-plot.md](depth-plot.md)).
+- **DuckDB takes numpy object arrays slowly.** `fetchnumpy` gives text as
+  object arrays, and registering them costs about 0.2 s per 20,000 values a
+  column: a second a genome for the per-ORF table. `_io.add_orf_table`
+  hands them over as numpy strings, twenty times faster; that is safe only
+  because none of its text columns is ever NULL.
+- **A run's temp table starts afresh.** `CREATE ... IF NOT EXISTS` on a
+  connection a library caller reuses, or after a failed run, carries the
+  earlier run's rows into the next file. `_io.start_orf_table` replaces it.
 
 ## Inputs
 
-- **Metadata and feature files must have a header.** `View._read_tsv` raises
+- **Metadata and feature files must have a header.** `_io.read_tsv_with_header` raises
   unless the first column is `genome_id` (features, regions,
   `--target-names`) or `sample_id`/`sample_name` (sample metadata).
   Otherwise a headerless file, such as a taxonomy `lineages.txt`, would have
@@ -72,6 +121,11 @@ test that guards it.
   `stop_position > position` in any aggregate over alignments.
   `test_alignments.test_an_unmapped_mate_adds_no_breadth` pins it; `example/`
   has no unmapped reads and could not show it.
+- **DuckDB's CSV sniffer reads `Yes`/`No` and `true`/`false` as BOOLEAN.**
+  A metadata group would then be named `True`, not `Yes`, as `example/`'s
+  `dog` column shows. Read metadata with `all_varchar=True`, and read
+  `depth-plot`'s features as text and cast each column explicitly
+  (`_io.load_depth_features`). `test_io` pins both.
 - **`_test_has_header` uses `==`, not `in`.** `COLUMN_GENOME_ID` is a plain
   string, so `x in COLUMN_GENOME_ID` is a substring test. A headerless
   lengths file whose first genome was `id` or `genome` silently lost that
@@ -86,16 +140,28 @@ test that guards it.
     in plain queries, for example `WHERE genome_id = ?`, so use them there.
   - `test_quoting.py` drives every literal site with an apostrophe path.
 - **Identifiers built from file headers are not escaped.** `"{column}"` in
-  `_read_tsv` and `load_genome_lengths` breaks on a header containing `"`.
+  `read_tsv_with_header` and `load_genome_lengths` breaks on a header containing `"`.
   This is known, and has not been fixed.
 - **`compress` reads its input once.** Anything needing a second pass breaks
   the stdin idiom.
+- **A `depth-plot` genome is present only through the samples used.** Counted
+  by any sample's reads, a genome only unlisted samples reach passed, and
+  was drawn as flat zeros: a genome no sample carries, to the reader.
+- **Check ORFs only on the genomes plotted.** A database-wide GFF has ORFs on
+  genomes the run never reads; refusing one of those (a missing `ID`) stops
+  a run that would have been fine. `read_gff` also passes through lines a
+  check must catch: an end before the start, a start of 0, and the strand
+  `?`.
 - **The DuckDB CSV sniffer cannot read a pipe.** It consumes the stream and
   then returns zero rows without raising. That is why `position-plot` spools
   stdin through `_io.positions_path`.
 
 ## Environment and packaging
 
+- **`if __name__ == "__main__": cli()` stays last in `cli.py`.** A command
+  defined after it is missing from `python -m micov.cli`, though the
+  `micov` script, which imports the whole module first, still has it.
+  `test_equivalence.TestCliSurface` checks every command is listed.
 - **A stale cached miint passes the capability guard and changes published
   numbers.** See [miint.md](miint.md). The fix is `FORCE INSTALL miint FROM
   'https://ftp.microbio.me/pub/miint'`. `test_plot.KsTwoSampleTests` is what
@@ -125,7 +191,9 @@ first.
 - **`binning --rank` does nothing.** The ranking is always written, and the
   help text says so.
 - **`coverage_curve` considers only the first 10 metadata values** in sorted
-  order: `zip(..., range(10), strict=False)`.
+  order (`MAX_GROUPS`), counting groups too small to plot. Groups past the
+  tenth that are big enough to plot are named in a warning, and are still
+  not plotted.
 - **Monte Carlo is unseeded**, so its rows differ between runs.
 - **`stats_by_variance_of_sample_hits.tsv` is ordered by
   `sample_hits_std DESC` alone**, so ties come out in arbitrary order.

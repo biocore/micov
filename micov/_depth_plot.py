@@ -1,0 +1,1228 @@
+"""Drawing for `micov depth-plot`: the plots, their helpers, and the run.
+
+`depth_plots` computes each genome once and hands every plot that genome's
+tables from `_depth.genome_statistics`, and only those. x is
+``position - 1``, so base p occupies [p - 1, p) and a bin's edges are its
+half-open coordinates less one.
+"""
+
+import re
+from collections import Counter
+
+import matplotlib as mpl
+import numpy as np
+from matplotlib.collections import LineCollection, PolyCollection
+from matplotlib.colors import to_rgba
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.scale import SymmetricalLogTransform
+
+from ._cov import mask_table
+from ._depth import (
+    GENOMES_TABLE,
+    ROSTER_TABLE,
+    detail_bin_bp,
+    display_bin_edges,
+    genome_orfs,
+    genome_statistics,
+    intersect_layers,
+    orf_segments,
+    overview_bin_bp,
+    overview_row_bp,
+    stage_breadth,
+    stage_depth_reads,
+)
+from ._io import (
+    DEPTH_FEATURES_TABLE,
+    ORFS_TABLE,
+    _examples,
+    add_orf_table,
+    start_orf_table,
+    target_names_query,
+    write_orf_table,
+)
+from ._plot import GROUP_COLORS, group_style
+from ._utils import logger
+
+#: Up to this many groups share one set of axes; more get a lane each.
+OVERLAY_MAX_GROUPS = 3
+
+#: The depth axis is linear below this and logarithmic above.
+DEPTH_LINTHRESH = 2.0
+DEPTH_LINSCALE = 0.6
+
+#: The depth axis runs this far past the deepest value drawn.
+DEPTH_HEADROOM = 1.15
+
+#: Label lanes per strand; labels that fit in none are counted instead.
+LABEL_LANES = 2
+
+#: ORFs are drawn as arrows when the panel spans at most this many bases.
+ARROW_MAX_BP = 150_000
+
+#: The contrast colour scale is clipped at +-this (an 8-fold difference).
+CONTRAST_LIMIT = 3.0
+
+INK = "#262626"
+MUTED = "#6b6b6b"
+GRID = "#e8e8e8"
+ORF_NEUTRAL = "#bdbdbd"
+ORF_OTHER = "#d4d4d4"
+ORF_OTHER_LABEL = "Other"
+
+#: `--orf-color-by`'s top three values. Colour-by allows at most two groups,
+#: which take the first two group colours, so the categories take the next
+#: three; `test_depth_plot.OrfCategoryTests` checks they stay distinct.
+ORF_CATEGORY_COLORS = GROUP_COLORS[2:5]
+
+#: No contrast. The scale runs from the first group's colour through this to
+#: the second's.
+CONTRAST_MID = "#e6e6e6"
+
+#: ORF boxes span these heights above the backbone (+) and below it (-); an
+#: unstranded ORF straddles it, +-`UNSTRANDED_Y`.
+ORF_Y = (0.13, 0.62)
+UNSTRANDED_Y = 0.25
+
+#: Applied with `matplotlib.rc_context` around each drawing, never globally:
+#: micov is also a library, and its callers' rcParams are theirs.
+STYLE = {
+    "font.size": 9, "axes.titlesize": 10, "axes.labelsize": 8.5,
+    "axes.edgecolor": MUTED, "axes.labelcolor": INK,
+    "xtick.color": MUTED, "ytick.color": MUTED,
+    "axes.spines.top": False, "axes.spines.right": False,
+    "savefig.facecolor": "white", "figure.facecolor": "white",
+}
+DPI = 150
+FIGURE_WIDTH = 12
+LABEL_FONTSIZE = 6.5
+BAND_ALPHA = 0.18
+DEPTH_LABEL = "depth, alignments\n(median, IQR, mean)"
+TITLE_SEP = "  \u00b7  "
+PREVALENCE_LABEL = "prevalence\n(fraction of samples)"
+
+TAU = 2 * np.pi
+
+#: The circular plot's polar axes join points with straight chords, so arcs
+#: are traced in steps of at most this angle, half a degree.
+MAX_ARC = TAU / 720
+
+#: The circular plot: its size in inches, and its radius in axes units; the
+#: highlighted ORFs' labels run on past it (`circular_layout`).
+RING_SIZE = 9
+RING_RMAX = 1.1
+
+#: How far round the ring a label may be moved from its ORF, in label
+#: widths, before it is counted instead.
+RING_LABEL_SHIFT = 4
+
+RING_KEY = ("outside in: depth, alignments (median, IQR, mean; symlog) \u00b7 "
+            "ORFs on the genome \u00b7 union \u00b7 prevalence (fraction of "
+            "samples)")
+
+
+def bp_formatter(span):
+    """Return a tick formatter in Mb, kb or bp, whichever suits `span`."""
+    scale, unit = ((1e6, "Mb") if span > 600_000
+                   else (1e3, "kb") if span > 10_000 else (1, "bp"))
+
+    def label(value, _=None):
+        return "0" if value == 0 else f"{value / scale:,.6g} {unit}"
+
+    return label
+
+
+def nice_ticks(a, b, n=8):
+    """About `n` ticks over [a, b] at 1, 2, 2.5 or 5 times a power of ten."""
+    raw = (b - a) / n
+    magnitude = 10 ** np.floor(np.log10(raw))
+    step = min(s * magnitude for s in (1, 2, 2.5, 5, 10) if s * magnitude >= raw)
+    return np.arange(np.ceil(a / step) * step, b + step / 2, step)
+
+
+def symlog_ticks(ymax):
+    """Ticks for the depth axis: linear to 2, then 1-2-5 per decade.
+
+    Thinned to the decades when that would make more than seven.
+    """
+    if ymax < 5:
+        return [0, 1, 2]
+    ticks = [0, 2]
+    decade = 1
+    while 5 * decade <= ymax:
+        ticks += [t for t in (5 * decade, 10 * decade, 20 * decade) if t <= ymax]
+        decade *= 10
+    if len(ticks) > 7:
+        ticks = [0, 2] + [10**k for k in range(1, 20) if 10**k <= ymax]
+    return ticks
+
+
+def depth_ymax(table):
+    """Return the depth axis's top: the highest Q3 or mean, at least 2."""
+    if not len(table["q3"]):
+        return DEPTH_LINTHRESH
+    return max(DEPTH_LINTHRESH,
+               float(max(table["q3"].max(), table["mean"].max())))
+
+
+def true_runs(mask):
+    """Start and stop (half-open) indices of each run of True in `mask`."""
+    edges = np.diff(np.concatenate([[0], mask.astype(np.int8), [0]]))
+    return np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+
+
+def merge_spans(starts, stops, gap=0):
+    """Merge spans that overlap, touch, or lie within `gap` of each other."""
+    order = np.argsort(starts, kind="stable")
+    merged = []
+    for start, stop in zip(starts[order], stops[order], strict=True):
+        if merged and start <= merged[-1][1] + gap:
+            merged[-1][1] = max(merged[-1][1], stop)
+        else:
+            merged.append([start, stop])
+    merged = np.array(merged, dtype=np.int64).reshape(-1, 2)
+    return merged[:, 0], merged[:, 1]
+
+
+def clip_spans(starts, stops, a, b):
+    """Return the parts of the spans that fall in [a, b)."""
+    keep = (starts < b) & (stops > a)
+    return np.maximum(starts[keep], a), np.minimum(stops[keep], b)
+
+
+def parse_highlight(text):
+    """Parse ``KEY=VALUE`` (equal) or ``KEY~REGEX`` (search) into a triple.
+
+    The first `=` or `~` is the operator, so the value may contain either.
+    """
+    match = re.match(r"([^=~]+)([=~])(.+)", text)
+    if match is None:
+        raise ValueError(
+            f"{text!r} is not KEY=VALUE or KEY~REGEX: KEY is a GFF column or "
+            "attribute, = matches the value exactly and ~ searches it."
+        )
+    key, operator, value = match.groups()
+    if operator == "~":
+        try:
+            re.compile(value)
+        except re.error as error:
+            raise ValueError(
+                f"{text!r} is not KEY=VALUE or KEY~REGEX: {value!r} is not a "
+                f"regular expression ({error})."
+            ) from None
+    return key, operator, value
+
+
+def orf_value(orfs, key):
+    """Each ORF's `key`: its GFF column if it has one, else its attribute."""
+    if key in ("type", "strand"):
+        return orfs[key]
+    return np.array([attributes.get(key) for attributes in orfs["attributes"]],
+                    dtype=object)
+
+
+def highlight_masks(orfs, highlights):
+    """Which ORFs each of the parsed `highlights` matches, a row each.
+
+    An ORF is highlighted if any matches (``.any(axis=0)``); an expression
+    that matches none is told of (``.any(axis=1)``).
+    """
+    masks = np.zeros((len(highlights), len(orfs["start"])), bool)
+    for row, (key, operator, value) in zip(masks, highlights, strict=True):
+        if operator == "=":
+            row[:] = [v == value for v in orf_value(orfs, key)]
+        else:
+            pattern = re.compile(value)
+            row[:] = [v is not None and pattern.search(v) is not None
+                      for v in orf_value(orfs, key)]
+    return masks
+
+
+def orf_categories(values):
+    """Label each ORF with its value if among the three commonest, else Other.
+
+    Ties go to the value that sorts first, so the result does not depend on
+    the order of the ORFs. A missing or empty value is never a category.
+
+    Returns
+    -------
+    labels : np.ndarray
+    top : list
+        The categories, commonest first.
+    """
+    counts = Counter(v for v in values if v)
+    top = sorted(counts, key=lambda v: (-counts[v], v))[:len(ORF_CATEGORY_COLORS)]
+    labels = np.array([v if v in top else ORF_OTHER_LABEL for v in values],
+                      dtype=object)
+    return labels, top
+
+
+def contrast_colors(contrast):
+    """Colour each ORF by its contrast, as RGBA.
+
+    The first group's colour at -`CONTRAST_LIMIT` or below, the second's at
+    +`CONTRAST_LIMIT` or above, and `CONTRAST_MID` at 0 or NaN.
+    """
+    # interpolated directly: a matplotlib colormap's 256-entry table has no
+    # entry at exactly 0, so no contrast would be off-grey
+    t = np.clip(np.nan_to_num(contrast) / CONTRAST_LIMIT, -1, 1)
+    anchors = np.array([to_rgba(c) for c in
+                        (GROUP_COLORS[0], CONTRAST_MID, GROUP_COLORS[1])])
+    return np.stack([np.interp(t, (-1, 0, 1), anchors[:, k]) for k in range(4)],
+                    axis=1)
+
+
+def orf_polygons(starts, stops, strands, head_bp):
+    """Vertices of each ORF's shape, in x = position - 1.
+
+    A stranded ORF is an arrow pointing along its strand, its head `head_bp`
+    long -- one length for all, or one each -- but at most half the ORF (0
+    draws a box); an unstranded one is a box across the backbone.
+    """
+    y0, y1 = ORF_Y
+    mid = (y0 + y1) / 2
+    shapes = []
+    heads = np.broadcast_to(head_bp, len(starts))
+    for start, stop, strand, head in zip(starts - 1, stops - 1, strands, heads,
+                                         strict=True):
+        head = min(head, (stop - start) / 2)
+        if strand == "+":
+            shape = [[start, y0], [stop - head, y0], [stop, mid],
+                     [stop - head, y1], [start, y1]]
+        elif strand == "-":
+            shape = [[stop, -y0], [start + head, -y0], [start, -mid],
+                     [start + head, -y1], [stop, -y1]]
+        else:
+            shape = [[start, -UNSTRANDED_Y], [stop, -UNSTRANDED_Y],
+                     [stop, UNSTRANDED_Y], [start, UNSTRANDED_Y]]
+        shapes.append(np.array(shape, dtype=float))
+    return shapes
+
+
+def assign_label_lanes(centers, widths, strands, lanes=LABEL_LANES):
+    """Give each label the first lane on its side it fits in, left to right.
+
+    An unstranded ORF's label goes above, with the + strand. A label that
+    fits in no lane gets -1, to be counted rather than dropped silently.
+    """
+    lane_of = np.full(len(centers), -1)
+    ends = {}
+    for i in np.argsort(centers, kind="stable"):
+        side = strands[i] == "-"
+        for lane in range(lanes):
+            if centers[i] - widths[i] / 2 > ends.get((side, lane), -np.inf):
+                ends[(side, lane)] = centers[i] + widths[i] / 2
+                lane_of[i] = lane
+                break
+    return lane_of
+
+
+def plot_path(output, target_name, genome, variable, suffix=""):
+    """``{output}.{target_name}.{genome}.{variable}.depth-plot[-suffix].png``."""
+    tag = f"depth-plot-{suffix}" if suffix else "depth-plot"
+    return f"{output}.{target_name}.{genome}.{variable}.{tag}.png"
+
+
+def check_orf_options(orfs, highlights, color_by, contrast):
+    """Refuse ORF options that cannot go together, whatever the data.
+
+    The command refuses these as usage errors, before reading a file.
+
+    Raises
+    ------
+    ValueError
+        If `highlights`, `color_by` or `contrast` are given without `orfs`,
+        or both colourings are.
+    """
+    if not orfs:
+        for name, given in (("--highlight", highlights),
+                            ("--orf-color-by", color_by),
+                            ("--orf-contrast", contrast)):
+            if given:
+                raise ValueError(f"{name} needs --orfs, the ORFs it marks.")
+    if color_by is not None and contrast:
+        raise ValueError("--orf-color-by and --orf-contrast both colour the "
+                         "ORFs; choose one.")
+
+
+def check_orf_mode(n_groups, color_by, contrast):
+    """Refuse an ORF colouring the groups cannot support.
+
+    Raises
+    ------
+    ValueError
+        If `color_by` with three or more groups, or `contrast` without
+        exactly two.
+    """
+    if color_by is not None and n_groups > 2:
+        raise ValueError(
+            f"--orf-color-by needs at most two groups, and there are {n_groups}: "
+            "three category colours beside three or more group colours cannot "
+            "all stay distinct to a colour-blind reader. Use --highlight to "
+            "mark the ORFs of interest instead."
+        )
+    if contrast and n_groups != 2:
+        raise ValueError(f"--orf-contrast compares exactly two groups, and "
+                         f"there are {n_groups}.")
+
+
+def orf_track(orfs, highlight, color_by=None, contrast=None):
+    """Decide how each ORF is drawn.
+
+    Neutral grey by default, with highlighted ORFs in ink. Coloured by
+    `color_by`'s top three values, or by `contrast`, highlighted ORFs keep
+    their colour and gain an ink outline instead.
+
+    Returns
+    -------
+    dict
+        `start`, `stop`, `strand`, `label` and `highlight` per ORF, an RGBA
+        `fill` and a boolean `outline`, and the `legend`: None,
+        ``("categories", top)`` or ``("contrast",)``.
+    """
+    if color_by is not None:
+        labels, top = orf_categories(orf_value(orfs, color_by))
+        colour_of = dict(zip(top, ORF_CATEGORY_COLORS, strict=False))
+        fill = np.array([to_rgba(colour_of.get(v, ORF_OTHER)) for v in labels])
+        outline, legend = highlight, ("categories", top)
+    elif contrast is not None:
+        fill = contrast_colors(contrast)
+        outline, legend = highlight, ("contrast",)
+    else:
+        fill = np.array([to_rgba(INK if on else ORF_NEUTRAL) for on in highlight])
+        outline, legend = np.zeros(len(highlight), bool), None
+    return {"start": orfs["start"], "stop": orfs["stop"],
+            "strand": orfs["strand"], "label": orfs["label"],
+            "highlight": highlight, "fill": fill.reshape(-1, 4),
+            "outline": outline, "legend": legend}
+
+
+def linear_plot(path, *, title, length, sizes, overview, regions=(), track=None):
+    """Draw one genome's overview, in rows of `_depth.overview_row_bp`, to `path`.
+
+    Each row has depth above (one axes, or a lane per group past
+    `OVERLAY_MAX_GROUPS`), the ORFs on the genome line, and breadth below:
+    union segments, then prevalence hanging down. Every row and lane shares
+    one depth scale, and the last row is masked past the genome's end.
+
+    Parameters
+    ----------
+    length : int
+    sizes : dict
+        Each group's number of samples.
+    overview : dict
+        `_depth.genome_statistics`' overview bins.
+    regions : list of (int, int)
+        Detail regions, [start, stop), shaded where they fall.
+    track : dict, optional
+        `orf_track`'s output.
+
+    Raises
+    ------
+    ValueError
+        Before drawing anything, if a column of `overview` has missing values
+        or its bins do not tile the same span for every group.
+    """
+    groups = sorted(sizes)
+    _check_bins(overview, groups)
+    ymax = depth_ymax(overview)
+    width = overview_row_bp(length)
+    rows = -(-length // width)
+    with mpl.rc_context(STYLE):
+        heights = [sum(_panel_ratios(groups, track))] * rows
+        fig = Figure(figsize=(FIGURE_WIDTH, sum(heights) + 0.45 * rows))
+        grid = fig.add_gridspec(rows, 1, height_ratios=heights, hspace=0.35)
+        for row in range(rows):
+            x0, x1 = row * width, (row + 1) * width
+            panel = _draw_panel(fig, grid[row], row, groups, sizes, overview,
+                                x0, x1, length, ymax, track, legend=row == 0)
+            for i, (start, stop) in enumerate(regions):
+                a, b = max(start - 1, x0), min(stop - 1, x1)
+                if a < b:
+                    for ax in panel:
+                        ax.axvspan(a, b, color=INK, alpha=0.09, lw=0, zorder=0,
+                                   gid=f"region:{i}")
+            if x1 > length:
+                for ax in panel:
+                    ax.axvspan(length, x1, color="white", lw=0, zorder=5,
+                               gid="past-end")
+            if row == 0:
+                panel[0].set_title(title, loc="left", color=INK)
+        fig.savefig(path, dpi=DPI, bbox_inches="tight")
+
+
+def detail_plot(path, *, title, length, sizes, table, track=None):
+    """Draw one detail region, the span of `table`'s bins, to `path`.
+
+    As one row of `linear_plot`, at the region's own bins and depth scale,
+    with ORFs as arrows when the region is at most `ARROW_MAX_BP` long.
+    """
+    groups = sorted(sizes)
+    _check_bins(table, groups)
+    x0, x1 = table["bin_start"][0] - 1, table["bin_stop"][-1] - 1
+    with mpl.rc_context(STYLE):
+        fig = Figure(figsize=(FIGURE_WIDTH, sum(_panel_ratios(groups, track))))
+        grid = fig.add_gridspec(1, 1)
+        panel = _draw_panel(fig, grid[0], 0, groups, sizes, table, x0, x1,
+                            length, depth_ymax(table), track, legend=True)
+        panel[0].set_title(title, loc="left", color=INK)
+        fig.savefig(path, dpi=DPI, bbox_inches="tight")
+
+
+def _check_bins(table, groups):
+    """Refuse bins that cannot be drawn faithfully, before any figure opens."""
+    for key, values in table.items():
+        if np.ma.isMaskedArray(values):
+            raise ValueError(f"The bins' {key} has missing values; they would "
+                             "be drawn as gaps.")
+    edges = None
+    for group in groups:
+        own = table["group"] == group
+        starts, stops = table["bin_start"][own], table["bin_stop"][own]
+        if not np.array_equal(stops[:-1], starts[1:]):
+            raise ValueError(f"The bins of {group} do not tile their span.")
+        if edges is not None and not (np.array_equal(edges[0], starts)
+                                      and np.array_equal(edges[1], stops)):
+            raise ValueError("The groups' bins differ.")
+        edges = starts, stops
+
+
+def _panel_ratios(groups, track):
+    """Inches for each of one row's axes, top to bottom.
+
+    Depth (one axes, or a lane per group past `OVERLAY_MAX_GROUPS`), the ORF
+    track, taller with labels, then breadth likewise.
+    """
+    lanes = len(groups) if len(groups) > OVERLAY_MAX_GROUPS else 0
+    depth, breadth = ([0.9] * lanes, [0.45] * lanes) if lanes else ([2.0], [1.0])
+    labels = track is not None and track["highlight"].any()
+    return [*depth, 1.6 if labels else 0.55, *breadth]
+
+
+def _group_bins(table, group):
+    """One group's bins, and their edges in x."""
+    own = mask_table(table, table["group"] == group)
+    return own, np.append(own["bin_start"], own["bin_stop"][-1:]) - 1
+
+
+def _draw_panel(fig, slot, row, groups, sizes, table, x0, x1, length, ymax,
+                track, legend):
+    """Draw one row, [x0, x1), into `slot`; return its axes, top to bottom."""
+    lanes = len(groups) > OVERLAY_MAX_GROUPS
+    labels = track is not None and track["highlight"].any()
+    n = len(groups) if lanes else 1
+    grid = slot.subgridspec(n * 2 + 1, 1, height_ratios=_panel_ratios(groups, track),
+                            hspace=0.3 if lanes else 0.0)
+    axes = [fig.add_subplot(cell) for cell in grid]
+    for ax in axes[1:]:
+        ax.sharex(axes[0])
+    depth_axes, orf_ax, breadth_axes = axes[:n], axes[n], axes[n + 1:]
+    suffix = [""] if not lanes else [f":{g}" for g in groups]
+
+    shown = mask_table(table, (table["bin_start"] - 1 < x1)
+                       & (table["bin_stop"] - 1 > x0))
+    for g, group in enumerate(groups):
+        own, edges = _group_bins(shown, group)
+        lane = g if lanes else 0
+        _draw_depth(depth_axes[lane], own, edges, group, g)
+        _draw_breadth(breadth_axes[lane], own, edges, group, g,
+                      0 if lanes else g, 1 if lanes else len(groups))
+
+    for ax, name in zip(depth_axes, suffix, strict=True):
+        ax.set_gid(f"depth:{row}{name}")
+        ax.set_yscale("symlog", linthresh=DEPTH_LINTHRESH,
+                      linscale=DEPTH_LINSCALE)
+        ax.set_ylim(0, ymax * DEPTH_HEADROOM)
+        ticks = symlog_ticks(ymax)
+        ax.set_yticks(ticks, [f"{t:g}" for t in ticks])
+        ax.grid(axis="y", color=GRID, lw=0.8)
+        ax.set_axisbelow(True)
+    for ax, name in zip(breadth_axes, suffix, strict=True):
+        ax.set_gid(f"breadth:{row}{name}")
+        ticks = [0, 1] if lanes else [0, 0.5, 1]
+        ax.set_yticks(ticks, [f"{t:g}" for t in ticks])
+        ax.grid(axis="y", color=GRID, lw=0.8)
+        ax.set_axisbelow(True)
+    orf_ax.set_gid(f"orfs:{row}")
+    orf_ax.axis("off")
+
+    if lanes:
+        for ax, group in zip(depth_axes, groups, strict=True):
+            ax.text(0.006, 0.95, f"{group}  n={sizes[group]}",
+                    transform=ax.transAxes, fontsize=8, color=INK, va="top",
+                    gid=f"lane:{group}",
+                    bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.2})
+        depth_axes[len(groups) // 2].set_ylabel(DEPTH_LABEL)
+        breadth_axes[len(groups) // 2].set_ylabel(PREVALENCE_LABEL)
+    else:
+        depth_axes[0].set_ylabel(DEPTH_LABEL)
+        breadth_axes[0].set_ylabel(PREVALENCE_LABEL)
+        if legend:
+            depth_axes[0].legend(*_group_legend(groups, sizes), loc="upper right",
+                                 frameon=False, fontsize=8, handlelength=1.6,
+                                 ncols=len(groups) + 1)
+
+    for ax in axes[:-1]:
+        ax.tick_params(axis="x", bottom=False, labelbottom=False)
+        ax.spines["bottom"].set_visible(False)
+    axes[-1].set_xticks(nice_ticks(x0, x1))
+    axes[-1].xaxis.set_major_formatter(bp_formatter(x1 - x0))
+    axes[0].set_xlim(x0, x1)
+
+    orf_ax.axhline(0, color=INK, lw=1.5, zorder=3, gid="backbone")
+    orf_ax.set_ylim(*((-2.4, 2.4) if labels else (-0.9, 0.9)))
+    if track is not None:
+        bp_per_pt = (x1 - x0) / (orf_ax.get_position().width
+                                 * fig.get_figwidth() * 72)
+        _draw_orfs(orf_ax, track, x0, x1, length, bp_per_pt)
+        _draw_highlights(depth_axes + breadth_axes, track, x0, x1, length,
+                         bp_per_pt)
+        if legend:
+            _draw_orf_legend(orf_ax, track, groups)
+    return axes
+
+
+def _group_legend(groups, sizes):
+    """Return legend handles and labels: each group and its size, the mean."""
+    handles = [Line2D([], [], color=group_style(g)[0], ls=group_style(g)[1],
+                      lw=2.2) for g in range(len(groups))]
+    handles.append(Line2D([], [], color=MUTED, lw=1.0, ls=":"))
+    return handles, [f"{g}  n={sizes[g]}" for g in groups] + ["group mean"]
+
+
+def _draw_depth(ax, own, edges, group, index):
+    colour, linestyle = group_style(index)
+    ax.stairs(own["q3"], edges, baseline=own["q1"], fill=True, color=colour,
+              alpha=BAND_ALPHA, lw=0, gid=f"iqr:{group}")
+    ax.stairs(own["median"], edges, color=colour, lw=1.3, ls=linestyle,
+              gid=f"median:{group}")
+    ax.stairs(own["mean"], edges, color=colour, lw=0.9, ls=":",
+              gid=f"mean:{group}")
+
+
+def _draw_breadth(ax, own, edges, group, index, slot, slots):
+    """Union as segments in a strip above 0, prevalence hanging from 0."""
+    colour = group_style(index)[0]
+    gap = 0.075
+    starts, stops = true_runs(own["union"])
+    ax.hlines(np.full(len(starts), -(slot + 0.5) * gap), edges[starts],
+              edges[stops], color=colour, lw=2.0, gid=f"union:{group}")
+    ax.stairs(own["prevalence"], edges, color=colour, lw=1.1,
+              gid=f"prevalence:{group}")
+    ax.set_ylim(1.04, -slots * gap - 0.03)
+
+
+def _draw_orfs(ax, track, x0, x1, length, bp_per_pt):
+    """Draw the ORFs, and the highlighted ORFs' labels.
+
+    An ORF across a circular genome's origin is drawn as its two parts,
+    boxes rather than arrows, since neither part holds both ends.
+    """
+    index, starts, stops = orf_segments(track["start"], track["stop"], length)
+    split = np.bincount(index, minlength=len(track["start"]))[index] > 1
+    heads = np.where(split, 0, 4 * bp_per_pt if x1 - x0 <= ARROW_MAX_BP else 0)
+    strands = track["strand"][index]
+    shown = (starts - 1 < x1) & (stops - 1 > x0)
+    for strand in ("+", "-", "."):
+        on = shown & (strands == strand)
+        if not on.any():
+            continue
+        shapes = orf_polygons(starts[on], stops[on], strands[on], heads[on])
+        ax.add_collection(_orf_collection(shapes, track["fill"][index[on]],
+                                          track["outline"][index[on]], strand))
+    on = track["highlight"] & (track["start"] - 1 < x1) & (track["stop"] - 1 > x0)
+    names = track["label"][on]
+    centers = (np.maximum(track["start"][on] - 1, x0)
+               + np.minimum(track["stop"][on] - 1, x1)) / 2
+    widths = np.array([(len(n) * LABEL_FONTSIZE * 0.62 + 5) * bp_per_pt
+                       for n in names])
+    strands = track["strand"][on]
+    lanes = assign_label_lanes(centers, widths, strands)
+    for name, center, strand, lane in zip(names, centers, strands, lanes,
+                                          strict=True):
+        if lane < 0:
+            continue
+        sign = -1 if strand == "-" else 1
+        ax.annotate(name, (center, sign * ORF_Y[1]),
+                    (center, sign * (ORF_Y[1] + 0.33 + lane * 0.62)),
+                    fontsize=LABEL_FONTSIZE, color=INK, ha="center",
+                    va="top" if sign < 0 else "bottom", annotation_clip=False,
+                    arrowprops={"arrowstyle": "-", "lw": 0.4, "color": MUTED,
+                                "shrinkA": 0, "shrinkB": 0},
+                    gid="label")
+    _count_unlabelled(ax, int((lanes < 0).sum()), 0.0)
+
+
+def _count_unlabelled(ax, dropped, y):
+    """Say how many highlighted ORFs have no label, at the right, at `y`."""
+    if dropped:
+        ax.text(1.0, y, f"+{dropped} unlabelled", transform=ax.transAxes,
+                ha="right", va="top", fontsize=LABEL_FONTSIZE, color=MUTED,
+                gid="unlabelled")
+
+
+def _orf_collection(shapes, fill, outline, strand):
+    """One strand's ORFs, filled, and outlined in ink where `outline`."""
+    return PolyCollection(shapes, facecolors=fill,
+                          edgecolors=[INK if o else "none" for o in outline],
+                          linewidths=0.8, zorder=2, gid=f"orfs:{strand}")
+
+
+def _draw_highlights(axes, track, x0, x1, length, bp_per_pt):
+    """Shade depth and breadth faintly under each highlighted ORF.
+
+    Under both parts of one across a circular genome's origin, as its shape
+    is drawn.
+    """
+    index, starts, stops = orf_segments(track["start"], track["stop"], length)
+    on = track["highlight"][index]
+    starts, stops = merge_spans(starts[on] - 1, stops[on] - 1, gap=bp_per_pt)
+    starts, stops = clip_spans(starts, stops, x0, x1)
+    if not len(starts):
+        return
+    # one artist per axes: one per band was 0.7 s for 800 of them
+    bands = [[(a, 0), (b, 0), (b, 1), (a, 1)]
+             for a, b in zip(starts, stops, strict=True)]
+    for ax in axes:
+        ax.add_collection(PolyCollection(bands, facecolors=INK, alpha=0.06, lw=0,
+                                         zorder=0, gid="highlight",
+                                         transform=ax.get_xaxis_transform()),
+                          autolim=False)
+
+
+def _draw_orf_legend(ax, track, groups, loc="center left", anchor=(1.005, 0.5),
+                     scale_at=(1.01, 0.42, 0.12, 0.16)):
+    """Show the categories' colours, or the contrast's scale.
+
+    The legend goes at `anchor` (axes fraction), the scale at `scale_at`
+    (axes bounds).
+    """
+    if track["legend"] is None:
+        return
+    if track["legend"][0] == "categories":
+        top = track["legend"][1]
+        colours = [*ORF_CATEGORY_COLORS[:len(top)], ORF_OTHER]
+        # by default in the right margin, beside the ORFs: above them it
+        # would sit on the depth panel, which has no gap above the track
+        legend = ax.legend([Patch(color=c) for c in colours],
+                           [*top, ORF_OTHER_LABEL], loc=loc, frameon=False,
+                           fontsize=7, bbox_to_anchor=anchor, handlelength=1.0,
+                           borderaxespad=0)
+        legend.set_gid("orf-legend")
+        return
+    scale = ax.inset_axes(scale_at)
+    scale.set_gid("contrast-scale")
+    ramp = np.linspace(-CONTRAST_LIMIT, CONTRAST_LIMIT, 256)
+    scale.imshow(contrast_colors(ramp)[None, :, :], aspect="auto")
+    fold = f"\u00d7{2 ** CONTRAST_LIMIT:g}"
+    scale.set_xticks([0, 127.5, 255],
+                     [f"{groups[0]} {fold}", "equal", f"{groups[1]} {fold}"],
+                     fontsize=6.5)
+    scale.tick_params(length=0, pad=1)
+    scale.set_yticks([])
+    for spine in scale.spines.values():
+        spine.set_visible(False)
+
+
+def theta(x, length):
+    """Return the angle of x = position - 1, clockwise from the top.
+
+    One turn per genome; an ORF across the origin runs on past 2 pi, which
+    the polar axes wrap.
+    """
+    return TAU * np.asarray(x, dtype=float) / length
+
+
+def densify(angles, radii, max_arc=MAX_ARC):
+    """Add points along each segment so none turns through more than `max_arc`.
+
+    Polar axes join points with straight chords, so an arc given by its ends
+    alone would cut across the ring. A radial segment is left as it is.
+    """
+    angles = np.asarray(angles, dtype=float)
+    radii = np.asarray(radii, dtype=float)
+    if len(angles) < 2:
+        return angles, radii
+    turn, rise = np.diff(angles), np.diff(radii)
+    steps = np.maximum(1, np.ceil(np.abs(turn) / max_arc)).astype(np.int64)
+    segment = np.repeat(np.arange(len(steps)), steps)
+    along = ((np.arange(len(segment)) - np.repeat(np.cumsum(steps) - steps, steps))
+             / steps[segment])
+    return (np.append(angles[segment] + along * turn[segment], angles[-1]),
+            np.append(radii[segment] + along * rise[segment], radii[-1]))
+
+
+def polar_steps(edges, values, length):
+    """Trace a step function round the ring.
+
+    Each bin's value runs along its arc, then steps radially to the next's.
+
+    Returns
+    -------
+    angles, values : np.ndarray
+        Densified, for `radial_symlog` or another radius.
+    """
+    return densify(theta(np.repeat(edges, 2)[1:-1], length), np.repeat(values, 2))
+
+
+def radial_symlog(depth, ymax, r0, r1):
+    """Return the radii of depths on the band [r0, r1].
+
+    Scaled as the linear plot's depth axis is: symlog, from 0 to `ymax` and
+    its headroom.
+    """
+    scale = SymmetricalLogTransform(10, DEPTH_LINTHRESH, DEPTH_LINSCALE)
+    depth = np.asarray(depth, dtype=float)
+    # the transform assigns into its result, so it needs an array, never 0-d
+    fraction = (scale.transform_non_affine(np.atleast_1d(depth)).reshape(depth.shape)
+                / scale.transform_non_affine(np.array([ymax * DEPTH_HEADROOM]))[0])
+    return r0 + (r1 - r0) * fraction
+
+
+def circular_layout(n_groups):
+    """Radii of the circular plot's rings, outside in.
+
+    The linear plot's anatomy bent round: the highlighted ORFs' labels, the
+    coordinates, depth, the ORFs either side of the backbone, a union arc
+    per group, then prevalence from 0 hanging inward to 1, leaving a hole.
+    """
+    radii = {"labels": 1.07, "coordinates": 1.0, "tick_labels": 0.985,
+             "depth_top": 0.95, "depth_base": 0.68,
+             "orfs_out": 0.66, "backbone": 0.62, "orfs_in": 0.58}
+    for g in range(n_groups):
+        radii[f"union:{g}"] = 0.56 - 0.016 * g
+    radii["prevalence_0"] = 0.56 - 0.016 * n_groups - 0.006
+    radii["prevalence_1"] = radii["prevalence_0"] - 0.22
+    return radii
+
+
+def radial_text(angle):
+    """Return rotation (degrees) and alignment for a label at `angle`.
+
+    The text reads outward from its anchor, never upside down.
+    """
+    degrees = np.degrees(angle) % 360
+    if degrees < 180:
+        return 90 - degrees, "left"
+    return 270 - degrees, "right"
+
+
+def tangential_text(angle):
+    """Return rotation (degrees) and vertical alignment for a tick at `angle`.
+
+    The text runs along the ring and hangs inward, never upside down.
+    """
+    degrees = np.degrees(angle) % 360
+    if 90 < degrees < 270:
+        return 180 - degrees, "bottom"
+    return (180 - degrees) % 360 - 180, "top"
+
+
+def _cut_at_widest_gap(angles):
+    """Cut the ring at its widest gap.
+
+    Returns the index of the sorted `angles` just after the gap, and the
+    angles from there round, unwrapped to increase.
+    """
+    gaps = np.diff(np.append(angles, angles[0] + TAU))
+    cut = (int(np.argmax(gaps)) + 1) % len(angles)
+    return cut, np.concatenate([angles[cut:], angles[:cut] + TAU])
+
+
+def _isotonic(values):
+    """Return the non-decreasing sequence nearest `values` (by PAV)."""
+    means, sizes = [], []
+    for value in values:
+        means.append(value)
+        sizes.append(1)
+        while len(means) > 1 and means[-2] > means[-1]:
+            mean, size = means.pop(), sizes.pop()
+            means[-1] = (means[-1] * sizes[-1] + mean * size) / (sizes[-1] + size)
+            sizes[-1] += size
+    return np.repeat(means, sizes)
+
+
+def spread_angles(angles, gap):
+    """Spread labels round the ring at least `gap` apart, in order.
+
+    Each moves as little as possible, in least squares. The ring is cut at
+    its widest gap, so labels either side of the top are spread there, as
+    the neighbours they are.
+
+    Parameters
+    ----------
+    angles : np.ndarray
+        Sorted, in [0, 2 pi).
+
+    Returns
+    -------
+    np.ndarray
+        In [0, 2 pi), in the order given. Labels that do not fit round the
+        ring are left overlapping across the cut.
+    """
+    n = len(angles)
+    if n < 2:
+        return np.array(angles, dtype=float)
+    cut, unwrapped = _cut_at_widest_gap(angles)
+    # p[i + 1] - p[i] >= gap is q = p - i * gap non-decreasing, so the
+    # nearest p is the isotonic fit to the angles less i * gap, plus i * gap
+    offsets = gap * np.arange(n)
+    return np.roll(_isotonic(unwrapped - offsets) + offsets, cut) % TAU
+
+
+def _apart(angles, gap):
+    """Whether the angles are at least `gap` apart round the ring."""
+    ring = np.sort(angles)
+    return (len(ring) < 2
+            or np.diff(np.append(ring, ring[0] + TAU)).min() >= gap * (1 - 1e-9))
+
+
+def place_ring_labels(angles, gap, max_shift):
+    """Place labels round the ring, a `gap` apart, each near its own angle.
+
+    No label moves more than `max_shift`. More labels than the ring holds
+    are first thinned: round from the widest gap, each label at least a gap
+    past the last kept stays. Then, while the labels spread
+    (`spread_angles`) would overlap, across the cut too, or move one too
+    far, the one moved farthest is dropped.
+
+    Returns
+    -------
+    np.ndarray
+        Each label's angle, or NaN where it fits nowhere, to be counted.
+    """
+    angles = np.mod(np.asarray(angles, dtype=float), TAU)
+    placed = np.full(len(angles), np.nan)
+    keep = np.argsort(angles, kind="stable")
+    if len(keep) * gap > TAU:
+        cut, unwrapped = _cut_at_widest_gap(angles[keep])
+        thinned = np.zeros(len(keep), bool)
+        last = -np.inf
+        for i, angle in enumerate(unwrapped):
+            if angle >= last + gap:
+                thinned[i], last = True, angle
+        keep = keep[np.roll(thinned, cut)]
+    while len(keep):
+        spread = spread_angles(angles[keep], gap)
+        shift = np.abs((spread - angles[keep] + np.pi) % TAU - np.pi)
+        if _apart(spread, gap) and shift.max() <= max_shift * (1 + 1e-9):
+            placed[keep] = spread
+            break
+        keep = np.delete(keep, np.argmax(shift))
+    return placed
+
+
+def circular_plot(path, *, title, length, sizes, overview, track=None):
+    """Draw one circular genome as a ring, to `path`.
+
+    The linear plot's anatomy bent round, outside in (`circular_layout`):
+    coordinates, depth on the linear plot's symlog scale, the ORFs on the
+    backbone, a union arc per group, and prevalence hanging inward.
+    Highlighted ORFs get a wedge through depth and breadth, and a label
+    outside, spread round the ring (`place_ring_labels`).
+
+    Parameters
+    ----------
+    length : int
+    sizes : dict
+        Each group's number of samples.
+    overview : dict
+        `_depth.genome_statistics`' overview bins.
+    track : dict, optional
+        `orf_track`'s output.
+
+    Raises
+    ------
+    ValueError
+        Before drawing anything, past `OVERLAY_MAX_GROUPS` groups, which a
+        ring can only overlay, or on bins `linear_plot` would refuse.
+    """
+    groups = sorted(sizes)
+    if len(groups) > OVERLAY_MAX_GROUPS:
+        raise ValueError(
+            f"A circular plot overlays at most three groups, and there are "
+            f"{len(groups)}; the linear plot gives each a lane."
+        )
+    _check_bins(overview, groups)
+    ymax = depth_ymax(overview)
+    radii = circular_layout(len(groups))
+    with mpl.rc_context(STYLE):
+        fig = Figure(figsize=(RING_SIZE, RING_SIZE))
+        ax = fig.add_axes((0.07, 0.04, 0.86, 0.86), projection="polar")
+        ax.set_gid("ring")
+        ax.set_theta_zero_location("N")
+        ax.set_theta_direction(-1)
+        ax.set_ylim(0, RING_RMAX)
+        ax.axis("off")
+        box = ax.get_position()
+        pt_per_r = min(box.width, box.height) * RING_SIZE * 72 / 2 / RING_RMAX
+
+        _draw_ring_scales(ax, length, ymax, radii)
+        for g, group in enumerate(groups):
+            own, edges = _group_bins(overview, group)
+            _draw_ring_depth(ax, own, edges, length, group, g, ymax, radii)
+            _draw_ring_breadth(ax, own, edges, length, group, g, radii)
+        _ring(ax, radii["backbone"], color=INK, lw=1.5, zorder=3, gid="backbone")
+        if track is not None:
+            bp_per_pt = length / (TAU * radii["backbone"] * pt_per_r)
+            _draw_ring_orfs(ax, track, length, bp_per_pt, radii)
+            _draw_ring_highlights(ax, track, length, bp_per_pt, radii)
+            _draw_ring_labels(ax, track, length, radii, pt_per_r)
+            _draw_orf_legend(ax, track, groups, loc="lower left", anchor=(0, 0),
+                             scale_at=(0.0, 0.02, 0.2, 0.03))
+        fig.legend(*_group_legend(groups, sizes), loc="lower right",
+                   frameon=False, fontsize=8, handlelength=1.6)
+        fig.text(0.01, 0.99, title, color=INK, fontsize=10, va="top")
+        fig.text(0.01, 0.965, RING_KEY, color=MUTED, fontsize=7.5, va="top")
+        fig.savefig(path, dpi=DPI, bbox_inches="tight")
+
+
+def _ring(ax, radius, **kwargs):
+    """Draw a whole circle at `radius`."""
+    ax.plot(*densify([0, TAU], [radius, radius]), **kwargs)
+
+
+def _prevalence_radius(prevalence, radii):
+    return (radii["prevalence_0"]
+            + (radii["prevalence_1"] - radii["prevalence_0"]) * prevalence)
+
+
+def _draw_ring_scales(ax, length, ymax, radii):
+    """Draw the coordinates, and faint rings for depth and prevalence.
+
+    The coordinates go round the outside, labelled along the ring inside it;
+    the depth rings are labelled at the top.
+    """
+    outside = radii["coordinates"]
+    _ring(ax, outside, color=INK, lw=1.0, gid="coordinates")
+    ticks = nice_ticks(0, length)
+    label = bp_formatter(length)
+    for x in ticks[ticks < length]:
+        angle = theta(x, length)
+        rotation, va = tangential_text(angle)
+        ax.plot([angle, angle], [outside, outside + 0.015], color=INK, lw=0.8)
+        ax.text(angle, radii["tick_labels"], label(x), rotation=rotation,
+                ha="center", va=va, rotation_mode="anchor", fontsize=7.5,
+                color=MUTED, gid="tick")
+    for depth in symlog_ticks(ymax)[1:]:
+        radius = radial_symlog(depth, ymax, radii["depth_base"],
+                               radii["depth_top"])
+        _ring(ax, radius, color=GRID, lw=0.6, zorder=0)
+        ax.text(0, radius, f"{depth:g} ", ha="right", va="center", fontsize=6,
+                color=MUTED)
+    for prevalence in (0.5, 1.0):
+        _ring(ax, _prevalence_radius(prevalence, radii), color=GRID, lw=0.6,
+              zorder=0)
+
+
+def _draw_ring_depth(ax, own, edges, length, group, index, ymax, radii):
+    colour, linestyle = group_style(index)
+    band = radii["depth_base"], radii["depth_top"]
+    angles, q1 = polar_steps(edges, own["q1"], length)
+    _, q3 = polar_steps(edges, own["q3"], length)
+    ax.fill_between(angles, radial_symlog(q1, ymax, *band),
+                    radial_symlog(q3, ymax, *band), color=colour,
+                    alpha=BAND_ALPHA, lw=0, gid=f"iqr:{group}")
+    for key, lw, ls in (("median", 1.3, linestyle), ("mean", 0.9, ":")):
+        angles, values = polar_steps(edges, own[key], length)
+        ax.plot(angles, radial_symlog(values, ymax, *band), color=colour, lw=lw,
+                ls=ls, gid=f"{key}:{group}")
+
+
+def _draw_ring_breadth(ax, own, edges, length, group, index, radii):
+    """Union as arcs on the group's own ring, prevalence hanging inward."""
+    colour = group_style(index)[0]
+    radius = radii[f"union:{index}"]
+    starts, stops = true_runs(own["union"])
+    arcs = [np.column_stack(densify(theta([edges[a], edges[b]], length),
+                                    [radius, radius]))
+            for a, b in zip(starts, stops, strict=True)]
+    ax.add_collection(LineCollection(arcs, colors=colour, lw=2.0,
+                                     capstyle="butt", gid=f"union:{group}"))
+    angles, values = polar_steps(edges, own["prevalence"], length)
+    ax.plot(angles, _prevalence_radius(values, radii), color=colour, lw=1.1,
+            gid=f"prevalence:{group}")
+
+
+def _draw_ring_orfs(ax, track, length, bp_per_pt, radii):
+    """Draw the ORFs on the backbone, + outside and - inside.
+
+    As on the linear plot, but an ORF across the origin is one shape: the
+    axes wrap it. Each shape starts and ends at its start, so the edge that
+    closes it is radial and needs no tracing.
+    """
+    head = 4 * bp_per_pt if length <= ARROW_MAX_BP else 0
+    scale = (radii["orfs_out"] - radii["backbone"]) / ORF_Y[1]
+    for strand in ("+", "-", "."):
+        on = track["strand"] == strand
+        if not on.any():
+            continue
+        # one strand's shapes have the same corners, so bend them all at once
+        corners = np.array(orf_polygons(track["start"][on], track["stop"][on],
+                                        track["strand"][on], head))
+        angles = theta(corners[..., 0], length)
+        radius = radii["backbone"] + scale * corners[..., 1]
+        shapes = list(np.stack([angles, radius], axis=-1))
+        # only an ORF longer than `MAX_ARC` needs its arcs traced
+        long = np.abs(np.diff(angles, axis=1)).max(axis=1) > MAX_ARC
+        for i in np.flatnonzero(long):
+            shapes[i] = np.column_stack(densify(angles[i], radius[i]))
+        ax.add_collection(_orf_collection(shapes, track["fill"][on],
+                                          track["outline"][on], strand))
+
+
+def _draw_ring_highlights(ax, track, length, bp_per_pt, radii):
+    """Shade a faint wedge through depth and breadth under each highlight.
+
+    Highlighted ORFs within a point of each other share a wedge.
+    """
+    on = track["highlight"]
+    starts, stops = merge_spans(track["start"][on] - 1, track["stop"][on] - 1,
+                                gap=bp_per_pt)
+    inner, outer = radii["prevalence_1"], radii["depth_top"]
+    wedges = [np.column_stack(densify(theta([a, b, b, a], length),
+                                      [inner, inner, outer, outer]))
+              for a, b in zip(starts, stops, strict=True)]
+    if wedges:
+        ax.add_collection(PolyCollection(wedges, facecolors=INK, alpha=0.06,
+                                         lw=0, zorder=0, gid="highlight"))
+
+
+def _draw_ring_labels(ax, track, length, radii, pt_per_r):
+    """Label the highlighted ORFs outside the ring; count those that fit nowhere."""
+    on = track["highlight"]
+    if not on.any():
+        return
+    anchors = theta((track["start"][on] + track["stop"][on]) / 2 - 1,
+                    length) % TAU
+    gap = LABEL_FONTSIZE * 1.5 / (radii["labels"] * pt_per_r)
+    placed = place_ring_labels(anchors, gap, RING_LABEL_SHIFT * gap)
+    outside = radii["coordinates"]
+    for name, anchor, angle in zip(track["label"][on], anchors, placed,
+                                   strict=True):
+        if np.isnan(angle):
+            continue
+        ax.plot([anchor, anchor, angle],
+                [outside, outside + 0.015, radii["labels"] - 0.01],
+                color=MUTED, lw=0.5, clip_on=False, gid="leader")
+        rotation, ha = radial_text(angle)
+        ax.text(angle, radii["labels"], name, rotation=rotation, ha=ha,
+                va="center", rotation_mode="anchor", fontsize=LABEL_FONTSIZE,
+                color=INK, gid="label")
+    _count_unlabelled(ax, int(np.isnan(placed).sum()), 1.0)
+
+
+def depth_plots(con, output, variable, *, depth_view, breadth_view, orfs=False,
+                target_names=None, highlights=(), color_by=None, contrast=False):
+    """Draw every genome `depth-plot` settles on, and write the per-ORF table.
+
+    Everything that can be refused is refused before the first genome is
+    computed: the ORF options (`check_orf_options`), the inputs
+    (`_depth.intersect_layers`) and the ORF colouring (`check_orf_mode`).
+    Each genome is then computed once, and drawn from its own tables only:
+    its overview, a ring if it is circular and there are at most
+    `OVERLAY_MAX_GROUPS` groups, and a detail panel per region.
+
+    Requires the readers' tables (`_io.load_alignment_layer` for both views,
+    `load_sample_groups`, `load_depth_features`, and `load_orfs` if `orfs`).
+
+    Parameters
+    ----------
+    output : str
+        The prefix of every file written (`plot_path`).
+    variable : str
+        The metadata column grouping the samples.
+    target_names : str, optional
+        A `--target-names` file; a genome without a name is named by its id.
+    highlights : sequence of str
+        `--highlight` expressions (`parse_highlight`).
+    color_by : str, optional
+        `--orf-color-by`'s attribute.
+    contrast : bool
+        `--orf-contrast`.
+    """
+    check_orf_options(orfs, highlights, color_by, contrast)
+    intersect_layers(con, depth_view, breadth_view, orfs=orfs)
+    sizes = dict(con.sql(f"""SELECT group_name, count(*)::INTEGER
+                             FROM {ROSTER_TABLE} GROUP BY 1""").fetchall())
+    check_orf_mode(len(sizes), color_by, contrast)
+    parsed = [parse_highlight(text) for text in highlights]
+    names = ({} if target_names is None
+             else dict(con.sql(target_names_query(con, target_names)).fetchall()))
+    genomes = con.sql(f"""SELECT genome_id, length, is_circular
+                          FROM {GENOMES_TABLE} ORDER BY 1""").fetchall()
+    rings = len(sizes) <= OVERLAY_MAX_GROUPS
+    circular = [(genome,) for genome, _, is_circular in genomes if is_circular]
+    if circular and not rings:
+        logger.warning(
+            f"No circular plots: a ring overlays at most {OVERLAY_MAX_GROUPS} "
+            f"groups, and {variable!r} has {len(sizes)}. The linear plots of "
+            f"{len(circular)} circular genome(s) give each group a lane: "
+            f"{_examples(circular)}"
+        )
+
+    if orfs:
+        bare = con.sql(f"""SELECT genome_id FROM {GENOMES_TABLE}
+                           ANTI JOIN {ORFS_TABLE} USING (genome_id)
+                           ORDER BY 1""").fetchall()
+        if bare:
+            logger.warning(
+                f"{len(bare)} genome(s) plotted have no ORF, so a bare track; "
+                f"is the ORFs' seqid their genome_id? {_examples(bare)}"
+            )
+
+    stage_breadth(con, breadth_view)
+    stage_depth_reads(con, depth_view)
+    if orfs:
+        start_orf_table(con)
+    matched = np.zeros(len(parsed), bool)
+    coloured = False
+    for genome, length, is_circular in genomes:
+        regions = con.execute(
+            f"""SELECT start, stop FROM {DEPTH_FEATURES_TABLE}
+                WHERE genome_id = ? AND start IS NOT NULL ORDER BY start, stop""",
+            [genome],
+        ).fetchall()
+        edge_sets = [display_bin_edges(1, length + 1, overview_bin_bp(length))]
+        edge_sets += [display_bin_edges(a, b, detail_bin_bp(a, b))
+                      for a, b in regions]
+        own_orfs = (genome_orfs(con, genome, attributes=bool(parsed or color_by))
+                    if orfs else None)
+        bins, orf_table, orf_contrast = genome_statistics(
+            con, genome, length, edge_sets, own_orfs, warn_contrast=contrast)
+        track = None
+        if orfs:
+            masks = highlight_masks(own_orfs, parsed)
+            matched |= masks.any(axis=1)
+            track = orf_track(
+                own_orfs, masks.any(axis=0), color_by=color_by,
+                contrast=orf_contrast if contrast else None,
+            )
+            coloured |= color_by is not None and bool(track["legend"][1])
+            add_orf_table(con, orf_table)
+
+        name = names.get(genome, genome)
+        shown = genome if name == genome else f"{name} ({genome})"
+        topology = "circular" if is_circular else "linear"
+        title = TITLE_SEP.join([shown, f"{length:,} bp", topology, variable])
+        common = {"length": length, "sizes": sizes, "track": track}
+        linear_plot(plot_path(output, name, genome, variable), title=title,
+                    overview=bins[0], regions=regions, **common)
+        if is_circular and rings:
+            circular_plot(plot_path(output, name, genome, variable, "circular"),
+                          title=title, overview=bins[0], **common)
+        for (a, b), table in zip(regions, bins[1:], strict=True):
+            detail_plot(plot_path(output, name, genome, variable, f"detail-{a}-{b}"),
+                        title=f"{title}{TITLE_SEP}{a:,}\u2013{b - 1:,}",
+                        table=table, **common)
+
+    for text, hit in zip(highlights, matched, strict=True):
+        if not hit:
+            logger.warning(f"--highlight {text!r} matches no ORF of the genomes "
+                           "plotted.")
+    if orfs and color_by is not None and not coloured:
+        logger.warning(f"--orf-color-by {color_by!r}: no ORF of the genomes plotted "
+                       "has that attribute, so every ORF is Other.")
+    if orfs:
+        write_orf_table(con, output, variable)

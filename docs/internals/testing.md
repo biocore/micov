@@ -19,15 +19,18 @@ make lint-fix                      # the only target that edits files
   `pip install -e ".[test]"`.
 - **Which micov the CLI tests run.** The CLI tests run the `micov` console
   script found **next to `sys.executable`**, and fall back to `PATH`. A stale
-  non-editable install would shadow the working tree, so check which micov
-  you are testing.
+  non-editable install, or an editable install of a different checkout, would
+  shadow the working tree. The unit tests would still pass against your
+  tree, because pytest puts the cwd first on `sys.path`, while the CLI goldens
+  tested other code. Check with `cd /tmp && python -c "import micov;
+  print(micov.__file__)"`, and if it is wrong, export `PYTHONPATH=$PWD`.
 
 At the time of writing:
 
 | Tier | Result |
 |---|---|
-| Fast | 195 passed, 10 skipped |
-| Full | 205 passed, 0 skipped |
+| Fast | 482 passed, 10 skipped |
+| Full | 492 passed, 0 skipped |
 
 The 10 fast-tier skips are the `requires_full_tier` tests. Any other skip
 needs a reason: `requires_miint_build` is legitimate, and a skip you caused
@@ -58,15 +61,17 @@ samples. Test those with synthetic data spanning thousands of genomes; see
 
 | File | Covers |
 |---|---|
-| `test_equivalence.py` | End-to-end CLI runs in subprocesses, compared against goldens. Also the frozen command surface and the `nonqiita-to-parquet` alias |
+| `test_equivalence.py` | End-to-end CLI runs in subprocesses, compared against goldens. Also the frozen command surface, that `python -m micov.cli` lists every command, `depth-plot`'s options, and the `nonqiita-to-parquet` alias. `TestDepthPlotFastTier` runs `depth-plot` with everything on (file set, PNGs, the per-ORF golden and hand values, the stderr report), with the defaults, with four groups, and eight refusals that must leave the output directory empty |
 | `test_alignments.py` | The miint ingest: coordinates, merging, the reference-map guard, and the Parquet pair written by `compress` |
 | `test_cov.py` | Ranking, accumulation and the tie-break; `IntervalMergeTests` checks merge cases against `compress_intervals` |
 | `test_view.py` | `View` modes, region clipping and breadth, presence, feature names, the header rule |
-| `test_plot.py` | `position_plot_segments`, `ks_2samp`, `ks_table`, and the per-genome loop's slicing, Monte Carlo pool and figure closing |
+| `test_plot.py` | `position_plot_segments`, `ks_2samp`, `ks_table`, the per-genome loop's slicing, Monte Carlo pool and figure closing, and group colours: their colour-blind separation, dashes past five groups, the warning past ten |
 | `test_quant.py` | Bin edges and hit counts |
-| `test_io.py` | Lengths parsing and header detection; BED3 loading |
+| `test_io.py` | Lengths parsing and header detection; BED3 loading; the shared header rule; `depth-plot`'s readers and its per-ORF writer, whose columns and types are pinned literally |
+| `test_depth.py` | `depth-plot`'s computation: which samples and genomes are used and what is reported, windowed per-base depth, merged breadth, the binned group statistics and the per-ORF statistics and contrast, hand-computed on the `dp_*` fixtures and on literal reads, plus window-size invariance and a CIGAR-walking oracle for both |
+| `test_depth_plot.py` | `depth-plot`'s drawing: the layout helpers, then the overview, detail and circular plots, read back from the figure by artist gid with `Figure.savefig` patched; the ring's geometry, its depth scale against the linear axis, and label placement as a property over random clusters; guards on masked or untiled bins, on too many groups for a ring, on global style, and on open figures; then `depth_plots`, the run, with the drawing recorded: each plot gets its own genome's bins and ORFs (on 300 genomes too), every warning, refusals before any genome is computed, attributes read only when needed, and a second run on one connection writing only its own ORFs |
 | `test_miint.py` | Connection, overrides, error messages, capability check |
-| `test_quoting.py` | `sql_string`, and every SQL literal site driven with a path containing `'` |
+| `test_quoting.py` | `sql_string`, and every SQL literal site driven with a path containing `'`, `depth-plot`'s whole command included |
 | `test_dependencies.py` | No module imports `polars`, `numba`, `pyarrow` or `scipy` |
 | `test_golden_selftest.py` | Each `_golden` comparator passes what it must tolerate and fails what it must catch |
 
