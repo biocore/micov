@@ -23,13 +23,12 @@ from matplotlib.colors import to_hex
 from matplotlib.figure import Figure
 
 from micov import _depth_plot
+from micov._cov import mask_table
 from micov._depth import (
-    DEPTH_READS_TABLE,
     ROW_BP,
     detail_bin_bp,
     display_bin_edges,
     genome_orfs,
-    genome_statistics,
     overview_bin_bp,
 )
 from micov._depth_plot import (
@@ -46,6 +45,7 @@ from micov._depth_plot import (
     assign_label_lanes,
     bp_formatter,
     check_orf_mode,
+    check_orf_options,
     circular_layout,
     circular_plot,
     clip_spans,
@@ -54,7 +54,7 @@ from micov._depth_plot import (
     depth_plots,
     depth_ymax,
     detail_plot,
-    highlight_mask,
+    highlight_masks,
     linear_plot,
     merge_spans,
     nice_ticks,
@@ -82,6 +82,7 @@ from micov._io import (
 )
 from micov._miint import connection
 from micov._plot import GROUP_COLORS, group_style
+from micov._utils import sql_string
 from micov.tests.test_plot import (
     CVD_MIN_DELTA_E,
     MACHADO,
@@ -144,14 +145,12 @@ class AxisTests(unittest.TestCase):
         def table(q3, mean):
             return {"q3": np.array(q3, float), "mean": np.array(mean, float)}
 
-        self.assertEqual(
-            depth_ymax([table([1, 7], [2, 3]), table([4], [9.5])]), 9.5
-        )
+        self.assertEqual(depth_ymax(table([1, 7, 4], [2, 3, 9.5])), 9.5)
 
     def test_depth_ymax_never_collapses(self):
         """Nothing aligned still needs the linear part of the axis."""
         table = {"q3": np.zeros(3), "mean": np.zeros(3)}
-        self.assertEqual(depth_ymax([table]), 2.0)
+        self.assertEqual(depth_ymax(table), 2.0)
 
 
 class SpanTests(unittest.TestCase):
@@ -211,26 +210,31 @@ class HighlightTests(unittest.TestCase):
         self.assertEqual(orf_value(orfs, "product").tolist(),
                          [None, "5' nucleotidase", None, "phage spliced"])
 
-    def test_any_expression_highlights(self):
-        orfs = self.ORFS()
-        mask = highlight_mask(
-            orfs, [parse_highlight("product~phage"), parse_highlight("type=rRNA")]
+    def test_a_mask_per_expression(self):
+        """An ORF any of them matches is highlighted, and an expression that
+        matches nothing can be told of."""
+        masks = highlight_masks(
+            self.ORFS(),
+            [parse_highlight("product~phage"), parse_highlight("type=rRNA")],
         )
-        self.assertEqual(mask.tolist(), [False, False, True, True])
+        self.assertEqual(masks.tolist(), [[False, False, False, True],
+                                          [False, False, True, False]])
 
     def test_equals_is_exact_and_tilde_searches(self):
         orfs = self.ORFS()
         self.assertEqual(
-            highlight_mask(orfs, [parse_highlight("product=phage")]).tolist(),
-            [False] * 4,
+            highlight_masks(orfs, [parse_highlight("product=phage")]).tolist(),
+            [[False] * 4],
         )
         self.assertEqual(
-            highlight_mask(orfs, [parse_highlight("product~5' nuc")]).tolist(),
-            [False, True, False, False],
+            highlight_masks(orfs, [parse_highlight("product~5' nuc")]).tolist(),
+            [[False, True, False, False]],
         )
 
     def test_nothing_highlighted(self):
-        self.assertEqual(highlight_mask(self.ORFS(), []).tolist(), [False] * 4)
+        masks = highlight_masks(self.ORFS(), [])
+        self.assertEqual(masks.shape, (0, 4))
+        self.assertEqual(masks.any(axis=0).tolist(), [False] * 4)
 
 
 class OrfCategoryTests(unittest.TestCase):
@@ -247,6 +251,12 @@ class OrfCategoryTests(unittest.TestCase):
             ["a", "b", "a", "c", ORF_OTHER_LABEL, "b", "a", ORF_OTHER_LABEL, "c",
              ORF_OTHER_LABEL, ORF_OTHER_LABEL],
         )
+
+    def test_counted_not_sorted(self):
+        """z is commonest, and y next, though both sort last."""
+        _, top = orf_categories(np.array(["a", "z", "y", "z", "b", "z", "y"],
+                                         dtype=object))
+        self.assertEqual(top, ["z", "y", "a"])
 
     def test_independent_of_row_order(self):
         rng = random.Random(3)
@@ -405,7 +415,20 @@ class OrfModeTests(unittest.TestCase):
 
     def test_one_colouring_at_a_time(self):
         with self.assertRaisesRegex(ValueError, "--orf-contrast"):
-            check_orf_mode(2, "product", True)
+            check_orf_options(True, (), "product", True)
+        check_orf_options(True, (), "product", False)
+
+    def test_orf_options_need_orfs(self):
+        """Whatever they mark, there would be nothing to mark."""
+        for kwargs in ({"highlights": ("type=rRNA",)}, {"color_by": "product"},
+                       {"contrast": True}):
+            options = {"highlights": (), "color_by": None, "contrast": False,
+                       **kwargs}
+            with self.subTest(**kwargs), self.assertRaisesRegex(
+                ValueError, "needs --orfs"
+            ):
+                check_orf_options(False, **options)
+        check_orf_options(False, (), None, False)
 
 
 class PlotPathTests(unittest.TestCase):
@@ -442,7 +465,7 @@ def bins_table(groups, edges):
 
 
 def group_rows(table, group):
-    return {key: values[table["group"] == group] for key, values in table.items()}
+    return mask_table(table, table["group"] == group)
 
 
 def axes_by_gid(fig, gid):
@@ -459,6 +482,18 @@ def artists(ax, gid):
 def artist(ax, gid):
     (found,) = artists(ax, gid)
     return found
+
+
+def band_spans(ax):
+    """The highlight bands' [start, stop) in x: one artist for them all,
+    as hundreds of highlights would otherwise be hundreds of artists. Each
+    runs the axes' whole height, whatever their y scale."""
+    bands = artist(ax, "highlight")
+    for path in bands.get_paths():
+        y = bands.get_transform().transform(path.vertices)[:, 1]
+        np.testing.assert_allclose([y.min(), y.max()], [ax.bbox.y0, ax.bbox.y1])
+    return sorted((path.vertices[:, 0].min(), path.vertices[:, 0].max())
+                  for path in bands.get_paths())
 
 
 class DrawingTestCase(unittest.TestCase):
@@ -655,9 +690,7 @@ class OrfDrawingTests(DrawingTestCase):
         self.assertEqual(sorted(t.get_text() for t in artists(orfs, "label")),
                          ["dnaA", "dnaB"])
         self.assertEqual(artist(orfs, "unlabelled").get_text(), "+1 unlabelled")
-        bands = artists(axes_by_gid(fig, "depth:0"), "highlight")
-        self.assertEqual([(b.get_x(), b.get_x() + b.get_width()) for b in bands],
-                         [(100, 2300)])
+        self.assertEqual(band_spans(axes_by_gid(fig, "depth:0")), [(100, 2300)])
 
     def test_colour_by_has_a_legend(self):
         track = orf_track(orfs_of((1, 101, "+", "a", {"COG": "J"}),
@@ -707,6 +740,28 @@ class OrfDrawingTests(DrawingTestCase):
                         table=table, track=track)
         (part,) = artist(axes_by_gid(fig, "orfs:0"), "orfs:+").get_paths()
         self.assertEqual(sorted(set(part.vertices[:, 0])), [9500, 10_000])
+
+    def test_both_parts_of_an_orf_across_the_origin_keep_its_colour(self):
+        """The wrapped part is drawn after every other ORF, but in its own
+        ORF's colour: b is neutral at both ends, beside a in ink."""
+        track = orf_track(orfs_of((101, 1101, "+", "a", {}),
+                                  (9501, 10501, "+", "b", {})),
+                          np.array([True, False]))
+        fig, _ = self.overview(length=10_000, track=track)
+        orfs = artist(axes_by_gid(fig, "orfs:0"), "orfs:+")
+        self.assertEqual(
+            sorted((p.vertices[:, 0].min(), to_hex(c))
+                   for p, c in zip(orfs.get_paths(), orfs.get_facecolor(),
+                                   strict=True)),
+            [(0, ORF_NEUTRAL), (100, INK), (9500, ORF_NEUTRAL)],
+        )
+
+    def test_a_highlight_across_the_origin_is_shaded_at_both_ends(self):
+        """Drawn at both ends, as above, so its band is at both ends too."""
+        track = orf_track(orfs_of((9501, 10501, "+", "a", {})), np.ones(1, bool))
+        fig, _ = self.overview(length=10_000, track=track)
+        self.assertEqual(band_spans(axes_by_gid(fig, "depth:0")),
+                         [(0, 500), (9500, 10_000)])
 
     def test_highlighted_and_coloured_orfs_are_outlined(self):
         track = self.track(highlight=(True, False, False, False, False),
@@ -1032,7 +1087,7 @@ class CircularPlotTests(RingTestCase):
         _, table, ax = self.ring()
         rows = group_rows(table, "control")
         radii = circular_layout(2)
-        band = depth_ymax([table]), radii["depth_base"], radii["depth_top"]
+        band = depth_ymax(table), radii["depth_base"], radii["depth_top"]
         _, q1 = polar_steps(self.edges(rows), rows["q1"], 4_500_000)
         _, q3 = polar_steps(self.edges(rows), rows["q3"], 4_500_000)
         (path,) = artist(ax, "iqr:control").get_paths()
@@ -1053,7 +1108,7 @@ class CircularPlotTests(RingTestCase):
         np.testing.assert_array_equal(median.get_xdata(), angles)
         np.testing.assert_allclose(
             median.get_ydata(),
-            radial_symlog(values, depth_ymax([table]), radii["depth_base"],
+            radial_symlog(values, depth_ymax(table), radii["depth_base"],
                           radii["depth_top"]),
         )
         self.assertGreaterEqual(min(median.get_ydata()), radii["depth_base"])
@@ -1063,7 +1118,7 @@ class CircularPlotTests(RingTestCase):
         depth axis, so the two plots of a genome read alike."""
         fig, table = self.overview()
         ax = axes_by_gid(fig, "depth:0")
-        ymax = depth_ymax([table])
+        ymax = depth_ymax(table)
         for depth in (0, 1, 2, 5, ymax):
             with self.subTest(depth=depth):
                 linear = ax.transAxes.inverted().transform(
@@ -1194,6 +1249,16 @@ class RingOrfTests(RingTestCase):
         (path,) = artist(ax, "orfs:+").get_paths()
         self.assertAlmostEqual(path.vertices[:, 0].min(), theta(9500, 10_000))
         self.assertAlmostEqual(path.vertices[:, 0].max(), theta(10_500, 10_000))
+
+    def test_a_long_orf_bends_with_the_ring(self):
+        """Polar axes join corners with chords, so a long ORF's edges are
+        traced: 2,000 bp of a 10,000 bp ring is 72 degrees, and no step of
+        its outline may turn through more than `MAX_ARC`."""
+        track = orf_track(orfs_of((1001, 3001, "+", "a", {})), np.zeros(1, bool))
+        _, _, ax = self.ring(length=10_000, track=track)
+        (path,) = artist(ax, "orfs:+").get_paths()
+        self.assertLessEqual(np.abs(np.diff(path.vertices[:, 0])).max(),
+                             MAX_ARC + 1e-12)
 
     def test_a_short_genome_shows_which_way_its_genes_run(self):
         """As on the linear plot, arrows up to `ARROW_MAX_BP`: an arrow's tip
@@ -1414,14 +1479,6 @@ class DepthPlotsTests(DepthPlotsTestCase):
         _, logged = self.run_plots(column="quad", orfs=False, load=False)
         self.assertFalse(self.warned(logged, "ring"))
 
-    def test_every_genome_reads_the_staged_reads(self):
-        """Never the layer, which each genome would scan whole (traps.md)."""
-        with mock.patch.object(_depth_plot, "genome_statistics",
-                               wraps=genome_statistics) as compute:
-            self.run_plots()
-        self.assertEqual({call.args[1] for call in compute.call_args_list},
-                         {DEPTH_READS_TABLE})
-
     def test_four_groups_get_no_rings_and_are_told_once(self):
         """A ring can only overlay three groups; the linear plots carry four
         in lanes."""
@@ -1431,6 +1488,17 @@ class DepthPlotsTests(DepthPlotsTestCase):
         (warning,) = self.warned(logged, "ring")
         self.assertIn("quad", warning)
         self.assertIn("GC", warning)
+
+    def test_attributes_are_read_only_to_highlight_or_colour(self):
+        for kwargs, wanted in (({}, False), ({"contrast": True}, False),
+                               ({"highlights": ("type=rRNA",)}, True),
+                               ({"color_by": "product"}, True)):
+            with self.subTest(**kwargs), \
+                    mock.patch.object(_depth_plot, "genome_orfs",
+                                      wraps=genome_orfs) as read:
+                self.run_plots(**kwargs)
+            self.assertEqual({call.kwargs.get("attributes", False)
+                              for call in read.call_args_list}, {wanted})
 
     def test_highlights_reach_the_track(self):
         calls, logged = self.run_plots(
@@ -1479,6 +1547,17 @@ class DepthPlotsTests(DepthPlotsTestCase):
             compute.assert_not_called()
             self.assertEqual(os.listdir(self.d), [])
 
+    def test_orf_options_without_orfs_are_refused_first(self):
+        """As the command refuses them: a library caller would otherwise get
+        a run with nothing highlighted, and a warning that no ORF matched."""
+        self.load(orfs=False)
+        with mock.patch.object(_depth_plot, "genome_statistics") as compute, \
+                self.assertRaisesRegex(ValueError, "needs --orfs"):
+            depth_plots(self.con, self.out, "group", depth_view="depth_layer",
+                        breadth_view="breadth_layer", highlights=("type=rRNA",))
+        compute.assert_not_called()
+        self.assertEqual(os.listdir(self.d), [])
+
     def test_a_plotted_genome_without_orfs_is_told(self):
         """Its track would be a bare line; a seqid that does not match its
         genome_id is the likely cause."""
@@ -1489,6 +1568,16 @@ class DepthPlotsTests(DepthPlotsTestCase):
         self.assertIn("GL", warning)
         self.assertNotIn("GC", warning)
         self.assertEqual(len(calls[-1][2]["track"]["start"]), 0)
+
+    def test_a_second_run_on_one_connection_writes_only_its_own_orfs(self):
+        """A library caller, or a retry after a failed run, reuses the
+        connection: the per-ORF table must not carry the earlier run's rows."""
+        count = "SELECT count(*) FROM read_parquet(?)"
+        path = f"{self.out}.group.depth-plot-orfs.parquet"
+        self.run_plots()
+        (once,) = self.con.execute(count, [path]).fetchone()
+        self.run_plots(load=False)
+        self.assertEqual(self.con.execute(count, [path]).fetchone(), (once,))
 
     def test_without_orfs_there_is_no_track_and_no_table(self):
         calls, _ = self.run_plots(orfs=False)
@@ -1516,7 +1605,7 @@ class ManyGenomesTests(DepthPlotsTestCase):
             "cigar": np.full(reads, "100M", dtype=object),
         })
         self.layer = f"{self.d}/reads.parquet"
-        self.con.sql(f"COPY reads TO '{self.layer}' (FORMAT PARQUET)")
+        self.con.sql(f"COPY reads TO {sql_string(self.layer)} (FORMAT PARQUET)")
         self.con.unregister("reads")
         with open(f"{self.d}/md.tsv", "w") as fp:
             fp.write("sample_id\tg\nS0\ta\nS1\ta\nS2\tb\nS3\tb\n")

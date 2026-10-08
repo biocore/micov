@@ -14,15 +14,20 @@ metagenomic), for each group of a metadata column. Both layers are
 
 - A sample is used if it is in the metadata and has an aligned read
   (`_io.ALIGNED_ROWS`) in **both** layers. A genome is used if it is in the
-  features and has an aligned read in both layers.
+  features and **a used sample** has an aligned read on it in both layers:
+  reads from samples without metadata do not count, or a genome only they
+  reach would be drawn as flat zeros.
 - Whatever the metadata or features name but this leaves out is warned about
-  by name. A sample with no metadata, or a genome not in the features, was
-  left out by the user, and is not.
+  by name, with the layer it lacks (`_in_both`). A sample with no metadata,
+  or a genome not in the features, was left out by the user, and is not.
 - No sample or no genome left, more than `_plot.MAX_GROUPS` groups, an
-  aligned read starting beyond its genome's `length`, or (with ORFs) no ORF
-  on any used genome or an ORF outside its genome: `ValueError`. Only a
-  circular genome's ORF may run past its end. All of this is checked before
-  any genome is computed.
+  aligned read starting beyond its genome's `length`, or, with ORFs, no ORF
+  on any used genome, an ORF on one without an `ID`, or an ORF on one that
+  does not span a base of it (a start before 1, a stop not past its start,
+  or beyond the genome): `ValueError`. Only a circular genome's ORF may run
+  past its end. ORFs on genomes not used are not checked, so a
+  database-wide GFF is fine. All of this is checked before any genome is
+  computed.
 - It creates `depth_roster` (`sample_id`, a dense `sample_idx` in `sample_id`
   order, `group_name`) and `depth_genomes`.
 
@@ -34,11 +39,13 @@ A genome's depth is computed in windows of `window_size(n, L) = max(1,
 min(L, WINDOW_CELLS // n))` bases, so memory is bounded by the number of
 samples, not the genome's length.
 
-- **`stage_depth`** copies one genome's aligned reads of the used samples into
-  the temp table `depth_alignments`: `sample_idx`, UINTEGER `position` and
-  `stop_position`, `cigar`, sorted by position. The command reads them from
-  `depth_reads` (`stage_depth_reads`), never from the layer itself; see
+- **`stage_depth_reads`**, once a run, copies what can add depth -- the used
+  samples' aligned reads on the used genomes -- into the temp table
+  `depth_reads`: `sample_idx`, `reference`, UINTEGER `position` and
+  `stop_position`, `cigar`, ordered by genome and position; see
   [the run](#the-run-_depth_plotdepth_plots).
+- **`stage_depth`** copies one genome's rows of it into `depth_alignments`,
+  sorted by position, for the window queries.
 - **`window_depth(con, n, w0, w1)`** calls miint's `compute_coverage_depth`
   per sample, with positions shifted by `w0 - 1` and the window's width as the
   reference length. miint clips reads that start before `w0` or run past
@@ -62,9 +69,9 @@ samples, not the genome's length.
 
 ## Group statistics and bins: `_depth.genome_statistics`
 
-`genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None)`
-makes one pass of windows and fills every bin set at once, returning
-`(bins, orf_table)`: the overview,
+`genome_statistics(con, genome_id, length, edge_sets, orfs=None)` makes one
+pass of windows over `depth_reads` and fills every bin set at once,
+returning `(bins, orf_table, contrast)`. The bins are the overview,
 `display_bin_edges(1, L + 1, overview_bin_bp(L))`, and each detail region,
 `display_bin_edges(start, stop, detail_bin_bp(start, stop))`, which has at
 most `DETAIL_MAX_BINS` bins (single bases for a region up to 1,500 bp).
@@ -84,8 +91,7 @@ bins: 1 kb on any genome of 2 Mb or more, 9 bp on a 16.6 kb mitochondrion,
 - **Exact for any window size.** On integer depth the linear quantiles are
   multiples of 0.25, so `quartiles_x4` is an exact integer. All six series (Q1,
   median and Q3 times four, depth, covering samples, covered bases) are
-  integer bin sums, carried across windows by prefix sums and divided once at
-  the end. `WindowInvarianceTests` checks bit-identical bins for windows of 1,
+  integer bin sums, carried across windows and divided once at the end. `WindowInvarianceTests` checks bit-identical bins for windows of 1,
   2, 3, 7 and L bases, and agreement with a Python CIGAR-walking oracle. Do
   not divide inside the window loop.
 - **The table**, one per edge set: `group`, `bin_start`, `bin_stop` (1-based,
@@ -93,15 +99,27 @@ bins: 1 kb on any genome of 2 Mb or more, 9 bp on a 16.6 kb mitochondrion,
   (bool), a row per group (sorted) and bin.
 
 Every span set -- the bins and the ORFs' segments -- is summed the same way,
-by `_add_span_sums`, which touches only the spans a window overlaps.
+by `_add_span_sums`, which touches only the spans a window overlaps: it sums
+the bases between the spans' ends (`np.add.reduceat`), then accumulates
+those. A prefix sum of every base, for every sample, was most of the time
+ORFs added.
 
 ## Per-ORF statistics
 
-`genome_orfs(con, genome_id)` gives a genome's ORFs by position, each with
-its GFF `attributes` as a dict. With `orfs`, `genome_statistics` also returns
-the per-ORF table, which `_io.add_orf_table` copies into DuckDB as each
-genome is done and `_io.write_orf_table` writes once
-([data-formats.md](data-formats.md)).
+`genome_orfs(con, genome_id, attributes=False)` gives a genome's ORFs by
+position, and with `attributes` each one's GFF attributes as a dict, which
+only `--highlight` and `--orf-color-by` read: the dicts cost about 75 ms a
+genome of 10,000 ORFs. With `orfs`, `genome_statistics` also returns the
+per-ORF table, and each ORF's contrast once, for its colour. The run starts
+the table with `_io.start_orf_table`; `_io.add_orf_table` copies each
+genome's into DuckDB as it is done, as numpy strings rather than the
+objects `fetchnumpy` gives, which took DuckDB about a second a genome; and
+`_io.write_orf_table` writes it once ([data-formats.md](data-formats.md)).
+
+Each GFF line is an ORF of its own. A feature written on several lines
+that share an `ID` -- NCBI writes a frameshifted CDS that way -- gives a set
+of rows per line, so the table's key is `genome_id`, `orf_id`, `start` and
+`group`, not the `ID` alone.
 
 - **Segments.** `orf_segments` splits an ORF running past the genome's end,
   which only a circular genome's may, into `[start, L + 1)` and
@@ -172,10 +190,13 @@ its coordinates less one.
   outline.
 - **Highlights** (`parse_highlight`): `KEY=VALUE` matches exactly and
   `KEY~REGEX` searches; the first operator wins. KEY is `type` or `strand`,
-  else a GFF attribute. A highlighted ORF gets a faint band through depth and
-  breadth (merged within a point), and a label in one of two lanes per side
-  (`assign_label_lanes`); labels that fit nowhere are counted as
-  "+N unlabelled".
+  else a GFF attribute. `highlight_masks` gives a mask per expression: an
+  ORF any matches is highlighted, and an expression that matches none is
+  told of. A highlighted ORF gets a faint band through depth and breadth
+  (merged within a point; under both parts of one across the origin), and a
+  label in one of two lanes per side (`assign_label_lanes`); labels that fit
+  nowhere are counted as "+N unlabelled". The bands are one artist per
+  axes: one each was 0.7 s for 800 of them.
 - **Regions** are shaded on the overview where they fall; each gets its own
   `detail_plot`, at its own bins and depth scale.
 - **Files** (`plot_path`): `{output}.{target_name}.{genome}.{variable}.depth-plot.png`,
@@ -204,8 +225,9 @@ plot's anatomy bent round, the mirror layout approved from the mockups.
   a step function by `polar_steps`. A ring given by its two ends alone is
   not drawn at all.
 - **ORFs** keep the linear plot's colours, outlines and shapes
-  (`orf_polygons`), arrows included up to `ARROW_MAX_BP`. Highlights get a
-  wedge from prevalence 1 out to the top of depth, merged within a point.
+  (`orf_polygons`), arrows included up to `ARROW_MAX_BP`, bent round all at
+  once; only an ORF longer than `MAX_ARC` is traced. Highlights get a wedge
+  from prevalence 1 out to the top of depth, merged within a point.
 - **Labels** (`place_ring_labels`) are spread round the ring by least
   squares (`spread_angles`), the ring cut at its widest gap so labels
   either side of the top stay neighbours. A label moved more than
@@ -226,19 +248,23 @@ plot's anatomy bent round, the mirror layout approved from the mockups.
 `cli.depth_plot` loads the inputs through the `_io` readers and hands the
 connection to `depth_plots`, which:
 
-1. **Refuses what it can, first:** `intersect_layers`, then `check_orf_mode`
-   on the number of groups. Nothing is computed or written before both pass.
+1. **Refuses what it can, first:** `check_orf_options` (ORF options without
+   `--orfs`, or both colourings; the command refuses the same as usage
+   errors), `intersect_layers`, then `check_orf_mode` on the number of
+   groups. Nothing is computed or written before all pass.
 2. **Warns once:** no rings with four or more groups (naming the circular
    genomes); plotted genomes with no ORF, a bare track, most likely a
    seqid that is not the genome_id.
 3. **Stages once:** `stage_breadth`, and `stage_depth_reads`, which copies the
    plotted samples' aligned reads on the plotted genomes into `depth_reads`,
    ordered by genome and position. `_io.load_orfs` likewise stores the ORFs
-   by genome.
+   by genome. `_io.start_orf_table` makes the per-ORF table afresh, so a
+   second run on one connection writes only its own rows.
 4. **Per genome**, in `genome_id` order: bins for the overview
    (`overview_bin_bp`) and each region (`detail_bin_bp`), one
    `genome_statistics` pass over `depth_reads`, the ORF track
-   (`highlight_mask`, `orf_track`, the per-ORF contrast `[::groups]`), then
+   (`highlight_masks`, `orf_track`, and the contrast `genome_statistics`
+   gives per ORF), then
    `linear_plot`, `circular_plot` if circular and at most three groups, and
    a `detail_plot` per region. Titles are `{name} ({genome}) · {length} bp ·
    {topology} · {variable}`, names from `_io.target_names_query`.
@@ -266,20 +292,23 @@ and ORFs on the fixture.
 
 ## Cost
 
-Measured 2026-10-05 on an Apple-silicon laptop, `--threads 4`
-(`localdocs/depth-plot/bench/bench_phase3.py`, which is not committed):
+Measured on an Apple-silicon laptop, `--threads 4`
+(`localdocs/depth-plot/bench/bench_phase3.py`, which is not committed); the
+synthetic case 2026-10-07, the specimen 2026-10-05, before the ORF sums
+were made cheaper:
 
 | Case | Time | Peak RSS | With an ORF per kb |
 |---|---|---|---|
-| Synthetic: 10 Mb, 300 samples, 1M reads | 23 s | 0.64 GiB | 31 s, 0.78 GiB |
+| Synthetic: 10 Mb, 300 samples, 1M reads | 23 s | 0.6-0.75 GiB | 24 s, 0.84 GiB (31 s before) |
 | Specimen: 2 genomes (4.7 and 5.3 Mb), 49 samples, 430k reads | 5.8 s | 0.53 GiB | 7.3 s, 0.53 GiB |
 
 The command on the specimen (both genomes, 49 samples, synthetic ORFs on
-one, highlights, a ring and a detail panel) took 13 s and peaked at 0.88 GiB,
-2026-10-07.
+one, highlights, a ring and a detail panel) took 9.4 s and peaked at
+0.66 GiB, 2026-10-08; with two groups and `--orf-color-by` or
+`--orf-contrast`, 7.3 s and 0.68-0.71 GiB.
 
 About half the time is `np.quantile`'s partition, which is inherent to
-per-base quantiles. ORFs add a per-sample prefix sum of every window. **miint's aggregation peaks at six to seven times the
+per-base quantiles. **miint's aggregation peaks at six to seven times the
 window's array** (1.6 GiB for a 256 MiB window, whatever the thread count or
 the way it is fetched), so `WINDOW_CELLS` is 2**22: 16 MiB of depth, about
 110 MiB to compute. At 2**26 the synthetic case took the same time and peaked at

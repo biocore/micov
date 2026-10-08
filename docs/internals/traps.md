@@ -96,6 +96,14 @@ test that guards it.
   or fetch route. Sized at 2**26 cells (256 MiB) as first designed, 10 Mb x
   300 samples peaked at 3.15 GiB for no gain in speed; `_depth.WINDOW_CELLS`
   is 2**22. Measure peak RSS before raising it ([depth-plot.md](depth-plot.md)).
+- **DuckDB takes numpy object arrays slowly.** `fetchnumpy` gives text as
+  object arrays, and registering them costs about 0.2 s per 20,000 values a
+  column: a second a genome for the per-ORF table. `_io.add_orf_table`
+  hands them over as numpy strings, twenty times faster; that is safe only
+  because none of its text columns is ever NULL.
+- **A run's temp table starts afresh.** `CREATE ... IF NOT EXISTS` on a
+  connection a library caller reuses, or after a failed run, carries the
+  earlier run's rows into the next file. `_io.start_orf_table` replaces it.
 
 ## Inputs
 
@@ -136,12 +144,24 @@ test that guards it.
   This is known, and has not been fixed.
 - **`compress` reads its input once.** Anything needing a second pass breaks
   the stdin idiom.
+- **A `depth-plot` genome is present only through the samples used.** Counted
+  by any sample's reads, a genome only unlisted samples reach passed, and
+  was drawn as flat zeros: a genome no sample carries, to the reader.
+- **Check ORFs only on the genomes plotted.** A database-wide GFF has ORFs on
+  genomes the run never reads; refusing one of those (a missing `ID`) stops
+  a run that would have been fine. `read_gff` also passes through lines a
+  check must catch: an end before the start, a start of 0, and the strand
+  `?`.
 - **The DuckDB CSV sniffer cannot read a pipe.** It consumes the stream and
   then returns zero rows without raising. That is why `position-plot` spools
   stdin through `_io.positions_path`.
 
 ## Environment and packaging
 
+- **`if __name__ == "__main__": cli()` stays last in `cli.py`.** A command
+  defined after it is missing from `python -m micov.cli`, though the
+  `micov` script, which imports the whole module first, still has it.
+  `test_equivalence.TestCliSurface` checks every command is listed.
 - **A stale cached miint passes the capability guard and changes published
   numbers.** See [miint.md](miint.md). The fix is `FORCE INSTALL miint FROM
   'https://ftp.microbio.me/pub/miint'`. `test_plot.KsTwoSampleTests` is what

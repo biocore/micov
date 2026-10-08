@@ -57,6 +57,7 @@ from micov._io import (
     load_sample_groups,
 )
 from micov._miint import connection
+from micov._utils import sql_string
 
 DATA = Path(__file__).parent / "test_data"
 
@@ -79,8 +80,9 @@ class DepthTestCase(unittest.TestCase):
     def layer(self, name, select):
         """Write a layer Parquet derived from `dp_depth.parquet` by `select`."""
         path = f"{self.d}/{name}.parquet"
-        self.con.sql(f"""COPY ({select.format(depth=f"'{DATA}/dp_depth.parquet'")})
-                         TO '{path}' (FORMAT PARQUET)""")
+        depth = sql_string(DATA / "dp_depth.parquet")
+        self.con.sql(f"""COPY ({select.format(depth=depth)})
+                         TO {sql_string(path)} (FORMAT PARQUET)""")
         return path
 
     def resolve(self, depth=None, breadth=None, metadata=None, column="group",
@@ -130,12 +132,16 @@ class IntersectLayersTests(DepthTestCase):
         self.assertEqual(self.genomes(), [("GC", 3000, True), ("GL", 2000, False)])
 
     def test_every_sample_and_genome_left_out_is_named(self):
+        """With the layer it lacks: that is the file to look at."""
         with self.assertLogs("micov", level="WARNING") as logged:
             self.resolve()
-        message = "\n".join(logged.output)
-        for name in ("S6", "S7", "S8", "GX", "GB"):
+        for name, where in (("S6", "breadth layer only"),
+                            ("S7", "depth layer only"), ("S8", "neither layer"),
+                            ("GX", "depth layer only"),
+                            ("GB", "breadth layer only")):
             with self.subTest(left_out=name):
-                self.assertIn(name, message)
+                (line,) = [line for line in logged.output if name in line]
+                self.assertIn(where, line)
 
     def test_unaligned_reads_and_unlisted_samples_are_not_reported(self):
         """`*` is no genome, and S9 was left out by the metadata, not by micov."""
@@ -210,14 +216,16 @@ class IntersectLayersTests(DepthTestCase):
             "x.gff", "##gff-version 3\nGQ\tt\tCDS\t1\t30\t.\t+\t0\tID=q1\n"
         )
         orfs = f"{self.d}/orfs.parquet"
-        self.con.sql(f"COPY (FROM read_gff('{gff}')) TO '{orfs}' (FORMAT PARQUET)")
+        self.con.sql(f"COPY (FROM read_gff({sql_string(gff)})) "
+                     f"TO {sql_string(orfs)} (FORMAT PARQUET)")
         with self.assertRaisesRegex(ValueError, "GQ"):
             self.resolve(orfs=orfs)
 
     def orfs_from_gff(self, lines):
         gff = self.write("o.gff", "##gff-version 3\n" + lines)
         path = f"{self.d}/o.parquet"
-        self.con.sql(f"COPY (FROM read_gff('{gff}')) TO '{path}' (FORMAT PARQUET)")
+        self.con.sql(f"COPY (FROM read_gff({sql_string(gff)})) "
+                     f"TO {sql_string(path)} (FORMAT PARQUET)")
         return path
 
     def test_orfs_outside_their_genome_are_an_error_naming_them(self):
@@ -243,6 +251,57 @@ class IntersectLayersTests(DepthTestCase):
         with self.assertLogs("micov", level="WARNING"):
             self.resolve(orfs=DATA / "dp_orfs.parquet")
         self.assertEqual(len(self.roster()), 5)
+
+    def test_an_orf_ending_where_it_starts_or_before_is_an_error(self):
+        """`read_gff` passes such a line through, and its statistics would be
+        a sum taken backwards, or over no bases: -0.0 or NaN in the table."""
+        for line, why in (
+            ("GL\tt\tCDS\t301\t250\t.\t+\t0\tID=bad\n", "ends before it starts"),
+            ("GL\tt\tCDS\t31\t30\t.\t+\t0\tID=bad\n", "spans no base"),
+            ("GL\tt\tCDS\t0\t30\t.\t+\t0\tID=bad\n", "starts before base 1"),
+        ):
+            with self.subTest(why):
+                orfs = self.orfs_from_gff(
+                    "GL\tt\tCDS\t1\t30\t.\t+\t0\tID=fine\n" + line
+                )
+                with (self.assertLogs("micov", level="WARNING"),
+                      self.assertRaisesRegex(ValueError, r"bad") as raised):
+                    self.resolve(orfs=orfs)
+                self.assertNotIn("fine", str(raised.exception))
+
+    def test_an_orf_without_an_id_on_a_plotted_genome_is_an_error(self):
+        """The ID is the row's key in the per-ORF table."""
+        orfs = self.orfs_from_gff("GL\tt\tCDS\t1\t30\t.\t+\t0\tgene=abc\n")
+        with (self.assertLogs("micov", level="WARNING"),
+              self.assertRaisesRegex(ValueError, "ID.*GL:1")):
+            self.resolve(orfs=orfs)
+
+    def test_an_orf_without_an_id_elsewhere_is_ignored(self):
+        """A database-wide GFF is fine: ORFs on genomes not plotted are not
+        read, so they cannot stop the run."""
+        orfs = self.orfs_from_gff("GL\tt\tCDS\t1\t30\t.\t+\t0\tID=fine\n"
+                                  "GQ\tt\tCDS\t1\t30\t.\t+\t0\tgene=abc\n")
+        with self.assertLogs("micov", level="WARNING"):
+            self.resolve(orfs=orfs)
+        self.assertEqual(len(self.genomes()), 2)
+
+    def test_a_genome_only_unlisted_samples_align_to_is_left_out_and_named(self):
+        """S9 has no metadata, so its reads on GZ add nothing: plotted, GZ
+        would be a flat line that looked like a genome no sample carries."""
+        add_s9 = ("SELECT * FROM read_parquet({path}) UNION ALL "
+                  "SELECT * REPLACE ('GZ' AS reference) "
+                  "FROM read_parquet({path}) WHERE sample_id = 'S9'")
+        depth = self.layer(
+            "d", add_s9.format(path=sql_string(DATA / "dp_depth.parquet")))
+        breadth = self.layer(
+            "b", add_s9.format(path=sql_string(DATA / "dp_breadth.parquet")))
+        features = self.write("f.tsv", "genome_id\tlength\nGC\t3000\nGL\t2000\n"
+                                       "GZ\t3000\n")
+        with self.assertLogs("micov", level="WARNING") as logged:
+            self.resolve(depth=depth, breadth=breadth, features=features)
+        self.assertEqual([row[0] for row in self.genomes()], ["GC", "GL"])
+        (line,) = [line for line in logged.output if "GZ" in line]
+        self.assertIn("from the samples used", line)
 
 
 
@@ -282,9 +341,10 @@ class SyntheticTestCase(unittest.TestCase):
             "INSERT INTO layer VALUES (?, 'G', ?, ?, ?)", reads
         )
         stage_breadth(self.con, "layer")
+        stage_depth_reads(self.con, "layer")
 
     def bins(self, edge_sets, length=8):
-        return genome_statistics(self.con, "layer", "G", length, edge_sets)[0]
+        return genome_statistics(self.con, "G", length, edge_sets)[0]
 
 
 class StageDepthTests(DepthTestCase):
@@ -296,7 +356,8 @@ class StageDepthTests(DepthTestCase):
         secondary alignment is still a read on that genome.
         """
         self.resolve_quietly()
-        stage_depth(self.con, "depth_layer", "GC")
+        stage_depth_reads(self.con, "depth_layer")
+        stage_depth(self.con, "GC")
         rows = self.con.sql(f"FROM {DEPTH_ALIGNMENTS_TABLE}").fetchall()
         positions = [row[1] for row in rows]
         self.assertEqual(positions, sorted(positions))
@@ -313,7 +374,8 @@ class StageDepthTests(DepthTestCase):
     def test_coordinates_are_narrow(self):
         """About 28 bytes a read: a 10 Mb genome's million reads stay small."""
         self.resolve_quietly()
-        stage_depth(self.con, "depth_layer", "GL")
+        stage_depth_reads(self.con, "depth_layer")
+        stage_depth(self.con, "GL")
         self.assertEqual(
             self.con.sql(f"DESCRIBE {DEPTH_ALIGNMENTS_TABLE}").fetchall(),
             [("sample_idx", "INTEGER", "YES", None, None, None),
@@ -334,28 +396,15 @@ class StageDepthReadsTests(DepthTestCase):
         not GX, which is left out."""
         self.resolve_quietly()
         stage_depth_reads(self.con, "depth_layer")
-        rows = self.con.sql(f"""SELECT sample_id, reference, position
+        rows = self.con.sql(f"""SELECT sample_idx, reference, position
                                 FROM {DEPTH_READS_TABLE}
                                 ORDER BY rowid""").fetchall()
         self.assertEqual([row[1:] for row in rows],
                          sorted(row[1:] for row in rows))
         self.assertEqual({row[1] for row in rows}, {"GC", "GL"})
-        self.assertEqual({row[0] for row in rows}, {"S1", "S2", "S3", "S4", "S5"})
-        self.assertNotIn(("S4", "GC", 1500), rows)
-
-    def test_the_same_bins_as_from_the_layer(self):
-        self.resolve_quietly()
-        stage_breadth(self.con, "breadth_layer")
-        stage_depth_reads(self.con, "depth_layer")
-        edges = [display_bin_edges(1, 3001, 7), display_bin_edges(1001, 1501, 1)]
-        for raw, staged in zip(
-            genome_statistics(self.con, "depth_layer", "GC", 3000, edges)[0],
-            genome_statistics(self.con, DEPTH_READS_TABLE, "GC", 3000, edges)[0],
-            strict=True,
-        ):
-            for key in raw:
-                with self.subTest(column=key):
-                    np.testing.assert_array_equal(raw[key], staged[key])
+        # S1 to S5, numbered in sample_id order (`ROSTER_TABLE`)
+        self.assertEqual({row[0] for row in rows}, {0, 1, 2, 3, 4})
+        self.assertNotIn((3, "GC", 1500), rows)
 
 
 class WindowDepthTests(SyntheticTestCase):
@@ -363,7 +412,7 @@ class WindowDepthTests(SyntheticTestCase):
 
     def depth(self, reads, w0=1, w1=9, groups=None, length=8):
         self.build(groups or {"S0": "a"}, reads, length)
-        stage_depth(self.con, "layer", "G")
+        stage_depth(self.con, "G")
         return window_depth(self.con, self.n, w0, w1).tolist()
 
     def test_coordinates_are_half_open(self):
@@ -674,9 +723,8 @@ class FixtureBinsTests(DepthTestCase):
     def bins(self, genome, length, edge_sets):
         self.resolve_quietly()
         stage_breadth(self.con, "breadth_layer")
-        return genome_statistics(
-            self.con, "depth_layer", genome, length, edge_sets
-        )[0]
+        stage_depth_reads(self.con, "depth_layer")
+        return genome_statistics(self.con, genome, length, edge_sets)[0]
 
     def assertBins(self, table, expected):
         for (group, start), values in expected.items():
@@ -879,8 +927,8 @@ class OrfStatisticsTests(SyntheticTestCase):
     then the group's quantiles of those."""
 
     def orf_table(self, spans, length=8, **kwargs):
-        _, table = genome_statistics(
-            self.con, "layer", "G", length,
+        _, table, _ = genome_statistics(
+            self.con, "G", length,
             [display_bin_edges(1, length + 1, length)], synthetic_orfs(spans),
             **kwargs,
         )
@@ -897,6 +945,19 @@ class OrfStatisticsTests(SyntheticTestCase):
             table = self.orf_table([(1, 3), (3, 5)], warn_contrast=True)
         self.assertTrue(np.isnan(table["contrast"]).all())
         self.assertIn("No ORF contrast for G", "\n".join(logged.output))
+
+    def test_each_orfs_contrast_once(self):
+        """The ORF track is coloured by it, one colour an ORF; the table
+        repeats it for every group. b has twice a's depth on o0 and the same
+        on o1 and o2, so both norms are 1."""
+        self.build({"S0": "a", "S1": "b"},
+                   [("S0", 1, 7, "6M"), ("S1", 1, 7, "6M"), ("S1", 1, 3, "2M")])
+        _, table, contrast = genome_statistics(
+            self.con, "G", 8, [display_bin_edges(1, 9, 8)],
+            synthetic_orfs([(1, 3), (3, 5), (5, 7)]),
+        )
+        np.testing.assert_allclose(contrast, [math.log2(2.05 / 1.05), 0, 0])
+        np.testing.assert_array_equal(table["contrast"], np.repeat(contrast, 2))
 
     def row(self, table, orf_id, group):
         (i,) = np.flatnonzero(
@@ -1036,18 +1097,19 @@ class FixtureOrfTests(DepthTestCase):
         with self.assertLogs("micov", level="WARNING"):
             self.resolve(orfs=DATA / "dp_orfs.parquet")
         stage_breadth(self.con, "breadth_layer")
+        stage_depth_reads(self.con, "depth_layer")
         orfs = genome_orfs(self.con, genome)
         if not warn_contrast:
             with self.assertNoLogs("micov"):
-                _, table = genome_statistics(
-                    self.con, "depth_layer", genome, length,
+                _, table, _ = genome_statistics(
+                    self.con, genome, length,
                     [display_bin_edges(1, length + 1, overview_bin_bp(length))],
                     orfs,
                 )
             return table, ""
         with self.assertLogs("micov", level="WARNING") as logged:
-            _, table = genome_statistics(
-                self.con, "depth_layer", genome, length,
+            _, table, _ = genome_statistics(
+                self.con, genome, length,
                 [display_bin_edges(1, length + 1, overview_bin_bp(length))],
                 orfs, warn_contrast=True,
             )
@@ -1084,12 +1146,19 @@ class FixtureOrfTests(DepthTestCase):
         """`--highlight` and `--orf-color-by` match GFF attributes."""
         with self.assertLogs("micov", level="WARNING"):
             self.resolve(orfs=DATA / "dp_orfs.parquet")
-        orfs = genome_orfs(self.con, "GC")
+        orfs = genome_orfs(self.con, "GC", attributes=True)
         self.assertEqual(orfs["attributes"][1],
                          {"ID": "gc_2", "locus_tag": "GC_0002",
                           "product": "5' nucleotidase"})
         self.assertEqual([a.get("gene") for a in orfs["attributes"]],
                          ["dnaA", None, "rrsA", None, "nTest", None, None])
+
+    def test_genome_orfs_leave_attributes_out_unless_asked(self):
+        """A dict per ORF costs 77 ms a genome at 10,000 ORFs, and only
+        `--highlight` and `--orf-color-by` read them."""
+        with self.assertLogs("micov", level="WARNING"):
+            self.resolve(orfs=DATA / "dp_orfs.parquet")
+        self.assertNotIn("attributes", genome_orfs(self.con, "GC"))
 
     def test_gc(self):
         """Columns: depth Q1, median, Q3, mean, prevalence, union breadth.
@@ -1182,8 +1251,8 @@ class OrfWindowInvarianceTests(SyntheticTestCase):
 
     def orf_table(self, width):
         with mock.patch.object(_depth, "WINDOW_CELLS", width * len(self.GROUPS)):
-            _, table = genome_statistics(
-                self.con, "layer", "G", self.LENGTH,
+            _, table, _ = genome_statistics(
+                self.con, "G", self.LENGTH,
                 [display_bin_edges(1, self.LENGTH + 1, 7)],
                 synthetic_orfs(self.spans),
             )

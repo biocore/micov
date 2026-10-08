@@ -31,7 +31,8 @@ GENOMES_TABLE = "depth_genomes"
 DEPTH_ALIGNMENTS_TABLE = "depth_alignments"
 
 #: `stage_depth_reads` leaves every plotted genome's depth-layer reads here,
-#: by genome and position: the layer's columns, coordinates as UINTEGER.
+#: by genome and position: `sample_idx`, `reference`, `position`,
+#: `stop_position` (UINTEGER) and `cigar`.
 DEPTH_READS_TABLE = "depth_reads"
 
 #: `stage_breadth` leaves each sample's merged breadth-layer intervals here:
@@ -68,23 +69,36 @@ def _ids(con, sql):
     return {row[0] for row in con.sql(sql).fetchall()}
 
 
-def _report(ids, what):
-    if ids:
-        ordered = sorted(ids)
-        logger.warning(
-            f"{len(ordered)} {what}, so are left out: "
-            f"{_examples([(i,) for i in ordered], limit=len(ordered))}"
+def _in_both(listed, depth, breadth, what, source, whose=""):
+    """Keep what `source` lists and both layers have, and name what it loses.
+
+    `what` is the noun; `whose`, which alignments count, if not all.
+    """
+    kept = listed & depth & breadth
+    if not kept:
+        raise ValueError(
+            f"No {what} is in the {source} and has alignments{whose} in both "
+            f"the depth and breadth layers ({source} {len(listed)}, depth "
+            f"{len(depth)}, breadth {len(breadth)})."
         )
+    for lost, where in (((listed & depth) - breadth, "in the depth layer only"),
+                        ((listed & breadth) - depth, "in the breadth layer only"),
+                        (listed - depth - breadth, "in neither layer")):
+        if lost:
+            logger.warning(f"{len(lost)} {what}(s) have alignments{whose} "
+                           f"{where}, so are left out: {', '.join(sorted(lost))}")
+    return kept
 
 
 def intersect_layers(con, depth_view, breadth_view, *, orfs):
     """Settle which samples and genomes `depth-plot` uses.
 
     A sample is used if it is in the metadata and has an aligned read in both
-    layers; a genome, if it is in the features and has an aligned read in both
-    layers. Everything the metadata or features name but this leaves out is
-    reported by name. What they do not name -- a sample with no metadata, a
-    genome not asked for -- was left out by the user, and is not.
+    layers; a genome, if it is in the features and a sample used has an
+    aligned read on it in both layers. Everything the metadata or features
+    name but this leaves out is reported by name. What they do not name -- a
+    sample with no metadata, a genome not asked for -- was left out by the
+    user, and is not.
 
     Requires `SAMPLE_GROUPS_TABLE`, `DEPTH_FEATURES_TABLE` and the two layer
     views, and `ORFS_TABLE` if `orfs`. Creates `ROSTER_TABLE` and
@@ -95,42 +109,19 @@ def intersect_layers(con, depth_view, breadth_view, *, orfs):
     ValueError
         If no sample or no genome is left, if more than `MAX_GROUPS` groups
         are, if an aligned read starts beyond its genome's length, or if
-        `orfs` and no ORF is on a genome that is left, or an ORF on one is
-        outside it.
+        `orfs` and no ORF is on a genome that is left, or an ORF on one has no
+        `ID` or does not span a base of it.
     """
-    def aligned(view, column):
-        return _ids(
-            con, f"SELECT DISTINCT {column} FROM {view} WHERE {ALIGNED_ROWS}"
-        )
+    def aligned(view, column, used=""):
+        return _ids(con, f"""SELECT DISTINCT {column} FROM {view} {used}
+                             WHERE {ALIGNED_ROWS}""")
 
-    listed = _ids(con, f"SELECT {COLUMN_SAMPLE_ID} FROM {SAMPLE_GROUPS_TABLE}")
-    depth = aligned(depth_view, COLUMN_SAMPLE_ID)
-    breadth = aligned(breadth_view, COLUMN_SAMPLE_ID)
-    samples = listed & depth & breadth
-    if not samples:
-        raise ValueError(
-            "No sample is in the sample metadata and has alignments in both the "
-            f"depth and breadth layers (metadata {len(listed)}, depth "
-            f"{len(depth)}, breadth {len(breadth)})."
-        )
-    _report((listed & depth) - breadth, "sample(s) are in the depth layer only")
-    _report((listed & breadth) - depth, "sample(s) are in the breadth layer only")
-    _report(listed - depth - breadth, "sample(s) have no alignments in either layer")
-
-    features = _ids(con, f"SELECT {COLUMN_GENOME_ID} FROM {DEPTH_FEATURES_TABLE}")
-    depth = aligned(depth_view, "reference")
-    breadth = aligned(breadth_view, "reference")
-    genomes = features & depth & breadth
-    if not genomes:
-        raise ValueError(
-            "No genome is in the features and has alignments in both the depth "
-            f"and breadth layers (features {len(features)}, depth {len(depth)}, "
-            f"breadth {len(breadth)})."
-        )
-    _report((features & depth) - breadth, "genome(s) are in the depth layer only")
-    _report((features & breadth) - depth, "genome(s) are in the breadth layer only")
-    _report(features - depth - breadth, "genome(s) have no alignments in either layer")
-
+    samples = _in_both(
+        _ids(con, f"SELECT {COLUMN_SAMPLE_ID} FROM {SAMPLE_GROUPS_TABLE}"),
+        aligned(depth_view, COLUMN_SAMPLE_ID),
+        aligned(breadth_view, COLUMN_SAMPLE_ID),
+        "sample", "sample metadata",
+    )
     con.execute(
         f"""CREATE OR REPLACE TABLE {ROSTER_TABLE} AS
             SELECT {COLUMN_SAMPLE_ID},
@@ -141,6 +132,16 @@ def intersect_layers(con, depth_view, breadth_view, *, orfs):
             WHERE list_contains(?, {COLUMN_SAMPLE_ID})""",
         [sorted(samples)],
     )
+
+    # only the samples used: another's reads would make a genome flat zeros
+    used = f"SEMI JOIN {ROSTER_TABLE} USING ({COLUMN_SAMPLE_ID})"
+    genomes = _in_both(
+        _ids(con, f"SELECT {COLUMN_GENOME_ID} FROM {DEPTH_FEATURES_TABLE}"),
+        aligned(depth_view, "reference", used),
+        aligned(breadth_view, "reference", used),
+        "genome", "features", whose=" from the samples used",
+    )
+
     con.execute(
         f"""CREATE OR REPLACE TABLE {GENOMES_TABLE} AS
             SELECT DISTINCT {COLUMN_GENOME_ID}, {COLUMN_LENGTH}, is_circular
@@ -184,6 +185,18 @@ def intersect_layers(con, depth_view, breadth_view, *, orfs):
                 "No ORF is on a genome being plotted; the ORFs' seqids are "
                 f"{_examples(seqids)}. A seqid must equal the genome_id."
             )
+        rows = con.sql(f"""SELECT o.type || ' at ' || o.{COLUMN_GENOME_ID} || ':'
+                                      || o.{COLUMN_START}
+                           FROM {ORFS_TABLE} o
+                               SEMI JOIN {GENOMES_TABLE} g USING ({COLUMN_GENOME_ID})
+                           WHERE o.orf_id IS NULL
+                           ORDER BY o.{COLUMN_GENOME_ID}, o.{COLUMN_START}
+                        """).fetchall()
+        if rows:
+            raise ValueError(
+                f"{len(rows)} ORF(s) on the genomes plotted have no ID attribute, "
+                f"which keys the per-ORF table: {_examples(rows)}"
+            )
         # GFF3 writes an ORF across a circular genome's origin with an end
         # past the length; `orf_segments` splits it there
         rows = con.sql(f"""SELECT o.{COLUMN_GENOME_ID} || ':' || o.orf_id
@@ -192,7 +205,9 @@ def intersect_layers(con, depth_view, breadth_view, *, orfs):
                                       || g.{COLUMN_LENGTH}
                            FROM {ORFS_TABLE} o
                                JOIN {GENOMES_TABLE} g USING ({COLUMN_GENOME_ID})
-                           WHERE o.{COLUMN_START} > g.{COLUMN_LENGTH}
+                           WHERE o.{COLUMN_START} < 1
+                               OR o.{COLUMN_STOP} <= o.{COLUMN_START}
+                               OR o.{COLUMN_START} > g.{COLUMN_LENGTH}
                                OR o.{COLUMN_STOP} - o.{COLUMN_START}
                                    > g.{COLUMN_LENGTH}
                                OR (NOT g.is_circular
@@ -200,56 +215,51 @@ def intersect_layers(con, depth_view, breadth_view, *, orfs):
                            ORDER BY 1""").fetchall()
         if rows:
             raise ValueError(
-                "An ORF must lie within its genome; only a circular genome's "
-                "may run past the end, across the origin. These do not: "
+                "An ORF must span at least one base of its genome, from base 1 "
+                "on and ending after it starts; only a circular genome's may "
+                "run past the end, across the origin. These do not: "
                 f"{_examples(rows)}"
             )
 
 
-def stage_depth(con, depth_view, genome_id):
-    """Copy one genome's aligned depth-layer reads into a small sorted table.
-
-    Every window is a query over this table, so it holds only what can add
-    depth -- aligned reads of the samples being plotted -- in about 28 bytes a
-    read, sorted by position so each window's range filter skips most of it.
-
-    Requires `ROSTER_TABLE`. Creates `DEPTH_ALIGNMENTS_TABLE`.
-    """
-    con.execute(
-        f"""CREATE OR REPLACE TEMP TABLE {DEPTH_ALIGNMENTS_TABLE} AS
-            SELECT r.sample_idx,
-                   a.position::UINTEGER AS position,
-                   a.stop_position::UINTEGER AS stop_position,
-                   a.cigar
-            FROM {depth_view} a JOIN {ROSTER_TABLE} r USING ({COLUMN_SAMPLE_ID})
-            WHERE a.reference = ? AND {ALIGNED_ROWS}
-            ORDER BY a.position""",
-        [genome_id],
-    )
-
-
 def stage_depth_reads(con, depth_view):
-    """Copy the plotted samples' aligned reads on the plotted genomes, once.
+    """Copy what can add depth, once: the samples' aligned reads on the genomes.
 
-    Stored by genome and position, so each genome's `stage_depth` from this
-    table reads only that genome's row groups. Read from the layer itself,
-    every genome scans the whole input: at 20M reads that was 42 ms a genome
-    against 4 ms from here, and grew with the input.
+    In about 28 bytes a read, stored by genome and position, so each genome's
+    `stage_depth` reads only that genome's row groups. Read from the layer
+    itself, every genome scans the whole input: at 20M reads that was 42 ms a
+    genome against 4 ms from here, and grew with the input.
 
-    Requires `ROSTER_TABLE` and `GENOMES_TABLE`. Creates `DEPTH_READS_TABLE`,
-    which stands in for the layer as `genome_statistics`' `depth_view`.
+    Requires `ROSTER_TABLE` and `GENOMES_TABLE`. Creates `DEPTH_READS_TABLE`.
     """
     con.sql(f"""CREATE OR REPLACE TEMP TABLE {DEPTH_READS_TABLE} AS
-                SELECT a.{COLUMN_SAMPLE_ID}, a.reference,
+                SELECT r.sample_idx, a.reference,
                        a.position::UINTEGER AS position,
                        a.stop_position::UINTEGER AS stop_position,
                        a.cigar
                 FROM {depth_view} a
-                    SEMI JOIN {ROSTER_TABLE} r USING ({COLUMN_SAMPLE_ID})
+                    JOIN {ROSTER_TABLE} r USING ({COLUMN_SAMPLE_ID})
                     SEMI JOIN {GENOMES_TABLE} g
                         ON a.reference = g.{COLUMN_GENOME_ID}
                 WHERE {ALIGNED_ROWS}
                 ORDER BY a.reference, a.position""")
+
+
+def stage_depth(con, genome_id):
+    """Copy one genome's staged reads into a small table, by position.
+
+    Every window is a query over this table, sorted so each window's range
+    filter skips most of it.
+
+    Requires `DEPTH_READS_TABLE`. Creates `DEPTH_ALIGNMENTS_TABLE`.
+    """
+    con.execute(
+        f"""CREATE OR REPLACE TEMP TABLE {DEPTH_ALIGNMENTS_TABLE} AS
+            SELECT sample_idx, position, stop_position, cigar
+            FROM {DEPTH_READS_TABLE} WHERE reference = ?
+            ORDER BY position""",
+        [genome_id],
+    )
 
 
 def window_depth(con, n, w0, w1):
@@ -366,7 +376,7 @@ def overview_bin_bp(length):
     return -(-overview_row_bp(length) // OVERVIEW_ROW_BINS)
 
 
-def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
+def genome_statistics(con, genome_id, length, edge_sets, orfs=None,
                       warn_contrast=False):
     """Bin one genome's per-base group statistics, in one pass of windows.
 
@@ -382,8 +392,8 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
     the typical sample's depth, where the bins' median is the typical base's
     -- and the mean, prevalence and union breadth over the ORF's bases.
 
-    Requires `ROSTER_TABLE` and `BREADTH_INTERVALS_TABLE`. Replaces
-    `DEPTH_ALIGNMENTS_TABLE`.
+    Requires `ROSTER_TABLE`, `DEPTH_READS_TABLE` and
+    `BREADTH_INTERVALS_TABLE`. Replaces `DEPTH_ALIGNMENTS_TABLE`.
 
     Parameters
     ----------
@@ -405,6 +415,9 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
     orf_table : dict or None
         With `orfs`, a row per ORF and group (sorted): the columns of
         `_io.write_orf_table`, each a numpy array.
+    contrast : np.ndarray or None
+        With `orfs`, each ORF's contrast (`orf_contrast`), once: the table
+        repeats it for each group.
     """
     roster = con.sql(f"""SELECT group_name FROM {ROSTER_TABLE}
                          ORDER BY sample_idx""").fetchnumpy()["group_name"]
@@ -419,7 +432,7 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
     ends = [[np.sort(intervals[column][interval_group == g].astype(np.int64))
              for column in (COLUMN_START, COLUMN_STOP)]
             for g in range(len(groups))]
-    stage_depth(con, depth_view, genome_id)
+    stage_depth(con, genome_id)
 
     spans = [(edges[:-1], edges[1:]) for edges in edge_sets]
     if orfs is not None:
@@ -438,9 +451,10 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
         if orfs is not None:
             _add_span_sums(sample_depth, depth, *segments, w0, w1)
         for g, rows in enumerate(members):
+            own = depth[rows]
             covering = coverage_counts(*ends[g], w0, w1)
-            per_base = np.vstack([quartiles_x4(depth[rows]),
-                                  depth[rows].sum(axis=0, dtype=np.int64),
+            per_base = np.vstack([quartiles_x4(own),
+                                  own.sum(axis=0, dtype=np.int64),
                                   covering, covering > 0])
             for (starts, stops), total in zip(spans, totals, strict=True):
                 _add_span_sums(total[g], per_base, starts, stops, w0, w1)
@@ -461,7 +475,7 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
             "union": (total[:, 5] > 0).ravel(),
         })
     if orfs is None:
-        return tables, None
+        return tables, None, None
 
     def per_orf(sums):
         """Add each ORF's segments up: its last axis becomes ORFs."""
@@ -483,6 +497,7 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
         "prevalence": breadth[:, 4] / (sizes * bp),
         "union_breadth": breadth[:, 5] / bp,
     }
+    contrast = orf_contrast(quartiles[:, 1], groups, genome_id, warn_contrast)
     # ORF by ORF, the groups within each: transpose (group, ORF) arrays
     orf_table = {
         COLUMN_GENOME_ID: np.full(len(bp) * len(groups), genome_id, dtype=object),
@@ -492,37 +507,47 @@ def genome_statistics(con, depth_view, genome_id, length, edge_sets, orfs=None,
         "group": np.tile(groups, len(bp)),
         "n_samples": np.tile(sizes[:, 0], len(bp)),
         **{key: values.T.ravel() for key, values in columns.items()},
-        "contrast": np.repeat(
-            orf_contrast(quartiles[:, 1], groups, genome_id, warn_contrast),
-            len(groups),
-        ),
+        "contrast": np.repeat(contrast, len(groups)),
     }
-    return tables, orf_table
+    return tables, orf_table, contrast
 
 
 def _add_span_sums(total, per_base, starts, stops, w0, w1):
     """Add `per_base`'s rows, summed over each span's part of [w0, w1).
 
     `total` is rows x spans. Only the spans the window overlaps are touched,
-    so a window costs the same however many spans the genome has.
+    so a window costs the same however many spans the genome has. The bases
+    are summed between the spans' ends only, then those sums accumulated:
+    a prefix sum of every base, for every sample, was most of the time ORFs
+    add to a run.
     """
     here = np.flatnonzero((starts < w1) & (stops > w0))
-    prefix = np.zeros((len(per_base), w1 - w0 + 1), np.int64)
-    np.cumsum(per_base, axis=1, out=prefix[:, 1:])
-    total[:, here] += (prefix[:, np.clip(stops[here], w0, w1) - w0]
-                       - prefix[:, np.clip(starts[here], w0, w1) - w0])
+    if not len(here):
+        return
+    a = np.clip(starts[here], w0, w1) - w0
+    b = np.clip(stops[here], w0, w1) - w0
+    cuts = np.unique(np.concatenate([a, b]))
+    # reduceat sums from each cut to the next, and the last to the end
+    pieces = np.add.reduceat(per_base, cuts[:-1], axis=1, dtype=np.int64)
+    pieces[:, -1] -= per_base[:, cuts[-1]:].sum(axis=1, dtype=np.int64)
+    prefix = np.zeros((len(per_base), len(cuts)), np.int64)
+    np.cumsum(pieces, axis=1, out=prefix[:, 1:])
+    total[:, here] += (prefix[:, np.searchsorted(cuts, b)]
+                       - prefix[:, np.searchsorted(cuts, a)])
 
 
-def genome_orfs(con, genome_id):
+def genome_orfs(con, genome_id, attributes=False):
     """Return one genome's ORFs, by position, as numpy arrays.
 
-    The columns are `orf_id`, `label`, `type`, `start`, `stop`, `strand`, and
-    `attributes`, a dict per ORF, which highlights and colours match.
-    Requires `ORFS_TABLE`.
+    The columns are `orf_id`, `label`, `type`, `start`, `stop` and `strand`,
+    and with `attributes` the `attributes`, a dict per ORF, which highlights
+    and colours match. Only when asked: the dicts cost about 75 ms a genome
+    of 10,000 ORFs. Requires `ORFS_TABLE`.
     """
+    extra = ", attributes" if attributes else ""
     return con.execute(
-        f"""SELECT orf_id, label, type, {COLUMN_START}, {COLUMN_STOP}, strand,
-                   attributes
+        f"""SELECT orf_id, label, type, {COLUMN_START}, {COLUMN_STOP},
+                   strand{extra}
             FROM {ORFS_TABLE} WHERE {COLUMN_GENOME_ID} = ?
             ORDER BY {COLUMN_START}, {COLUMN_STOP}, orf_id, type""",
         [genome_id],

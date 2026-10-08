@@ -7,6 +7,7 @@ half-open coordinates less one.
 """
 
 import re
+from collections import Counter
 
 import matplotlib as mpl
 import numpy as np
@@ -17,8 +18,8 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.scale import SymmetricalLogTransform
 
+from ._cov import mask_table
 from ._depth import (
-    DEPTH_READS_TABLE,
     GENOMES_TABLE,
     ROSTER_TABLE,
     detail_bin_bp,
@@ -37,6 +38,7 @@ from ._io import (
     ORFS_TABLE,
     _examples,
     add_orf_table,
+    start_orf_table,
     target_names_query,
     write_orf_table,
 )
@@ -156,10 +158,12 @@ def symlog_ticks(ymax):
     return ticks
 
 
-def depth_ymax(tables):
+def depth_ymax(table):
     """Return the depth axis's top: the highest Q3 or mean, at least 2."""
-    return max([DEPTH_LINTHRESH] + [float(max(t["q3"].max(), t["mean"].max()))
-                                    for t in tables if len(t["q3"])])
+    if not len(table["q3"]):
+        return DEPTH_LINTHRESH
+    return max(DEPTH_LINTHRESH,
+               float(max(table["q3"].max(), table["mean"].max())))
 
 
 def true_runs(mask):
@@ -218,18 +222,21 @@ def orf_value(orfs, key):
                     dtype=object)
 
 
-def highlight_mask(orfs, highlights):
-    """Which ORFs any of the parsed `highlights` matches."""
-    mask = np.zeros(len(orfs["start"]), bool)
-    for key, operator, value in highlights:
+def highlight_masks(orfs, highlights):
+    """Which ORFs each of the parsed `highlights` matches, a row each.
+
+    An ORF is highlighted if any matches (``.any(axis=0)``); an expression
+    that matches none is told of (``.any(axis=1)``).
+    """
+    masks = np.zeros((len(highlights), len(orfs["start"])), bool)
+    for row, (key, operator, value) in zip(masks, highlights, strict=True):
         if operator == "=":
-            matches = [v == value for v in orf_value(orfs, key)]
+            row[:] = [v == value for v in orf_value(orfs, key)]
         else:
             pattern = re.compile(value)
-            matches = [v is not None and pattern.search(v) is not None
-                       for v in orf_value(orfs, key)]
-        mask |= np.array(matches, bool)
-    return mask
+            row[:] = [v is not None and pattern.search(v) is not None
+                      for v in orf_value(orfs, key)]
+    return masks
 
 
 def orf_categories(values):
@@ -244,8 +251,7 @@ def orf_categories(values):
     top : list
         The categories, commonest first.
     """
-    present = [v for v in values if v]
-    counts = {v: present.count(v) for v in set(present)}
+    counts = Counter(v for v in values if v)
     top = sorted(counts, key=lambda v: (-counts[v], v))[:len(ORF_CATEGORY_COLORS)]
     labels = np.array([v if v in top else ORF_OTHER_LABEL for v in values],
                       dtype=object)
@@ -271,14 +277,16 @@ def orf_polygons(starts, stops, strands, head_bp):
     """Vertices of each ORF's shape, in x = position - 1.
 
     A stranded ORF is an arrow pointing along its strand, its head `head_bp`
-    long but at most half the ORF (0 draws a box); an unstranded one is a box
-    across the backbone.
+    long -- one length for all, or one each -- but at most half the ORF (0
+    draws a box); an unstranded one is a box across the backbone.
     """
     y0, y1 = ORF_Y
     mid = (y0 + y1) / 2
     shapes = []
-    for start, stop, strand in zip(starts - 1, stops - 1, strands, strict=True):
-        head = min(head_bp, (stop - start) / 2)
+    heads = np.broadcast_to(head_bp, len(starts))
+    for start, stop, strand, head in zip(starts - 1, stops - 1, strands, heads,
+                                         strict=True):
+        head = min(head, (stop - start) / 2)
         if strand == "+":
             shape = [[start, y0], [stop - head, y0], [stop, mid],
                      [stop - head, y1], [start, y1]]
@@ -316,18 +324,37 @@ def plot_path(output, target_name, genome, variable, suffix=""):
     return f"{output}.{target_name}.{genome}.{variable}.{tag}.png"
 
 
+def check_orf_options(orfs, highlights, color_by, contrast):
+    """Refuse ORF options that cannot go together, whatever the data.
+
+    The command refuses these as usage errors, before reading a file.
+
+    Raises
+    ------
+    ValueError
+        If `highlights`, `color_by` or `contrast` are given without `orfs`,
+        or both colourings are.
+    """
+    if not orfs:
+        for name, given in (("--highlight", highlights),
+                            ("--orf-color-by", color_by),
+                            ("--orf-contrast", contrast)):
+            if given:
+                raise ValueError(f"{name} needs --orfs, the ORFs it marks.")
+    if color_by is not None and contrast:
+        raise ValueError("--orf-color-by and --orf-contrast both colour the "
+                         "ORFs; choose one.")
+
+
 def check_orf_mode(n_groups, color_by, contrast):
     """Refuse an ORF colouring the groups cannot support.
 
     Raises
     ------
     ValueError
-        If both colourings are asked for, if `color_by` with three or more
-        groups, or `contrast` without exactly two.
+        If `color_by` with three or more groups, or `contrast` without
+        exactly two.
     """
-    if color_by is not None and contrast:
-        raise ValueError("--orf-color-by and --orf-contrast both colour the "
-                         "ORFs; choose one.")
     if color_by is not None and n_groups > 2:
         raise ValueError(
             f"--orf-color-by needs at most two groups, and there are {n_groups}: "
@@ -399,11 +426,11 @@ def linear_plot(path, *, title, length, sizes, overview, regions=(), track=None)
     """
     groups = sorted(sizes)
     _check_bins(overview, groups)
-    ymax = depth_ymax([overview])
+    ymax = depth_ymax(overview)
     width = overview_row_bp(length)
     rows = -(-length // width)
     with mpl.rc_context(STYLE):
-        heights = [_panel_height(groups, track)] * rows
+        heights = [sum(_panel_ratios(groups, track))] * rows
         fig = Figure(figsize=(FIGURE_WIDTH, sum(heights) + 0.45 * rows))
         grid = fig.add_gridspec(rows, 1, height_ratios=heights, hspace=0.35)
         for row in range(rows):
@@ -435,10 +462,10 @@ def detail_plot(path, *, title, length, sizes, table, track=None):
     _check_bins(table, groups)
     x0, x1 = table["bin_start"][0] - 1, table["bin_stop"][-1] - 1
     with mpl.rc_context(STYLE):
-        fig = Figure(figsize=(FIGURE_WIDTH, _panel_height(groups, track)))
+        fig = Figure(figsize=(FIGURE_WIDTH, sum(_panel_ratios(groups, track))))
         grid = fig.add_gridspec(1, 1)
         panel = _draw_panel(fig, grid[0], 0, groups, sizes, table, x0, x1,
-                            length, depth_ymax([table]), track, legend=True)
+                            length, depth_ymax(table), track, legend=True)
         panel[0].set_title(title, loc="left", color=INK)
         fig.savefig(path, dpi=DPI, bbox_inches="tight")
 
@@ -461,39 +488,42 @@ def _check_bins(table, groups):
         edges = starts, stops
 
 
-def _panel_height(groups, track):
-    """Inches for one row: depth, the ORF track, then breadth."""
-    lanes = len(groups) > OVERLAY_MAX_GROUPS
+def _panel_ratios(groups, track):
+    """Inches for each of one row's axes, top to bottom.
+
+    Depth (one axes, or a lane per group past `OVERLAY_MAX_GROUPS`), the ORF
+    track, taller with labels, then breadth likewise.
+    """
+    lanes = len(groups) if len(groups) > OVERLAY_MAX_GROUPS else 0
+    depth, breadth = ([0.9] * lanes, [0.45] * lanes) if lanes else ([2.0], [1.0])
     labels = track is not None and track["highlight"].any()
-    depth, breadth = (0.9 * len(groups), 0.45 * len(groups)) if lanes else (2.0, 1.0)
-    return depth + (1.6 if labels else 0.55) + breadth
+    return [*depth, 1.6 if labels else 0.55, *breadth]
+
+
+def _group_bins(table, group):
+    """One group's bins, and their edges in x."""
+    own = mask_table(table, table["group"] == group)
+    return own, np.append(own["bin_start"], own["bin_stop"][-1:]) - 1
 
 
 def _draw_panel(fig, slot, row, groups, sizes, table, x0, x1, length, ymax,
                 track, legend):
     """Draw one row, [x0, x1), into `slot`; return its axes, top to bottom."""
     lanes = len(groups) > OVERLAY_MAX_GROUPS
-    names = groups if lanes else [None]
     labels = track is not None and track["highlight"].any()
-    lane_height = (0.9, 0.45) if lanes else (2.0, 1.0)
-    ratios = ([lane_height[0]] * len(names) + [1.6 if labels else 0.55]
-              + [lane_height[1]] * len(names))
-    grid = slot.subgridspec(len(ratios), 1, height_ratios=ratios,
+    n = len(groups) if lanes else 1
+    grid = slot.subgridspec(n * 2 + 1, 1, height_ratios=_panel_ratios(groups, track),
                             hspace=0.3 if lanes else 0.0)
     axes = [fig.add_subplot(cell) for cell in grid]
     for ax in axes[1:]:
         ax.sharex(axes[0])
-    depth_axes = axes[:len(names)]
-    orf_ax = axes[len(names)]
-    breadth_axes = axes[len(names) + 1:]
+    depth_axes, orf_ax, breadth_axes = axes[:n], axes[n], axes[n + 1:]
     suffix = [""] if not lanes else [f":{g}" for g in groups]
 
-    keep = (table["bin_start"] - 1 < x1) & (table["bin_stop"] - 1 > x0)
-    shown = {key: values[keep] for key, values in table.items()}
+    shown = mask_table(table, (table["bin_start"] - 1 < x1)
+                       & (table["bin_stop"] - 1 > x0))
     for g, group in enumerate(groups):
-        own = {key: values[shown["group"] == group]
-               for key, values in shown.items()}
-        edges = np.append(own["bin_start"], own["bin_stop"][-1:]) - 1
+        own, edges = _group_bins(shown, group)
         lane = g if lanes else 0
         _draw_depth(depth_axes[lane], own, edges, group, g)
         _draw_breadth(breadth_axes[lane], own, edges, group, g,
@@ -540,16 +570,16 @@ def _draw_panel(fig, slot, row, groups, sizes, table, x0, x1, length, ymax,
     axes[-1].xaxis.set_major_formatter(bp_formatter(x1 - x0))
     axes[0].set_xlim(x0, x1)
 
+    orf_ax.axhline(0, color=INK, lw=1.5, zorder=3, gid="backbone")
+    orf_ax.set_ylim(*((-2.4, 2.4) if labels else (-0.9, 0.9)))
     if track is not None:
         bp_per_pt = (x1 - x0) / (orf_ax.get_position().width
                                  * fig.get_figwidth() * 72)
-        _draw_orfs(orf_ax, track, x0, x1, length, bp_per_pt, labels)
-        _draw_highlights(depth_axes + breadth_axes, track, x0, x1, bp_per_pt)
+        _draw_orfs(orf_ax, track, x0, x1, length, bp_per_pt)
+        _draw_highlights(depth_axes + breadth_axes, track, x0, x1, length,
+                         bp_per_pt)
         if legend:
             _draw_orf_legend(orf_ax, track, groups)
-    else:
-        orf_ax.axhline(0, color=INK, lw=1.5, zorder=3, gid="backbone")
-        orf_ax.set_ylim(-0.9, 0.9)
     return axes
 
 
@@ -583,33 +613,24 @@ def _draw_breadth(ax, own, edges, group, index, slot, slots):
     ax.set_ylim(1.04, -slots * gap - 0.03)
 
 
-def _draw_orfs(ax, track, x0, x1, length, bp_per_pt, labels):
-    """Draw the genome line, its ORFs, and the highlighted ORFs' labels.
+def _draw_orfs(ax, track, x0, x1, length, bp_per_pt):
+    """Draw the ORFs, and the highlighted ORFs' labels.
 
     An ORF across a circular genome's origin is drawn as its two parts,
     boxes rather than arrows, since neither part holds both ends.
     """
-    ax.axhline(0, color=INK, lw=1.5, zorder=3, gid="backbone")
-    head = 4 * bp_per_pt if x1 - x0 <= ARROW_MAX_BP else 0
     index, starts, stops = orf_segments(track["start"], track["stop"], length)
     split = np.bincount(index, minlength=len(track["start"]))[index] > 1
+    heads = np.where(split, 0, 4 * bp_per_pt if x1 - x0 <= ARROW_MAX_BP else 0)
+    strands = track["strand"][index]
     shown = (starts - 1 < x1) & (stops - 1 > x0)
     for strand in ("+", "-", "."):
-        on = shown & (track["strand"][index] == strand)
+        on = shown & (strands == strand)
         if not on.any():
             continue
-        shapes = (orf_polygons(starts[on & ~split], stops[on & ~split],
-                               track["strand"][index][on & ~split], head)
-                  + orf_polygons(starts[on & split], stops[on & split],
-                                 track["strand"][index][on & split], 0))
-        order = np.concatenate([np.flatnonzero(on & ~split),
-                                np.flatnonzero(on & split)])
-        ax.add_collection(_orf_collection(shapes, track["fill"][index][order],
-                                          track["outline"][index][order],
-                                          strand))
-    ax.set_ylim(-2.4, 2.4) if labels else ax.set_ylim(-0.9, 0.9)
-    if not labels:
-        return
+        shapes = orf_polygons(starts[on], stops[on], strands[on], heads[on])
+        ax.add_collection(_orf_collection(shapes, track["fill"][index[on]],
+                                          track["outline"][index[on]], strand))
     on = track["highlight"] & (track["start"] - 1 < x1) & (track["stop"] - 1 > x0)
     names = track["label"][on]
     centers = (np.maximum(track["start"][on] - 1, x0)
@@ -630,9 +651,13 @@ def _draw_orfs(ax, track, x0, x1, length, bp_per_pt, labels):
                     arrowprops={"arrowstyle": "-", "lw": 0.4, "color": MUTED,
                                 "shrinkA": 0, "shrinkB": 0},
                     gid="label")
-    dropped = int((lanes < 0).sum())
+    _count_unlabelled(ax, int((lanes < 0).sum()), 0.0)
+
+
+def _count_unlabelled(ax, dropped, y):
+    """Say how many highlighted ORFs have no label, at the right, at `y`."""
     if dropped:
-        ax.text(1.0, 0.0, f"+{dropped} unlabelled", transform=ax.transAxes,
+        ax.text(1.0, y, f"+{dropped} unlabelled", transform=ax.transAxes,
                 ha="right", va="top", fontsize=LABEL_FONTSIZE, color=MUTED,
                 gid="unlabelled")
 
@@ -644,16 +669,26 @@ def _orf_collection(shapes, fill, outline, strand):
                           linewidths=0.8, zorder=2, gid=f"orfs:{strand}")
 
 
-def _draw_highlights(axes, track, x0, x1, bp_per_pt):
-    """Shade depth and breadth faintly under each highlighted ORF."""
-    on = track["highlight"]
-    starts, stops = merge_spans(track["start"][on] - 1, track["stop"][on] - 1,
-                                gap=bp_per_pt)
+def _draw_highlights(axes, track, x0, x1, length, bp_per_pt):
+    """Shade depth and breadth faintly under each highlighted ORF.
+
+    Under both parts of one across a circular genome's origin, as its shape
+    is drawn.
+    """
+    index, starts, stops = orf_segments(track["start"], track["stop"], length)
+    on = track["highlight"][index]
+    starts, stops = merge_spans(starts[on] - 1, stops[on] - 1, gap=bp_per_pt)
     starts, stops = clip_spans(starts, stops, x0, x1)
+    if not len(starts):
+        return
+    # one artist per axes: one per band was 0.7 s for 800 of them
+    bands = [[(a, 0), (b, 0), (b, 1), (a, 1)]
+             for a, b in zip(starts, stops, strict=True)]
     for ax in axes:
-        for start, stop in zip(starts, stops, strict=True):
-            ax.axvspan(start, stop, color=INK, alpha=0.06, lw=0, zorder=0,
-                       gid="highlight")
+        ax.add_collection(PolyCollection(bands, facecolors=INK, alpha=0.06, lw=0,
+                                         zorder=0, gid="highlight",
+                                         transform=ax.get_xaxis_transform()),
+                          autolim=False)
 
 
 def _draw_orf_legend(ax, track, groups, loc="center left", anchor=(1.005, 0.5),
@@ -910,7 +945,7 @@ def circular_plot(path, *, title, length, sizes, overview, track=None):
             f"{len(groups)}; the linear plot gives each a lane."
         )
     _check_bins(overview, groups)
-    ymax = depth_ymax([overview])
+    ymax = depth_ymax(overview)
     radii = circular_layout(len(groups))
     with mpl.rc_context(STYLE):
         fig = Figure(figsize=(RING_SIZE, RING_SIZE))
@@ -925,9 +960,7 @@ def circular_plot(path, *, title, length, sizes, overview, track=None):
 
         _draw_ring_scales(ax, length, ymax, radii)
         for g, group in enumerate(groups):
-            own = {key: values[overview["group"] == group]
-                   for key, values in overview.items()}
-            edges = np.append(own["bin_start"], own["bin_stop"][-1:]) - 1
+            own, edges = _group_bins(overview, group)
             _draw_ring_depth(ax, own, edges, length, group, g, ymax, radii)
             _draw_ring_breadth(ax, own, edges, length, group, g, radii)
         _ring(ax, radii["backbone"], color=INK, lw=1.5, zorder=3, gid="backbone")
@@ -1025,10 +1058,16 @@ def _draw_ring_orfs(ax, track, length, bp_per_pt, radii):
         on = track["strand"] == strand
         if not on.any():
             continue
-        shapes = [np.column_stack(densify(theta(shape[:, 0], length),
-                                          radii["backbone"] + scale * shape[:, 1]))
-                  for shape in orf_polygons(track["start"][on], track["stop"][on],
-                                            track["strand"][on], head)]
+        # one strand's shapes have the same corners, so bend them all at once
+        corners = np.array(orf_polygons(track["start"][on], track["stop"][on],
+                                        track["strand"][on], head))
+        angles = theta(corners[..., 0], length)
+        radius = radii["backbone"] + scale * corners[..., 1]
+        shapes = list(np.stack([angles, radius], axis=-1))
+        # only an ORF longer than `MAX_ARC` needs its arcs traced
+        long = np.abs(np.diff(angles, axis=1)).max(axis=1) > MAX_ARC
+        for i in np.flatnonzero(long):
+            shapes[i] = np.column_stack(densify(angles[i], radius[i]))
         ax.add_collection(_orf_collection(shapes, track["fill"][on],
                                           track["outline"][on], strand))
 
@@ -1071,11 +1110,7 @@ def _draw_ring_labels(ax, track, length, radii, pt_per_r):
         ax.text(angle, radii["labels"], name, rotation=rotation, ha=ha,
                 va="center", rotation_mode="anchor", fontsize=LABEL_FONTSIZE,
                 color=INK, gid="label")
-    dropped = int(np.isnan(placed).sum())
-    if dropped:
-        ax.text(1.0, 1.0, f"+{dropped} unlabelled", transform=ax.transAxes,
-                ha="right", va="top", fontsize=LABEL_FONTSIZE, color=MUTED,
-                gid="unlabelled")
+    _count_unlabelled(ax, int(np.isnan(placed).sum()), 1.0)
 
 
 def depth_plots(con, output, variable, *, depth_view, breadth_view, orfs=False,
@@ -1083,10 +1118,11 @@ def depth_plots(con, output, variable, *, depth_view, breadth_view, orfs=False,
     """Draw every genome `depth-plot` settles on, and write the per-ORF table.
 
     Everything that can be refused is refused before the first genome is
-    computed: the inputs (`_depth.intersect_layers`) and the ORF colouring
-    (`check_orf_mode`). Each genome is then computed once, and drawn from its
-    own tables only: its overview, a ring if it is circular and there are at
-    most `OVERLAY_MAX_GROUPS` groups, and a detail panel per region.
+    computed: the ORF options (`check_orf_options`), the inputs
+    (`_depth.intersect_layers`) and the ORF colouring (`check_orf_mode`).
+    Each genome is then computed once, and drawn from its own tables only:
+    its overview, a ring if it is circular and there are at most
+    `OVERLAY_MAX_GROUPS` groups, and a detail panel per region.
 
     Requires the readers' tables (`_io.load_alignment_layer` for both views,
     `load_sample_groups`, `load_depth_features`, and `load_orfs` if `orfs`).
@@ -1106,6 +1142,7 @@ def depth_plots(con, output, variable, *, depth_view, breadth_view, orfs=False,
     contrast : bool
         `--orf-contrast`.
     """
+    check_orf_options(orfs, highlights, color_by, contrast)
     intersect_layers(con, depth_view, breadth_view, orfs=orfs)
     sizes = dict(con.sql(f"""SELECT group_name, count(*)::INTEGER
                              FROM {ROSTER_TABLE} GROUP BY 1""").fetchall())
@@ -1137,6 +1174,8 @@ def depth_plots(con, output, variable, *, depth_view, breadth_view, orfs=False,
 
     stage_breadth(con, breadth_view)
     stage_depth_reads(con, depth_view)
+    if orfs:
+        start_orf_table(con)
     matched = np.zeros(len(parsed), bool)
     coloured = False
     for genome, length, is_circular in genomes:
@@ -1148,19 +1187,17 @@ def depth_plots(con, output, variable, *, depth_view, breadth_view, orfs=False,
         edge_sets = [display_bin_edges(1, length + 1, overview_bin_bp(length))]
         edge_sets += [display_bin_edges(a, b, detail_bin_bp(a, b))
                       for a, b in regions]
-        own_orfs = genome_orfs(con, genome) if orfs else None
-        bins, orf_table = genome_statistics(con, DEPTH_READS_TABLE, genome, length,
-                                            edge_sets, own_orfs,
-                                            warn_contrast=contrast)
+        own_orfs = (genome_orfs(con, genome, attributes=bool(parsed or color_by))
+                    if orfs else None)
+        bins, orf_table, orf_contrast = genome_statistics(
+            con, genome, length, edge_sets, own_orfs, warn_contrast=contrast)
         track = None
         if orfs:
-            masks = [highlight_mask(own_orfs, [h]) for h in parsed]
-            matched |= np.array([mask.any() for mask in masks], bool)
-            highlight = np.logical_or.reduce(
-                [np.zeros(len(own_orfs["start"]), bool), *masks])
+            masks = highlight_masks(own_orfs, parsed)
+            matched |= masks.any(axis=1)
             track = orf_track(
-                own_orfs, highlight, color_by=color_by,
-                contrast=orf_table["contrast"][::len(sizes)] if contrast else None,
+                own_orfs, masks.any(axis=0), color_by=color_by,
+                contrast=orf_contrast if contrast else None,
             )
             coloured |= color_by is not None and bool(track["legend"][1])
             add_orf_table(con, orf_table)

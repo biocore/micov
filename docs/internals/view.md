@@ -112,7 +112,8 @@ Region mode is the only mode that computes anything new:
 
 `read_tsv_with_header(con, path, rename, first_column, all_varchar=False)`
 returns SQL rather than a relation, so callers can embed it in a larger
-statement. It lives in `_io` rather than on `View` so that readers of other
+statement, and the query's columns, renamed, so callers need not read the
+file again to learn them. It lives in `_io` rather than on `View` so that readers of other
 inputs, such as `depth-plot`'s, enforce the same rule.
 
 - **It runs `DESCRIBE` on `read_csv(path, delim='\t', header=true)`** and

@@ -142,15 +142,17 @@ region: plotting multiple regions per genome is not supported.
 computation and the drawing.
 
 - **Usage errors (exit 2), before any file is read:** `--highlight`,
-  `--orf-color-by` or `--orf-contrast` without `--orfs`; both colourings; a
-  `--highlight` that is not `KEY=VALUE` or `KEY~REGEX` (click's
-  `BadParameter`, via `_check_highlights`); an `--output` whose directory
-  does not exist.
+  `--orf-color-by` or `--orf-contrast` without `--orfs`, and both
+  colourings (`_depth_plot.check_orf_options`, which `depth_plots` also
+  calls, for library callers); a `--highlight` that is not `KEY=VALUE` or
+  `KEY~REGEX` (click's `BadParameter`, via `_check_highlights`); an
+  `--output` whose directory does not exist.
 - **File errors (`ValueError`, exit 1), before any genome is computed:** the
   readers' checks (`load_alignment_layer`, `load_depth_features`,
   `load_sample_groups`, `load_orfs`), `intersect_layers`' (no sample or
-  genome in common, more than ten groups, a read or ORF beyond its genome),
-  and `check_orf_mode`'s (colour-by with three or more groups, contrast
+  genome in common, more than ten groups, a read beyond its genome, an ORF
+  on a plotted genome without an `ID` or not spanning a base of it), and
+  `check_orf_mode`'s (colour-by with three or more groups, contrast
   without exactly two). So a refused run writes nothing.
 - **`--breadth` defaults to `--depth`.** `--target-names` names the files and
   titles, through `_io.target_names_query`, the transform `per-sample` uses.

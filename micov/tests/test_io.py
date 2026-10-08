@@ -39,10 +39,12 @@ from micov._io import (
     load_orfs,
     load_sample_groups,
     read_tsv_with_header,
+    start_orf_table,
     target_names_query,
     write_orf_table,
 )
 from micov._miint import connection
+from micov._utils import sql_string
 
 
 class GenomeLengthsTests(unittest.TestCase):
@@ -224,9 +226,12 @@ class ReadTsvWithHeaderTests(unittest.TestCase):
         path = f"{self.temp_dir.name}/in.tsv"
         with open(path, "w") as fp:
             fp.write(text)
-        rel = self.con.sql(
-            read_tsv_with_header(self.con, path, rename, first_column, all_varchar)
-        )
+        query, columns = read_tsv_with_header(self.con, path, rename,
+                                              first_column, all_varchar)
+        rel = self.con.sql(query)
+        # the columns given back are the query's own, so no caller reads the
+        # file a second time to learn them
+        self.assertEqual(columns, rel.columns)
         return rel.columns, rel.fetchall()
 
     def test_leading_columns_are_renamed_and_the_rest_pass_through(self):
@@ -325,8 +330,8 @@ class AlignmentLayerTests(DepthInputTestCase):
     def without(self, column):
         path = f"{self.temp_dir.name}/layer.parquet"
         duckdb.sql(f"""COPY (SELECT * EXCLUDE ({column})
-                              FROM '{DATA}/dp_depth.parquet')
-                       TO '{path}' (FORMAT PARQUET)""")
+                              FROM {sql_string(DATA / "dp_depth.parquet")})
+                       TO {sql_string(path)} (FORMAT PARQUET)""")
         return path
 
     def test_the_fixture_loads_as_a_view(self):
@@ -444,6 +449,12 @@ class DepthFeaturesTests(DepthInputTestCase):
         with self.assertRaisesRegex(ValueError, "G1"):
             self.load(path)
 
+    def test_a_genome_listed_twice_without_a_region_is_accepted(self):
+        """No region, so no panel or file name to collide: lists joined
+        together often repeat a genome, which is still the one genome."""
+        path = self.write("f.tsv", "genome_id\tlength\nG1\t100\nG1\t100\n")
+        self.assertEqual(self.load(path), [("G1", 100, False, None, None)] * 2)
+
     def test_a_headerless_file_is_refused(self):
         path = self.write("f.tsv", "G1\t100\n")
         with self.assertRaisesRegex(ValueError, "genome_id"):
@@ -485,6 +496,15 @@ class SampleGroupsTests(DepthInputTestCase):
         self.assertEqual(rows, [("S1", "Yes")])
         self.assertIn("S2", "\n".join(logged.output))
 
+    def test_a_sample_listed_twice_is_refused_by_name(self):
+        """Listed twice, its reads would count twice in its group, or once in
+        each of two, and nothing on the plot would show it."""
+        path = self.write("m.tsv", "sample_id\tdog\nS1\tYes\nS2\tNo\nS1\tNo\n")
+        with self.assertRaises(ValueError) as raised:
+            self.load(path, "dog")
+        self.assertIn("S1", str(raised.exception))
+        self.assertNotIn("S2", str(raised.exception))
+
 
 class OrfTests(DepthInputTestCase):
     """ORFs are `read_gff` output saved as Parquet."""
@@ -499,7 +519,8 @@ class OrfTests(DepthInputTestCase):
     def gff(self, *lines):
         gff = self.write("in.gff", "##gff-version 3\n" + "".join(lines))
         path = f"{self.temp_dir.name}/orfs.parquet"
-        self.con.sql(f"COPY (FROM read_gff('{gff}')) TO '{path}' (FORMAT PARQUET)")
+        self.con.sql(f"COPY (FROM read_gff({sql_string(gff)})) "
+                     f"TO {sql_string(path)} (FORMAT PARQUET)")
         return path
 
     def test_the_fixture(self):
@@ -527,15 +548,21 @@ class OrfTests(DepthInputTestCase):
         strands = {row[1]: row[6] for row in self.load()}
         self.assertEqual(strands["gc_4"], ".")
 
+    def test_an_unknown_strand_is_unstranded(self):
+        """GFF3's ? (strand unknown) matches no strand the plots draw, so the
+        ORF would vanish from every track; like ., it straddles the genome."""
+        path = self.gff("G1\tt\tCDS\t1\t30\t.\t?\t0\tID=x1\n")
+        self.assertEqual(self.load(path)[0][6], ".")
+
     def test_an_empty_gene_falls_through_to_the_next_label(self):
         path = self.gff("G1\tt\tCDS\t1\t30\t.\t+\t0\tID=x1;gene=;locus_tag=LT1\n")
         self.assertEqual(self.load(path)[0][2], "LT1")
 
-    def test_an_orf_without_an_id_is_refused(self):
-        """The ID is the row's key in the per-ORF table."""
+    def test_an_orf_without_an_id_is_left_to_the_layer_rules(self):
+        """Its genome may never be plotted; `_depth.intersect_layers` refuses
+        it only on a genome that is."""
         path = self.gff("G1\tt\tCDS\t1\t30\t.\t+\t0\tgene=abc\n")
-        with self.assertRaisesRegex(ValueError, "ID"):
-            self.load(path)
+        self.assertEqual(self.load(path), [("G1", None, "abc", "CDS", 1, 31, "+")])
 
     def test_orfs_are_stored_by_genome_then_start(self):
         """`depth-plot` reads one genome's ORFs at a time; stored in order,
@@ -554,8 +581,8 @@ class OrfTests(DepthInputTestCase):
     def test_a_missing_column_is_named(self):
         path = f"{self.temp_dir.name}/orfs.parquet"
         self.con.sql(f"""COPY (SELECT * EXCLUDE (attributes)
-                               FROM '{DATA}/dp_orfs.parquet')
-                         TO '{path}' (FORMAT PARQUET)""")
+                               FROM {sql_string(DATA / "dp_orfs.parquet")})
+                         TO {sql_string(path)} (FORMAT PARQUET)""")
         with self.assertRaisesRegex(ValueError, "attributes"):
             self.load(path)
 
@@ -599,6 +626,7 @@ class WriteOrfTableTests(DepthInputTestCase):
     def write_tables(self, *tables):
         directory = f"{self.temp_dir.name}/o'brien data"
         os.mkdir(directory)
+        start_orf_table(self.con)
         for table in tables:
             add_orf_table(self.con, table)
         return write_orf_table(self.con, f"{directory}/run", "group")
@@ -625,10 +653,18 @@ class WriteOrfTableTests(DepthInputTestCase):
         table = self.table("GC", 0.5)
         directory = f"{self.temp_dir.name}/o'brien data"
         os.mkdir(directory)
+        start_orf_table(self.con)
         add_orf_table(self.con, table)
         table["depth_mean"][:] = 99.0
         path = write_orf_table(self.con, f"{directory}/run", "group")
         self.assertEqual(self.read(path, "depth_mean"), [(0.5,), (0.0,)])
+
+    def test_a_run_starts_the_table_afresh(self):
+        """A second run on one connection writes only its own genomes."""
+        start_orf_table(self.con)
+        add_orf_table(self.con, self.table("GC", 0.5))
+        path = self.write_tables(self.table("GL", 1.0))
+        self.assertEqual({row[0] for row in self.read(path, "genome_id")}, {"GL"})
 
     def test_columns(self):
         path = self.write_tables(self.table("GC", 0.5))

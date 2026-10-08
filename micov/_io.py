@@ -41,8 +41,14 @@ def read_tsv_with_header(con, path, rename, first_column, all_varchar=False):
     Insisting on the name is what makes a missing header detectable at
     all: a data row's first field is not `genome_id`.
 
-    Returns SQL rather than a relation so callers can compose it into a
-    larger statement.
+    Returns
+    -------
+    query : str
+        SQL rather than a relation, so callers can compose it into a larger
+        statement.
+    columns : list of str
+        The query's columns, renamed, so callers need not read the file
+        again to learn them.
     """
     varchar = ", all_varchar=true" if all_varchar else ""
     source = f"read_csv({sql_string(path)}, delim='\t', header=true{varchar})"
@@ -61,7 +67,8 @@ def read_tsv_with_header(con, path, rename, first_column, all_varchar=False):
         f'"{old}" AS {new}' for old, new in zip(columns, rename, strict=False)
     ]
     selected += [f'"{column}"' for column in columns[len(rename) :]]
-    return f"SELECT {', '.join(selected)} FROM {source}"
+    names = [*rename[: len(columns)], *columns[len(rename) :]]
+    return f"SELECT {', '.join(selected)} FROM {source}", names
 
 
 def target_names_query(con, path):
@@ -71,7 +78,7 @@ def target_names_query(con, path):
     spaces and square brackets become underscores, since the name goes into
     file names.
     """
-    names = read_tsv_with_header(
+    names, _ = read_tsv_with_header(
         con, path, [COLUMN_GENOME_ID, COLUMN_NAME], FEATURE_ID_COLUMNS
     )
     # '^.*; ' is greedy, so it consumes through the *final* delimiter and
@@ -365,6 +372,11 @@ def _report_unattributed(con, sam):
     )
 
 
+#: How micov writes Parquet: every Parquet output, so any reader of one reads
+#: them all.
+PARQUET_OPTIONS = "(FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)"
+
+
 def write_coverage_parquet(con, positions, output):
     """Write the frozen two-file parquet pair from a covered-positions source.
 
@@ -387,9 +399,7 @@ def write_coverage_parquet(con, positions, output):
     covered_positions = sql_string(f"{output}.covered_positions.parquet")
     coverage = sql_string(f"{output}.coverage.parquet")
 
-    con.sql(f"""COPY ({positions})
-                TO {covered_positions}
-                    (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
+    con.sql(f"COPY ({positions}) TO {covered_positions} {PARQUET_OPTIONS}")
 
     # `(covered / length) * 100`, not `covered * 100 / length`. The two differ
     # in the last bits and the published coverage values were computed this
@@ -409,8 +419,7 @@ def write_coverage_parquet(con, positions, output):
                      ({COLUMN_COVERED} / {COLUMN_LENGTH}) * 100
                          AS {COLUMN_PERCENT_COVERED}
               FROM covered_amount JOIN genome_lengths USING ({COLUMN_GENOME_ID}))
-        TO {coverage}
-            (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
+        TO {coverage} {PARQUET_OPTIONS}""")
 
 
 #: Columns `depth-plot` reads from `read_alignments` output saved as Parquet.
@@ -495,10 +504,9 @@ def load_depth_features(con, path):
         inverted region, a region beyond the genome, a genome given two
         lengths or two circularities, or a region given twice.
     """
-    query = read_tsv_with_header(
+    query, columns = read_tsv_with_header(
         con, path, [COLUMN_GENOME_ID], FEATURE_ID_COLUMNS, all_varchar=True
     )
-    columns = [row[0] for row in con.sql(f"DESCRIBE {query}").fetchall()]
 
     if COLUMN_LENGTH not in columns:
         raise ValueError(
@@ -586,6 +594,7 @@ def load_depth_features(con, path):
             f"{_examples(rows)}"
         )
     rows = con.sql(f"""SELECT {COLUMN_GENOME_ID} FROM {DEPTH_FEATURES_TABLE}
+                       WHERE {COLUMN_START} IS NOT NULL
                        GROUP BY {COLUMN_GENOME_ID}, {COLUMN_START}, {COLUMN_STOP}
                        HAVING COUNT(*) > 1
                        ORDER BY 1""").fetchall()
@@ -599,11 +608,16 @@ def load_sample_groups(con, path, column):
     Values are read as written: as text, so `Yes` stays `Yes` rather than
     becoming a group named `True`. A sample with no value belongs to no group;
     it is left out and reported.
+
+    Raises
+    ------
+    ValueError
+        Naming every sample listed more than once: its reads would count twice
+        in its group, or once in each of two.
     """
-    query = read_tsv_with_header(
+    query, columns = read_tsv_with_header(
         con, path, [COLUMN_SAMPLE_ID], SAMPLE_ID_COLUMNS, all_varchar=True
     )
-    columns = [row[0] for row in con.sql(f"DESCRIBE {query}").fetchall()]
     if column not in columns[1:]:
         raise ValueError(
             f"'{path}' has no column {column!r}; its columns are "
@@ -613,11 +627,18 @@ def load_sample_groups(con, path, column):
                 SELECT {COLUMN_SAMPLE_ID}, "{column}" AS group_name
                 FROM ({query})""")
     rows = con.sql(f"""SELECT {COLUMN_SAMPLE_ID} FROM {SAMPLE_GROUPS_TABLE}
+                       GROUP BY 1 HAVING count(*) > 1 ORDER BY 1""").fetchall()
+    if rows:
+        raise ValueError(
+            f"'{path}' lists {len(rows)} sample(s) more than once: "
+            f"{_examples(rows)}"
+        )
+    rows = con.sql(f"""SELECT {COLUMN_SAMPLE_ID} FROM {SAMPLE_GROUPS_TABLE}
                        WHERE group_name IS NULL ORDER BY 1""").fetchall()
     if rows:
         logger.warning(
             f"{len(rows)} sample(s) in '{path}' have no value for {column!r} "
-            f"and are left out: {_examples(rows, limit=len(rows))}"
+            f"and are left out: {', '.join(row[0] for row in rows)}"
         )
         con.sql(f"DELETE FROM {SAMPLE_GROUPS_TABLE} WHERE group_name IS NULL")
 
@@ -626,10 +647,14 @@ def load_orfs(con, path):
     """Load ORFs from a `read_gff` Parquet into `ORFS_TABLE`, by genome.
 
     Only `ORF_TYPES` are kept. Coordinates stay as `read_gff` wrote them,
-    already half-open (GFF end + 1). Each ORF needs an `ID`, which keys the
-    per-ORF table; its label is `gene`, else `locus_tag`, else `ID`. An
-    unstranded ORF gets strand `.` rather than NULL, which numpy would
-    otherwise hand back as a masked array.
+    already half-open (GFF end + 1). An ORF's label is `gene`, else
+    `locus_tag`, else `ID`. An unstranded ORF gets strand `.` rather than
+    NULL, which numpy would otherwise hand back as a masked array, and so does
+    one whose strand is unknown (`?`), which would match no strand drawn.
+
+    ORFs are checked -- an `ID` each, and within their genome -- only once
+    the genomes plotted are known (`_depth.intersect_layers`), so a
+    database-wide GFF is fine.
     """
     source = f"read_parquet({sql_string(path)})"
     missing = _missing_columns(con, source, ORF_COLUMNS)
@@ -648,23 +673,13 @@ def load_orfs(con, path):
                        type,
                        position::BIGINT AS {COLUMN_START},
                        stop_position::BIGINT AS {COLUMN_STOP},
-                       coalesce(strand, '.') AS strand,
+                       coalesce(nullif(strand, '?'), '.') AS strand,
                        attributes
                 FROM {source}
                 WHERE type IN ({types})
                 -- read one genome at a time: in order, each read touches
                 -- only that genome's row groups
                 ORDER BY {COLUMN_GENOME_ID}, {COLUMN_START}""")
-    rows = con.sql(f"""SELECT type || ' at ' || {COLUMN_GENOME_ID} || ':'
-                              || {COLUMN_START}
-                       FROM {ORFS_TABLE} WHERE orf_id IS NULL
-                       ORDER BY {COLUMN_GENOME_ID}, {COLUMN_START}""").fetchall()
-    if rows:
-        raise ValueError(
-            f"{len(rows)} ORF(s) in '{path}' have no ID attribute, which keys "
-            f"the per-ORF table: {_examples(rows)}"
-        )
-
 
 
 #: `depth-plot`'s per-ORF table: its columns and their types, in order.
@@ -677,11 +692,22 @@ ORF_STATISTICS_COLUMNS = (
     ("union_breadth", "DOUBLE"), ("contrast", "DOUBLE"),
 )
 
-#: `add_orf_table` collects every genome's per-ORF statistics here.
+#: `start_orf_table` makes, and `add_orf_table` fills, the run's per-ORF
+#: statistics, every genome's.
 ORF_STATISTICS_TABLE = "depth_orf_statistics"
 
 #: `add_orf_table` registers one genome's under this name while it copies them.
 _ORF_GENOME_RELATION = "depth_orf_genome"
+
+
+def start_orf_table(con):
+    """Make `ORF_STATISTICS_TABLE` afresh, empty, for a run.
+
+    Afresh, so a second run on one connection -- a library caller's, or a
+    retry after a failure -- writes only its own genomes' rows.
+    """
+    schema = ", ".join(f'"{name}" {kind}' for name, kind in ORF_STATISTICS_COLUMNS)
+    con.sql(f"CREATE OR REPLACE TEMP TABLE {ORF_STATISTICS_TABLE} ({schema})")
 
 
 def add_orf_table(con, table):
@@ -690,17 +716,20 @@ def add_orf_table(con, table):
     Copied in as each genome is computed, so a run over thousands of genomes
     holds them in DuckDB, which can spill to disk, rather than in memory.
     A missing contrast is NaN in the table and NULL in the file: DuckDB reads
-    a numpy NaN as NULL.
+    a numpy NaN as NULL. Text goes in as numpy strings, not the objects
+    `fetchnumpy` gives: DuckDB takes 20,000 objects a column in 0.2 s, about
+    a second a genome, and strings 20 times faster. None of the text columns
+    is ever missing (`load_orfs`, `_depth.intersect_layers`).
 
     Parameters
     ----------
     table : dict of np.ndarray
         `_depth.genome_statistics`' ORF table: the `ORF_STATISTICS_COLUMNS`.
     """
-    schema = ", ".join(f'"{name}" {kind}' for name, kind in ORF_STATISTICS_COLUMNS)
     casts = ", ".join(f'"{name}"::{kind}' for name, kind in ORF_STATISTICS_COLUMNS)
-    con.sql(f"CREATE TEMP TABLE IF NOT EXISTS {ORF_STATISTICS_TABLE} ({schema})")
-    con.register(_ORF_GENOME_RELATION, table)
+    con.register(_ORF_GENOME_RELATION,
+                 {key: values.astype(str) if values.dtype == object else values
+                  for key, values in table.items()})
     try:
         con.sql(f"""INSERT INTO {ORF_STATISTICS_TABLE}
                     SELECT {casts} FROM {_ORF_GENOME_RELATION}""")
@@ -723,6 +752,5 @@ def write_orf_table(con, output, variable):
         The path written, ``{output}.{variable}.depth-plot-orfs.parquet``.
     """
     path = f"{output}.{variable}.depth-plot-orfs.parquet"
-    con.sql(f"""COPY {ORF_STATISTICS_TABLE} TO {sql_string(path)}
-                    (FORMAT PARQUET, PARQUET_VERSION V2, COMPRESSION zstd)""")
+    con.sql(f"COPY {ORF_STATISTICS_TABLE} TO {sql_string(path)} {PARQUET_OPTIONS}")
     return path

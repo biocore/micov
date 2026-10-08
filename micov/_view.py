@@ -71,10 +71,9 @@ class View:
                              FROM {sql_string(coverage)}""")
             return
 
-        query = read_tsv_with_header(
+        query, columns = read_tsv_with_header(
             self.con, self.features_to_keep, [COLUMN_GENOME_ID], FEATURE_ID_COLUMNS
         )
-        columns = [row[0] for row in self.con.sql(f"DESCRIBE {query}").fetchall()]
 
         if COLUMN_START in columns:
             if COLUMN_STOP not in columns:
@@ -141,7 +140,7 @@ class View:
 
         # constrain the metadata before any feature filtering as the unfocused
         # monte carlo curve assumes access to _any_ sample with _any_ coverage
-        metadata = read_tsv_with_header(
+        metadata, _ = read_tsv_with_header(
             self.con,
             self.sample_metadata,
             [COLUMN_SAMPLE_ID],

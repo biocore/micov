@@ -44,6 +44,7 @@ from typing import ClassVar
 
 import duckdb
 
+from micov._utils import sql_string
 from micov.cli import cli
 from micov.tests._golden import (
     assert_file_set,
@@ -213,6 +214,19 @@ class TestCliSurface(unittest.TestCase):
              "output", "highlight", "orf_color_by", "orf_contrast", "memory",
              "threads"},
         )
+
+    def test_python_m_registers_every_command(self):
+        """`python -m micov.cli` calls `cli()` from the module's
+        ``__main__`` guard, so a command defined after it is missing."""
+        result = subprocess.run(
+            [sys.executable, "-m", "micov.cli", "--help"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        listed = {line.split()[0] for line in
+                  result.stdout.split("Commands:")[1].splitlines() if line.strip()}
+        self.assertEqual(listed, {name for name, command in cli.commands.items()
+                                  if not command.hidden})
 
     def test_binning_still_declares_rank(self):
         """`--rank` is a documented no-op, but removing it is a CLI change."""
@@ -832,9 +846,10 @@ class TestDepthPlotFastTier(MicovCliTestCase):
         nobody = self.tmp / "nobody.tsv"
         nobody.write_text("sample_id\tgroup\nZ1\tcase\n")
         no_sample = self.tmp / "no_sample.parquet"
+        depth = sql_string(DATA / "dp_depth.parquet")
         duckdb.execute(f"""COPY (SELECT * EXCLUDE (sample_id)
-                                 FROM read_parquet('{DATA}/dp_depth.parquet'))
-                           TO '{no_sample}' (FORMAT PARQUET)""")
+                                 FROM read_parquet({depth}))
+                           TO {sql_string(no_sample)} (FORMAT PARQUET)""")
         for why, args, code, message in (
             ("highlight without ORFs",
              [*depth_plot_args(out, orfs=False), "--highlight", "type=CDS"], 2,

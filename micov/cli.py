@@ -12,7 +12,7 @@ from ._constants import (
     COLUMN_START,
     COLUMN_STOP,
 )
-from ._depth_plot import depth_plots, parse_highlight
+from ._depth_plot import check_orf_options, depth_plots, parse_highlight
 from ._io import (
     ALIGNMENT_POSITIONS_TABLE,
     compress_alignments,
@@ -479,10 +479,6 @@ def extract_sample_presence(
     view.sample_presence_absence().write_csv(output, sep="\t", header=True)
 
 
-if __name__ == "__main__":
-    cli()
-
-
 def _check_highlights(ctx, param, values):
     """Refuse a malformed --highlight as a usage error, before any file is read."""
     for value in values:
@@ -591,16 +587,10 @@ def depth_plot(
     threads,
 ):
     """Plot per-base depth and breadth along each genome, by sample group."""
-    if orfs is None:
-        for name, given in (("--highlight", highlight),
-                            ("--orf-color-by", orf_color_by),
-                            ("--orf-contrast", orf_contrast)):
-            if given:
-                raise click.UsageError(f"{name} needs --orfs, the ORFs it marks.")
-    if orf_color_by is not None and orf_contrast:
-        raise click.UsageError(
-            "--orf-color-by and --orf-contrast both colour the ORFs; choose one."
-        )
+    try:
+        check_orf_options(orfs is not None, highlight, orf_color_by, orf_contrast)
+    except ValueError as error:
+        raise click.UsageError(str(error)) from None
     directory = os.path.dirname(os.path.abspath(output))
     if not os.path.isdir(directory):
         raise click.UsageError(
@@ -626,3 +616,7 @@ def depth_plot(
         color_by=orf_color_by,
         contrast=orf_contrast,
     )
+
+
+if __name__ == "__main__":
+    cli()
