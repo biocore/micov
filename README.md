@@ -245,7 +245,78 @@ Each bin is ranked based on the standard deviation of sample hits across groups 
 
 The rankings are saved in the output `stats_by_variance_of_sample_hits.tsv` whereas binning statistics (start and end positions of each bin, number of sample hits per bin, number of read hits per bin.etc) are saved in `stats_bins.tsv`.
 
-### 6. Additional Usage (optional)
+### 6. Depth and Breadth Along Each Genome
+
+`micov depth-plot` draws, along each genome, the per-base **depth** of each
+sample group -- the median, IQR and mean across its samples -- above the
+genome, and its **breadth** below: where any sample covers, and the share of
+samples that do. Depth and breadth may come from different alignments, say
+metatranscriptomic depth over metagenomic breadth.
+
+Each alignment file is the output of miint's `read_alignments` saved as
+Parquet, with a `sample_id` column added (`read_alignments` has none). From
+SAM/BAM files named after their samples, for example:
+
+```python
+import duckdb
+
+con = duckdb.connect(config={"allow_unsigned_extensions": True})
+con.sql("INSTALL miint FROM 'https://ftp.microbio.me/pub/miint'; LOAD miint")
+con.sql(r"""
+    COPY (SELECT regexp_extract(filepath, '([^/]+)\.(sam|bam)$', 1) AS sample_id,
+                 * EXCLUDE (filepath)
+          FROM read_alignments('alignments/*.bam', include_filepath := true))
+    TO 'depth.parquet' (FORMAT PARQUET)""")
+```
+
+A headerless SAM needs its genomes' lengths as well:
+`reference_lengths :=` a table of `genome_id` and `length`.
+
+`--features-to-keep` lists the genomes to plot, with their `length` (which
+alignments do not carry), optionally `is_circular`, and optionally a
+`start`/`stop` region per row, each drawn as a detail panel:
+
+```
+genome_id	length	is_circular	start	stop
+G000154205	4719737	true	1915001	1970001
+G000436435	5348036	false
+```
+
+```bash
+micov depth-plot \
+    --depth depth.parquet \
+    --breadth breadth.parquet \
+    --orfs orfs.parquet \
+    --sample-metadata ./example/metadata/sample_metadata.txt \
+    --sample-metadata-column dog \
+    --features-to-keep features.tsv \
+    --highlight 'product~phage' \
+    --output ./plots/example
+```
+
+For each genome this writes `{output}.{genome_name}.{genome_id}.{column}.depth-plot.png`;
+a ring, `...depth-plot-circular.png`, for a circular genome with up to three
+groups; and `...depth-plot-detail-{start}-{stop}.png` per region. Genomes up
+to 2 Mb fill one row; longer ones wrap into rows of 2 Mb. `--breadth`
+defaults to `--depth`.
+
+`--orfs` is optional: `read_gff` output saved as Parquet. With it the ORFs
+are drawn on the genome, and a per-ORF table of each group's depth and
+breadth is written to `{output}.{column}.depth-plot-orfs.parquet`. ORFs are
+grey unless marked:
+
+* `--highlight KEY=VALUE` or `KEY~REGEX` (repeatable) labels the matching
+  ORFs and shades them through the plot. KEY is `type`, `strand` or a GFF
+  attribute; `=` matches exactly and `~` searches.
+* `--orf-color-by ATTRIBUTE` colours the three commonest values of an
+  attribute (two groups at most).
+* `--orf-contrast` colours each ORF by the second group's depth against the
+  first's, each scaled to its typical ORF (exactly two groups).
+
+Samples and genomes in one input but not another are left out, and named on
+stderr.
+
+### 7. Additional Usage (optional)
 
 Per-genome coverage percentages are a column of `{output}.coverage.parquet`:
 

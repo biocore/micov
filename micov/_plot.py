@@ -23,6 +23,7 @@ from ._cov import (
     slice_positions,
 )
 from ._io import BED_POSITIONS_TABLE
+from ._utils import logger
 
 #: `per_sample_plots`' genome-sorted copy of the positions, sliced per genome.
 PLOT_POSITIONS_TABLE = "plot_positions"
@@ -43,6 +44,31 @@ KS_HEADER = (
     "ks-pvalue",
     "ks-pvalue-bonferroni",
 )
+
+#: Group colours, by a group's index in sorted value order: the first five
+#: Okabe-Ito colours, ordered so that every pair stays distinct under
+#: protanopia and deuteranopia. micov overlays groups, so any two can meet.
+#: Blue and orange come first because most plots have two groups. Groups six
+#: to ten reuse these five dashed (`group_style`). Okabe-Ito's sixth colour,
+#: reddish purple, is too close to bluish green under deuteranopia, and its
+#: seventh, yellow, is too faint on white.
+#: `test_plot.GroupPaletteTests` recomputes the separation; rerun it after
+#: any change here.
+GROUP_COLORS = ("#0072B2", "#E69F00", "#56B4E9", "#D55E00", "#009E73")
+
+#: `coverage_curve` draws at most this many groups: each colour solid, then
+#: dashed. The cap of ten predates the palette; groups past it are reported.
+MAX_GROUPS = 2 * len(GROUP_COLORS)
+
+
+def group_style(index):
+    """Return the colour and line style of the group at `index`.
+
+    `index` is the group's position in sorted value order.
+    """
+    color = GROUP_COLORS[index % len(GROUP_COLORS)]
+    linestyle = "-" if index < len(GROUP_COLORS) else "--"
+    return color, linestyle
 
 
 def _write_delimited(path, header, rows, delimiter=",", compress=False):
@@ -535,9 +561,26 @@ def coverage_curve(
     }
     value_order = np.unique(metadata[variable])
 
+    # Groups past MAX_GROUPS are left out, as they always were: plotting them
+    # would change the published `.ks.csv` rows. They are named rather than
+    # dropped silently, but only those big enough to have been plotted;
+    # otherwise a column with many rare values reports on most genomes.
+    unplotted = [
+        name
+        for name in value_order[MAX_GROUPS:]
+        if np.count_nonzero(metadata[variable] == name) >= min_group_size
+    ]
+    if unplotted:
+        curve = "cumulative" if accumulate else "non-cumulative"
+        logger.warning(
+            f"The {curve} curve of {target_name} ({target}) plots only the "
+            f"first {MAX_GROUPS} values of '{variable}'; not plotted: "
+            f"{', '.join(map(str, unplotted))}"
+        )
+
     max_x = 0
-    for name, color in zip(value_order, range(10), strict=False):
-        color = f"C{color}"
+    for index, name in enumerate(value_order[:MAX_GROUPS]):
+        color, linestyle = group_style(index)
 
         grp = mask_table(metadata, metadata[variable] == name)
 
@@ -565,9 +608,9 @@ def coverage_curve(
 
         if percentile and cur_x is not None:
             cur_x_percentile = cur_x * 100 / (len(cur_x) - 1)
-            ax.plot(cur_x_percentile, cur_y, color=color)
+            ax.plot(cur_x_percentile, cur_y, color=color, linestyle=linestyle)
         else:
-            ax.plot(cur_x, cur_y, color=color)
+            ax.plot(cur_x, cur_y, color=color, linestyle=linestyle)
         curves[name] = cur_y
 
     if not labels:
@@ -707,7 +750,9 @@ def single_sample_position_plot(con, output):
         plt.figure(figsize=(12, 8))
         ax = plt.gca()
 
-        lc = mc.LineCollection(get_covered(coordinates), linewidths=2, alpha=0.7)
+        lc = mc.LineCollection(
+            get_covered(coordinates), color=GROUP_COLORS[0], linewidths=2, alpha=0.7
+        )
         ax.add_collection(lc)
 
         ax.set_xlim(-0.01, 1.0)
@@ -811,7 +856,8 @@ def position_plot(
     # np.unique sorts, so a group's position here is also its color index --
     # which is what joining against a separately sorted color order produced.
     # Groups are then laid out smallest first; the sort is stable, so groups
-    # tied on size stay in value order.
+    # tied on size stay in value order. Past five groups colours repeat, and
+    # the group name under each block is what tells them apart.
     names, counts = np.unique(metadata[variable], return_counts=True)
     max_x = int(counts.sum())
     if sort_by_value:
@@ -852,7 +898,7 @@ def position_plot(
         name = names[row]
         count = int(counts[row])
         grp = mask_table(metadata, metadata[variable] == name)
-        color = f"C{row}"
+        color, _ = group_style(row)
 
         if custom_xorder is not None:
             has_order = np.array([v is not None for v in grp[custom_xorder]])

@@ -1,0 +1,9 @@
+sample_id	group	trio	quad	site
+S1	case	a	a	o'hare
+S2	case	b	b	o'hare
+S3	case	c	c	o'hare
+S4	control	a	d	midway
+S5	control	b	a	midway
+S6	case	c	b	midway
+S7	control	a	c	midway
+S8	control	b	d	midway

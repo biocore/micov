@@ -15,7 +15,7 @@ that never opened.
 
 1. **Check that both Parquet files exist.** If either is missing, raise
    `OSError`.
-2. **Load `metadata`** with `_read_tsv(..., SAMPLE_ID_COLUMNS,
+2. **Load `metadata`** with `_io.read_tsv_with_header(..., SAMPLE_ID_COLUMNS,
    all_varchar=True)`, then `SEMI JOIN` it to `coverage.parquet` on
    `sample_id`. This happens **before** feature filtering on purpose:
    unfocused Monte Carlo needs every sample with any coverage, not only the
@@ -96,9 +96,9 @@ Region mode is the only mode that computes anything new:
 - **`feature_metadata()`** returns `genome_id, start, stop, length,
   region_id`, plus any extra feature columns in region mode.
 - **`feature_names()`** returns `genome_id, name`. Without `--target-names`,
-  the name is the genome id. With it, the names are cleaned as described in
-  [data-formats.md](data-formats.md) and left-joined, falling back to the
-  genome id.
+  the name is the genome id. With it, the names are cleaned by
+  `_io.target_names_query`, as described in [data-formats.md](data-formats.md),
+  and left-joined, falling back to the genome id.
 - **`sample_presence_absence()`** works in region mode only.
   1. It creates `presence_regions` from `feature_metadata`.
   2. It runs `region_presence(selected_positions, presence_regions,
@@ -108,10 +108,13 @@ Region mode is the only mode that computes anything new:
   3. It `PIVOT`s the result into a materialized table. A pivot cannot be a
      view when its columns are not known in advance.
 
-## Header rule (`_read_tsv`)
+## Header rule (`_io.read_tsv_with_header`)
 
-`_read_tsv(path, rename, first_column, all_varchar=False)` returns SQL rather
-than a relation, so callers can embed it in a larger statement.
+`read_tsv_with_header(con, path, rename, first_column, all_varchar=False)`
+returns SQL rather than a relation, so callers can embed it in a larger
+statement, and the query's columns, renamed, so callers need not read the
+file again to learn them. It lives in `_io` rather than on `View` so that readers of other
+inputs, such as `depth-plot`'s, enforce the same rule.
 
 - **It runs `DESCRIBE` on `read_csv(path, delim='\t', header=true)`** and
   raises `ValueError` unless the first column is in `first_column`.
@@ -121,8 +124,8 @@ than a relation, so callers can embed it in a larger statement.
 - **Only the leading columns are renamed.** Any others pass through,
   double-quoted by name.
 
-The rule is pinned by `test_view.test_headerless_*` and the
-`*_must_name_genome_id_first` tests.
+The rule is pinned by `test_view.test_headerless_*`, the
+`*_must_name_genome_id_first` tests, and `test_io.ReadTsvWithHeaderTests`.
 
 ## Table macros need named relations
 

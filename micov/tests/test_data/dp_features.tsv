@@ -1,0 +1,5 @@
+genome_id	length	is_circular
+GC	3000	true
+GL	2000	false
+GX	1000	false
+GB	1000	false

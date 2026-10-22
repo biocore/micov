@@ -4,6 +4,25 @@ micov ChangeLog
 micov 0.0.1-dev
 ---------------
 
+New features:
+
+* **`micov depth-plot` draws per-base depth and breadth along each genome,
+  by sample group.** Depth and breadth may come from different alignment
+  files -- metatranscriptomic depth over metagenomic breadth, say -- each
+  `read_alignments` output saved as Parquet with a `sample_id` column. For
+  each genome in `--features-to-keep`, which gives its `length` and
+  optionally `is_circular` and detail regions, it writes an overview
+  (`{output}.{target_name}.{genome}.{variable}.depth-plot.png`), a ring for
+  a circular genome (`...depth-plot-circular.png`, three groups at most),
+  and a panel per region (`...depth-plot-detail-{start}-{stop}.png`). Depth
+  is each group's per-base median, IQR and mean, on a symlog axis; breadth
+  is where any sample covers and the share of samples that do. With
+  `--orfs`, a `read_gff` Parquet, it draws the ORFs, which `--highlight`,
+  `--orf-color-by` and `--orf-contrast` can mark or colour, and writes a
+  per-ORF table, `{output}.{variable}.depth-plot-orfs.parquet`. This is an
+  addition to the frozen command set, approved by the maintainer; its
+  options and the per-ORF table's columns are frozen from this release.
+
 Backward incompatible changes:
 
 * **The scaled position plot is now `position-plot-scaled.{png,tsv.gz}`,** not
@@ -88,6 +107,20 @@ Other changes:
   nothing, and a file whose reads are all unmapped is reported as having no
   alignments. Released micov was not affected, and neither is `example/`,
   which has no unmapped reads.
+* **Plots use a colour-blind-safe palette.** Groups were coloured with
+  matplotlib's default cycle, whose orange and green -- the second and third
+  groups -- are the same colour to a reader with protanopia. Groups are now
+  drawn in the first five Okabe–Ito colours (blue, orange, sky blue,
+  vermillion, bluish green), which stay distinct in every pair under
+  protanopia and deuteranopia. The first two groups look much as before. In
+  the coverage curves, groups six to ten reuse those five colours as dashed
+  lines; position plots already name each group under its block. Only PNGs
+  change: no data file, coverage value or KS statistic moves.
+* **`micov per-sample` names the metadata groups its coverage curves leave
+  out.** A curve plots at most ten groups, the first ten values in sorted
+  order, and an eleventh was dropped from both the plot and the `.ks.csv`
+  without a word. It is still not plotted, but any such group with enough
+  samples to plot (10) is now named in a warning on stderr.
 * **`micov per-sample` no longer slows down with the number of genomes.** Every
   plotting step filtered the whole positions table for its one genome, four
   times per genome. On a 100-sample study with 9,388 genomes and 29.7M
